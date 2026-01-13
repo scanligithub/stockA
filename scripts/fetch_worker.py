@@ -8,7 +8,6 @@ import time
 import baostock as bs
 from tqdm import tqdm
 
-# === 复用你原始代码中的下载逻辑 ===
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
 def fetch_sina_flow(code, start, end):
@@ -27,10 +26,14 @@ def fetch_sina_flow(code, start, end):
                 'r4_net': 'small_net'
             }
             df.rename(columns=rename_map, inplace=True)
-            # 过滤日期
             mask = (df['date'] >= start) & (df['date'] <= end)
             df = df.loc[mask].copy()
-            if not df.empty: df['code'] = code
+            if not df.empty: 
+                df['code'] = code
+                # 资金流也强制转为数字，防止类似错误
+                for c in ['net_amount', 'main_net', 'super_net', 'large_net', 'medium_net', 'small_net']:
+                    if c in df.columns:
+                        df[c] = pd.to_numeric(df[c], errors='coerce')
             return df
         except: time.sleep(1)
     return pd.DataFrame()
@@ -39,7 +42,6 @@ def process_one(code, start, end):
     # 1. Baostock KLine
     fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST" 
     try:
-        # Baostock 是瓶颈，这里必须串行且加重试，否则容易断连
         rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
         k_data = []
         if rs.error_code == '0':
@@ -48,6 +50,12 @@ def process_one(code, start, end):
         
         if not k_data: return pd.DataFrame(), pd.DataFrame()
         df_k = pd.DataFrame(k_data, columns=fields.split(","))
+        
+        # === 修复点1：K线数据强制转数字 ===
+        numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'turn', 'pctChg', 'peTTM', 'pbMRQ']
+        for col in numeric_cols:
+            if col in df_k.columns:
+                df_k[col] = pd.to_numeric(df_k[col], errors='coerce')
         
         # 获取复权因子
         rs_fac = bs.query_adjust_factor(code, start_date=start, end_date=end)
@@ -58,6 +66,9 @@ def process_one(code, start, end):
         
         if fac_data:
             df_fac = pd.DataFrame(fac_data, columns=["code","date","fore","back","adjustFactor"])
+            # === 修复点2：复权因子强制转数字 ===
+            df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
+            
             df_k = pd.merge(df_k, df_fac[['date','adjustFactor']], on='date', how='left')
             df_k['adjustFactor'] = df_k['adjustFactor'].ffill().fillna(1.0)
         else:
@@ -94,7 +105,6 @@ def main():
 
     print(f"Job {args.index}: Fetching {len(codes)} stocks ({start}~{end})...")
     
-    # 登录 Baostock
     lg = bs.login()
     if lg.error_code != '0':
         print(f"Login failed: {lg.error_msg}")
@@ -102,20 +112,16 @@ def main():
 
     res_k, res_f = [], []
     
-    # === 关键修改：移除线程池，回归串行循环 ===
     for code in tqdm(codes):
         k, f = process_one(code, start, end)
         if not k.empty: res_k.append(k)
         if not f.empty: res_f.append(f)
-        
-        # === 关键修改：增加微小延时，保护 Baostock 连接 ===
         time.sleep(0.02)
             
     bs.logout()
     
     os.makedirs("temp_parts", exist_ok=True)
     
-    # 只有当有数据时才保存，防止保存空 dataframe 报错
     if res_k: 
         pd.concat(res_k).to_parquet(f"temp_parts/kline_part_{args.index}.parquet", index=False)
         print(f"✅ Saved K-Line part {args.index}: {len(res_k)} stocks")
