@@ -12,7 +12,7 @@ HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0
 
 def fetch_sina_flow(code, start, end):
     symbol = code.replace(".", "")
-    url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page=1&num=500&sort=opendate&asc=0&daima={symbol}"
+    url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page=1&num=10000&sort=opendate&asc=0&daima={symbol}"
     for _ in range(3):
         try:
             r = requests.get(url, headers=HEADERS, timeout=5)
