@@ -3,6 +3,10 @@ name: Fetch Full History to Release
 on:
   workflow_dispatch:
 
+# === 关键修复：添加写权限 ===
+permissions:
+  contents: write
+
 jobs:
   # 1. 准备分片矩阵
   prepare:
@@ -38,7 +42,6 @@ jobs:
       
       - name: Fetch Full History
         run: |
-          # --year 9999 触发全量下载模式 (2005 ~ 昨天)
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
             --codes '${{ toJson(matrix.task.codes) }}' \
@@ -89,24 +92,16 @@ jobs:
           
       - name: Merge & Split by Year
         run: |
-          # --year 9999 触发 DuckDB 全量切分逻辑
-          # 同时生成 qc_report.json
           python scripts/merge_and_push.py --mode release --year 9999
           
       - name: Upload to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. 尝试创建名为 'archive' 的 Release
           gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present)" || true
-          
-          # 2. 确保它不是 Draft 状态
           gh release edit archive --draft=false --prerelease=false
-          
-          # 3. 上传文件 (parquet, json, md)
           gh release upload archive output/*.parquet output/*.json output/*.md --clobber
 
-      # === 新增：上传质检报告到 GitHub Artifacts ===
       - name: Upload QC Report to Artifacts
         if: always()
         uses: actions/upload-artifact@v4
