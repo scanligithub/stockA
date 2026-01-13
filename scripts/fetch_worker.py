@@ -6,7 +6,7 @@ import datetime
 import requests
 import time
 import baostock as bs
-import concurrent.futures
+from tqdm import tqdm
 
 # === 复用你原始代码中的下载逻辑 ===
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
@@ -27,6 +27,7 @@ def fetch_sina_flow(code, start, end):
                 'r4_net': 'small_net'
             }
             df.rename(columns=rename_map, inplace=True)
+            # 过滤日期
             mask = (df['date'] >= start) & (df['date'] <= end)
             df = df.loc[mask].copy()
             if not df.empty: df['code'] = code
@@ -36,29 +37,41 @@ def fetch_sina_flow(code, start, end):
 
 def process_one(code, start, end):
     # 1. Baostock KLine
-    # 获取 isST 状态 (tradeStatus=1 正常) - Baostock K线不带 isST，需另想办法或忽略，此处暂时只取基本字段
     fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST" 
-    # 注: Baostock isST 字段支持较新版本，若不支持可移除
     try:
+        # Baostock 是瓶颈，这里必须串行且加重试，否则容易断连
         rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
-        k_data = [rs.get_row_data() for _ in range(1000) if rs.next()] # 简写循环
+        k_data = []
+        if rs.error_code == '0':
+            while rs.next():
+                k_data.append(rs.get_row_data())
+        
         if not k_data: return pd.DataFrame(), pd.DataFrame()
         df_k = pd.DataFrame(k_data, columns=fields.split(","))
         
-        # 获取因子
+        # 获取复权因子
         rs_fac = bs.query_adjust_factor(code, start_date=start, end_date=end)
-        fac_data = [rs_fac.get_row_data() for _ in range(1000) if rs_fac.next()]
+        fac_data = []
+        if rs_fac.error_code == '0':
+            while rs_fac.next():
+                fac_data.append(rs_fac.get_row_data())
+        
         if fac_data:
             df_fac = pd.DataFrame(fac_data, columns=["code","date","fore","back","adjustFactor"])
             df_k = pd.merge(df_k, df_fac[['date','adjustFactor']], on='date', how='left')
             df_k['adjustFactor'] = df_k['adjustFactor'].ffill().fillna(1.0)
         else:
             df_k['adjustFactor'] = 1.0
-    except:
+            
+    except Exception as e:
+        print(f"⚠️ Error fetching {code}: {e}")
         return pd.DataFrame(), pd.DataFrame()
 
     # 2. Sina Flow
-    df_f = fetch_sina_flow(code, start, end)
+    try:
+        df_f = fetch_sina_flow(code, start, end)
+    except:
+        df_f = pd.DataFrame()
     
     return df_k, df_f
 
@@ -81,21 +94,35 @@ def main():
 
     print(f"Job {args.index}: Fetching {len(codes)} stocks ({start}~{end})...")
     
-    bs.login()
+    # 登录 Baostock
+    lg = bs.login()
+    if lg.error_code != '0':
+        print(f"Login failed: {lg.error_msg}")
+        return
+
     res_k, res_f = [], []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {executor.submit(process_one, c, start, end): c for c in codes}
-        for fut in concurrent.futures.as_completed(futures):
-            k, f = fut.result()
-            if not k.empty: res_k.append(k)
-            if not f.empty: res_f.append(f)
+    # === 关键修改：移除线程池，回归串行循环 ===
+    for code in tqdm(codes):
+        k, f = process_one(code, start, end)
+        if not k.empty: res_k.append(k)
+        if not f.empty: res_f.append(f)
+        
+        # === 关键修改：增加微小延时，保护 Baostock 连接 ===
+        time.sleep(0.02)
             
     bs.logout()
     
     os.makedirs("temp_parts", exist_ok=True)
-    if res_k: pd.concat(res_k).to_parquet(f"temp_parts/kline_part_{args.index}.parquet", index=False)
-    if res_f: pd.concat(res_f).to_parquet(f"temp_parts/flow_part_{args.index}.parquet", index=False)
+    
+    # 只有当有数据时才保存，防止保存空 dataframe 报错
+    if res_k: 
+        pd.concat(res_k).to_parquet(f"temp_parts/kline_part_{args.index}.parquet", index=False)
+        print(f"✅ Saved K-Line part {args.index}: {len(res_k)} stocks")
+    
+    if res_f: 
+        pd.concat(res_f).to_parquet(f"temp_parts/flow_part_{args.index}.parquet", index=False)
+        print(f"✅ Saved Flow part {args.index}: {len(res_f)} stocks")
 
 if __name__ == "__main__":
     main()
