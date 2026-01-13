@@ -2,7 +2,6 @@ name: Fetch Full History to Release
 
 on:
   workflow_dispatch:
-    # 纯手动触发，默认下载 2005-至今 的全量数据并按年切分
 
 jobs:
   # 1. 准备分片矩阵
@@ -91,18 +90,29 @@ jobs:
       - name: Merge & Split by Year
         run: |
           # --year 9999 触发 DuckDB 全量切分逻辑
-          # 它会自动生成 stock_kline_2005.parquet ... stock_kline_2025.parquet
+          # 同时生成 qc_report.json
           python scripts/merge_and_push.py --mode release --year 9999
           
       - name: Upload to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 1. 尝试创建名为 'archive' 的 Release (如果已存在则忽略报错)
+          # 1. 尝试创建名为 'archive' 的 Release
           gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present)" || true
           
           # 2. 确保它不是 Draft 状态
           gh release edit archive --draft=false --prerelease=false
           
-          # 3. 上传文件 (使用 --clobber 覆盖同名文件)
-          gh release upload archive output/*.parquet --clobber
+          # 3. 上传文件 (parquet, json, md)
+          gh release upload archive output/*.parquet output/*.json output/*.md --clobber
+
+      # === 新增：上传质检报告到 GitHub Artifacts ===
+      - name: Upload QC Report to Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qc-report-full
+          path: |
+            output/qc_report.json
+            output/qc_summary.md
+          retention-days: 7
