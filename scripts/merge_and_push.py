@@ -1,16 +1,13 @@
 import sys
 import os
-
-# === 关键修复：将项目根目录加入 python path ===
-# 获取当前脚本所在目录 (scripts) 的上一级目录 (项目根目录)
+# 注入根目录路径，防止 ModuleNotFoundError
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pandas as pd
+import duckdb
 import glob
 import datetime
 import argparse
-from utils.cleaner import DataCleaner
-from utils.qc import QualityControl
+import shutil
 from utils.hf_manager import HFManager
 
 def main():
@@ -19,78 +16,97 @@ def main():
     parser.add_argument("--year", type=int, default=0)
     args = parser.parse_args()
     
-    year = args.year if args.year > 0 else datetime.datetime.now().year
+    # 1. 初始化 DuckDB
+    print("🦆 Initializing DuckDB...")
+    con = duckdb.connect()
+    # 限制内存 5GB (Runner 通常有 7GB)
+    con.execute("SET memory_limit='5GB'")
+    # 允许临时文件溢出到磁盘，防止 OOM
+    con.execute("SET temp_directory='duckdb_temp.tmp'")
     
-    # 1. 合并个股分片
-    print("📦 Merging parts...")
+    # 2. 注册视图 (View) - 零内存消耗加载
+    print("📦 Registering views...")
+    
+    # K 线
     k_files = glob.glob("all_artifacts/kline_part_*.parquet")
+    if k_files:
+        # Python list 转 SQL list 字符串
+        files_sql = str(k_files).replace('[', '[').replace(']', ']') # 兼容 list 格式
+        con.execute(f"CREATE OR REPLACE VIEW v_kline AS SELECT * FROM read_parquet({k_files}, union_by_name=True)")
+    else:
+        print("⚠️ No K-Line files found!")
+        con.execute("CREATE OR REPLACE VIEW v_kline AS SELECT * FROM read_parquet([], schema={'date': 'VARCHAR', 'code': 'VARCHAR'})")
+
+    # 资金流
     f_files = glob.glob("all_artifacts/flow_part_*.parquet")
-    
-    df_k = pd.concat([pd.read_parquet(f) for f in k_files]) if k_files else pd.DataFrame()
-    df_f = pd.concat([pd.read_parquet(f) for f in f_files]) if f_files else pd.DataFrame()
-    
-    # 2. 读取板块数据
-    # 板块数据由 fetch_sector 生成，放在 artifacts 里
-    sec_k_file = glob.glob("all_artifacts/sector_kline_full.parquet")
-    sec_c_file = glob.glob("all_artifacts/sector_constituents_latest.parquet")
-    
-    # 注意：fetch_sector 可能没生成文件（如果没配代理），所以要判空
-    df_sec_k = pd.read_parquet(sec_k_file[0]) if sec_k_file else pd.DataFrame()
-    df_sec_c = pd.read_parquet(sec_c_file[0]) if sec_c_file else pd.DataFrame()
-    
-    # 3. 按年份过滤 (对于 Sector，下载的是全量，需要切分)
-    start_date = f"{year}-01-01"
-    end_date = f"{year}-12-31"
-    
-    # 个股数据已经是按年份下载的，不需要再 filter
-    # 仅对 Sector 数据进行年份过滤
-    if not df_sec_k.empty:
-        df_sec_k = df_sec_k[(df_sec_k['date'] >= start_date) & (df_sec_k['date'] <= end_date)]
+    if f_files:
+        con.execute(f"CREATE OR REPLACE VIEW v_flow AS SELECT * FROM read_parquet({f_files}, union_by_name=True)")
+    else:
+        con.execute("CREATE OR REPLACE VIEW v_flow AS SELECT * FROM read_parquet([], schema={'date': 'VARCHAR', 'code': 'VARCHAR'})")
 
-    # 4. 清洗
-    print("🧹 Cleaning data...")
-    cleaner = DataCleaner()
-    df_k = cleaner.clean_stock_kline(df_k)
-    df_f = cleaner.clean_money_flow(df_f)
-    # Sector数据在 fetch 阶段已清洗
-    
-    # 5. 质检
-    print("🔍 Quality check...")
-    qc = QualityControl()
-    qc.check_dataframe(df_k, "stock_kline", ["close", "volume"])
-    qc.check_dataframe(df_f, "money_flow", ["net_amount"])
-    qc.save_report("qc_report.json")
-    with open("qc_summary.md", "w") as f: f.write(qc.get_summary_md())
+    # 板块 K 线
+    sec_k_files = glob.glob("all_artifacts/sector_kline_full.parquet")
+    if sec_k_files:
+        con.execute(f"CREATE OR REPLACE VIEW v_sec_k AS SELECT * FROM read_parquet('{sec_k_files[0]}')")
+    else:
+        con.execute("CREATE OR REPLACE VIEW v_sec_k AS SELECT * FROM read_parquet([], schema={'date': 'VARCHAR', 'code': 'VARCHAR'})")
 
-    # 6. 保存最终文件
+    # 3. 确定要处理的年份
+    if args.year == 9999:
+        # 全量模式：2005 到 去年
+        current_year = datetime.datetime.now().year
+        years = range(2005, current_year)
+    elif args.year > 0:
+        years = [args.year]
+    else:
+        years = [datetime.datetime.now().year]
+
     os.makedirs("output", exist_ok=True)
     targets = {}
-    
-    if not df_k.empty:
-        p = f"output/stock_kline_{year}.parquet"
-        df_k.to_parquet(p, index=False)
-        targets[p] = f"stock_kline_{year}.parquet"
-        print(f"✅ Generated: {p} ({len(df_k)} rows)")
-        
-    if not df_f.empty:
-        p = f"output/stock_money_flow_{year}.parquet"
-        df_f.to_parquet(p, index=False)
-        targets[p] = f"stock_money_flow_{year}.parquet"
-        print(f"✅ Generated: {p} ({len(df_f)} rows)")
-        
-    if not df_sec_k.empty:
-        p = f"output/sector_kline_{year}.parquet"
-        df_sec_k.to_parquet(p, index=False)
-        targets[p] = f"sector_kline_{year}.parquet"
-        print(f"✅ Generated: {p} ({len(df_sec_k)} rows)")
-        
-    if not df_sec_c.empty:
-        p = f"output/sector_constituents_{year}.parquet"
-        df_sec_c.to_parquet(p, index=False)
-        targets[p] = f"sector_constituents_{year}.parquet"
-        print(f"✅ Generated: {p} ({len(df_sec_c)} rows)")
 
-    # 7. 上传 HF
+    # 4. 循环切分 (DuckDB SQL)
+    for y in years:
+        print(f"🔪 Processing Year {y}...")
+        start_date = f"{y}-01-01"
+        end_date = f"{y}-12-31"
+        
+        # 定义输出任务
+        tasks = [
+            ("v_kline", f"stock_kline_{y}.parquet"),
+            ("v_flow", f"stock_money_flow_{y}.parquet"),
+            ("v_sec_k", f"sector_kline_{y}.parquet")
+        ]
+        
+        for view_name, out_name in tasks:
+            out_path = f"output/{out_name}"
+            
+            # 使用 COPY 命令进行流式写入 + ZSTD 压缩
+            query = f"""
+            COPY (
+                SELECT * FROM {view_name}
+                WHERE date >= '{start_date}' AND date <= '{end_date}'
+                ORDER BY code, date
+            ) TO '{out_path}' (FORMAT 'PARQUET', COMPRESSION 'ZSTD');
+            """
+            
+            try:
+                con.execute(query)
+                # 只有生成了文件且不为空才记录
+                if os.path.exists(out_path):
+                    targets[out_path] = out_name
+            except Exception as e:
+                print(f"❌ Error dumping {out_name}: {e}")
+
+        # 板块成分股 (处理方式：复制最新快照)
+        sec_c_files = glob.glob("all_artifacts/sector_constituents_latest.parquet")
+        if sec_c_files:
+            c_out = f"output/sector_constituents_{y}.parquet"
+            try:
+                shutil.copy(sec_c_files[0], c_out)
+                targets[c_out] = f"sector_constituents_{y}.parquet"
+            except: pass
+
+    # 5. 上传 HF
     if args.mode == "hf":
         if os.getenv("HF_TOKEN"):
             print("🚀 Uploading to HuggingFace...")
@@ -98,7 +114,7 @@ def main():
             for local, remote in targets.items():
                 hf.upload_file(local, remote)
         else:
-            print("⚠️ HF_TOKEN not found, skipping upload.")
+            print("⚠️ HF_TOKEN not set, skipping upload.")
 
 if __name__ == "__main__":
     main()
