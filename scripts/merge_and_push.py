@@ -7,7 +7,7 @@ import glob
 import datetime
 import argparse
 import shutil
-import pandas as pd # 用于质检
+import pandas as pd
 from utils.hf_manager import HFManager
 from utils.qc import QualityControl
 
@@ -32,7 +32,6 @@ def main():
     f_files = glob.glob("all_artifacts/flow_part_*.parquet")
     sec_k_files = glob.glob("all_artifacts/sector_kline_full.parquet")
     
-    # 注册逻辑同前...
     if k_files:
         con.execute(f"CREATE OR REPLACE VIEW v_kline AS SELECT * FROM read_parquet({k_files}, union_by_name=True)")
     else:
@@ -66,7 +65,7 @@ def main():
         start_date = f"{y}-01-01"
         end_date = f"{y}-12-31"
         
-        # 定义任务
+        # 定义任务: (视图名, 输出文件名, 质检关键列)
         tasks = [
             ("v_kline", f"stock_kline_{y}.parquet", ["close", "volume"]),
             ("v_flow", f"stock_money_flow_{y}.parquet", ["net_amount"]),
@@ -88,9 +87,9 @@ def main():
             try:
                 con.execute(query)
                 
-                # === 新增：单文件质检 ===
+                # === 单文件质检 ===
                 if os.path.exists(out_path):
-                    # 读回 Pandas 进行轻量级质检 (一年数据通常 <200MB，内存安全)
+                    # 读回 Pandas 进行轻量级质检
                     df_check = pd.read_parquet(out_path)
                     if not df_check.empty:
                         qc.check_dataframe(df_check, out_name, check_cols)
@@ -98,7 +97,7 @@ def main():
             except Exception as e:
                 print(f"❌ Error processing {out_name}: {e}")
 
-        # 板块成分股 (快照)
+        # 板块成分股 (复制快照)
         sec_c_files = glob.glob("all_artifacts/sector_constituents_latest.parquet")
         if sec_c_files:
             c_out = f"output/sector_constituents_{y}.parquet"
@@ -113,13 +112,13 @@ def main():
     with open("output/qc_summary.md", "w") as f:
         f.write(qc.get_summary_md())
         
-    # 将报告也加入上传列表
     targets["output/qc_report.json"] = "qc_report.json"
     targets["output/qc_summary.md"] = "qc_summary.md"
 
-    # 7. 上传 HF
+    # 7. 上传 HF (仅在 HF 模式下)
     if args.mode == "hf":
         if os.getenv("HF_TOKEN"):
+            print("🚀 Uploading to HuggingFace...")
             hf = HFManager(os.getenv("HF_TOKEN"), os.getenv("HF_REPO"))
             for local, remote in targets.items():
                 hf.upload_file(local, remote)
