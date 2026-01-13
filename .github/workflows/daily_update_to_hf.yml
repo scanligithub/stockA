@@ -1,0 +1,96 @@
+name: Daily Update to HF (Matrix)
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+jobs:
+  # 1. 生成分片矩阵
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install baostock pandas
+      - id: set-matrix
+        run: |
+          python scripts/prepare_matrix.py
+          echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
+
+  # 2. 个股并行下载
+  fetch-stocks:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        task: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Fetch Part
+        run: |
+          python scripts/fetch_worker.py \
+            --index ${{ matrix.task.index }} \
+            --codes '${{ toJson(matrix.task.codes) }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: parts-${{ matrix.task.index }}
+          path: temp_parts/*.parquet
+          retention-days: 1
+
+  # 3. 板块下载 (单机)
+  fetch-sectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Fetch Sectors
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+        run: python scripts/fetch_sector.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sector-parts
+          path: temp_parts/*.parquet
+
+  # 4. 汇总与上传
+  finalize:
+    needs: [fetch-stocks, fetch-sectors]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -r requirements.txt
+      
+      - name: Download All
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*'
+          merge-multiple: true
+          path: all_artifacts
+          
+      - name: Merge & Push to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ secrets.HF_REPO }}
+        run: python scripts/merge_and_push.py --mode hf
+        
+      - name: Publish QC
+        if: always()
+        run: cat qc_summary.md >> $GITHUB_STEP_SUMMARY
