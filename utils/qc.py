@@ -36,7 +36,11 @@ class QualityControl:
         self.report["stats"][name] = stats
 
     def save_report(self, path):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        # === 修复：只有当路径包含目录时才创建文件夹 ===
+        dir_name = os.path.dirname(path)
+        if dir_name:
+            os.makedirs(dir_name, exist_ok=True)
+            
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(self.report, f, indent=2)
             
