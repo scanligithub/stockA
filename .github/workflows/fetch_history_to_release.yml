@@ -1,0 +1,109 @@
+name: Fetch History to Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      year_list:
+        description: 'Years (e.g. [2020, 2021])'
+        default: '[2023]'
+        required: true
+
+jobs:
+  # 1. 准备矩阵 (历史年份也需要分片，否则单机跑不完)
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install baostock pandas
+      - id: set-matrix
+        run: |
+          python scripts/prepare_matrix.py
+          echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
+
+  # 2. 矩阵下载 (外层按年循环，内层按Code分片)
+  fetch-history:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        year: ${{ fromJson(inputs.year_list) }}
+        task: ${{ fromJson(needs.prepare.outputs.matrix) }}
+      fail-fast: false
+      max-parallel: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      
+      - name: Fetch Part ${{ matrix.year }}
+        run: |
+          python scripts/fetch_worker.py \
+            --index ${{ matrix.task.index }} \
+            --codes '${{ toJson(matrix.task.codes) }}' \
+            --year ${{ matrix.year }}
+            
+      - uses: actions/upload-artifact@v4
+        with:
+          name: history-${{ matrix.year }}-part-${{ matrix.task.index }}
+          path: temp_parts/*.parquet
+          retention-days: 1
+
+  # 3. 板块下载 (历史)
+  fetch-sectors:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Fetch Sectors
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+        run: python scripts/fetch_sector.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sector-parts
+          path: temp_parts/*.parquet
+
+  # 4. 按年汇总发布
+  finalize-year:
+    needs: [fetch-history, fetch-sectors]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        year: ${{ fromJson(inputs.year_list) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -r requirements.txt
+      
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_artifacts
+          
+      - name: Organize Artifacts
+        run: |
+          # 将 history-2023-part-* 移动到 flat folder 供脚本读取
+          find all_artifacts -name "history-${{ matrix.year }}-part-*" -exec cp {} all_artifacts/ \;
+          # 将 sector 也移动过来
+          find all_artifacts -name "sector-parts" -exec cp -r {}/* all_artifacts/ \;
+          
+      - name: Merge & Upload Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python scripts/merge_and_push.py --mode release --year ${{ matrix.year }}
+          gh release upload archive output/*.parquet --clobber
