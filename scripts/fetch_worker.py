@@ -30,7 +30,6 @@ def fetch_sina_flow(code, start, end):
             df = df.loc[mask].copy()
             if not df.empty: 
                 df['code'] = code
-                # 资金流也强制转为数字，防止类似错误
                 for c in ['net_amount', 'main_net', 'super_net', 'large_net', 'medium_net', 'small_net']:
                     if c in df.columns:
                         df[c] = pd.to_numeric(df[c], errors='coerce')
@@ -51,13 +50,12 @@ def process_one(code, start, end):
         if not k_data: return pd.DataFrame(), pd.DataFrame()
         df_k = pd.DataFrame(k_data, columns=fields.split(","))
         
-        # === 修复点1：K线数据强制转数字 ===
         numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'turn', 'pctChg', 'peTTM', 'pbMRQ']
         for col in numeric_cols:
             if col in df_k.columns:
                 df_k[col] = pd.to_numeric(df_k[col], errors='coerce')
         
-        # 获取复权因子
+        # 复权因子
         rs_fac = bs.query_adjust_factor(code, start_date=start, end_date=end)
         fac_data = []
         if rs_fac.error_code == '0':
@@ -66,9 +64,7 @@ def process_one(code, start, end):
         
         if fac_data:
             df_fac = pd.DataFrame(fac_data, columns=["code","date","fore","back","adjustFactor"])
-            # === 修复点2：复权因子强制转数字 ===
             df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
-            
             df_k = pd.merge(df_k, df_fac[['date','adjustFactor']], on='date', how='left')
             df_k['adjustFactor'] = df_k['adjustFactor'].ffill().fillna(1.0)
         else:
@@ -90,15 +86,22 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", type=int, required=True)
     parser.add_argument("--codes", type=str, required=True)
-    parser.add_argument("--year", type=int, default=0, help="Year to fetch (0 for YTD)")
+    parser.add_argument("--year", type=int, default=0, help="Year to fetch (0=YTD, 9999=Full History)")
     args = parser.parse_args()
     
     codes = json.loads(args.codes)
     
-    if args.year > 0:
+    # === 关键修改：日期逻辑 ===
+    if args.year == 9999:
+        # 全量模式：2005-01-01 到 昨天
+        start = "2005-01-01"
+        end = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+    elif args.year > 0:
+        # 指定年份
         start = f"{args.year}-01-01"
         end = f"{args.year}-12-31"
     else:
+        # 默认模式 (YTD)
         curr_year = datetime.datetime.now().year
         start = f"{curr_year}-01-01"
         end = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
