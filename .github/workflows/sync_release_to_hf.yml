@@ -1,0 +1,43 @@
+name: Sync Release to HF
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_pattern:
+        description: 'Pattern (e.g. stock_kline_2020.parquet)'
+        default: 'stock_kline_*.parquet'
+        required: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install huggingface_hub
+      
+      - name: Download from Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir downloads
+          gh release download archive -D downloads --pattern "${{ inputs.file_pattern }}"
+          
+      - name: Upload to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ secrets.HF_REPO }}
+        run: |
+          python -c "
+          from huggingface_hub import HfApi
+          import os
+          import glob
+          
+          api = HfApi(token=os.getenv('HF_TOKEN'))
+          files = glob.glob('downloads/*.parquet')
+          for f in files:
+              print(f'Uploading {f}...')
+              api.upload_file(path_or_fileobj=f, path_in_repo=os.path.basename(f), repo_id=os.getenv('HF_REPO'), repo_type='dataset')
+          "
