@@ -16,17 +16,25 @@ class QualityControl:
             self.report["errors"].append(f"{name} is empty!")
             return
 
+        # === 新增：时间范围统计 ===
+        if "date" in df.columns:
+            stats["start_date"] = str(df["date"].min())
+            stats["end_date"] = str(df["date"].max())
+
+        # === 个股/板块数量统计 ===
         if "code" in df.columns:
-            stats["unique_codes"] = df["code"].nunique()
+            stats["unique_codes"] = int(df["code"].nunique())
             
         # 异常检测
         if "high" in df.columns and "low" in df.columns:
-            err = df[df['high'] < df['low']].shape[0]
-            if err > 0: stats["anomalies"]["high_lt_low"] = err
+            # 过滤掉高低价为0的情况（可能是停牌）
+            mask = (df['high'] > 0) & (df['low'] > 0) & (df['high'] < df['low'])
+            err = df[mask].shape[0]
+            if err > 0: stats["anomalies"]["high_lt_low"] = int(err)
             
         if "volume" in df.columns:
             err = df[df['volume'] < 0].shape[0]
-            if err > 0: stats["anomalies"]["neg_volume"] = err
+            if err > 0: stats["anomalies"]["neg_volume"] = int(err)
 
         for col in critical_cols:
             if col in df.columns:
@@ -36,7 +44,6 @@ class QualityControl:
         self.report["stats"][name] = stats
 
     def save_report(self, path):
-        # === 修复：只有当路径包含目录时才创建文件夹 ===
         dir_name = os.path.dirname(path)
         if dir_name:
             os.makedirs(dir_name, exist_ok=True)
@@ -52,8 +59,12 @@ class QualityControl:
         md += "## 📈 Statistics\n"
         for name, stat in self.report["stats"].items():
             md += f"### {name}\n"
-            md += f"- Rows: {stat['total_rows']:,}\n"
-            if "unique_codes" in stat: md += f"- Objects: {stat['unique_codes']:,}\n"
+            md += f"- **Rows**: {stat['total_rows']:,}\n"
+            if "unique_codes" in stat: 
+                md += f"- **Codes**: {stat['unique_codes']:,}\n"
+            if "start_date" in stat:
+                md += f"- **Range**: {stat['start_date']} ~ {stat['end_date']}\n"
+            
             if stat['anomalies']:
                 md += "- **Anomalies**:\n"
                 for k, v in stat['anomalies'].items(): md += f"  - {k}: {v}\n"
