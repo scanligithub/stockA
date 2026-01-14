@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       file_pattern:
-        description: 'Pattern (e.g. stock_kline_2020.parquet)'
-        default: 'stock_kline_*.parquet'
+        description: 'Pattern (e.g. *)'
+        default: '*'
         required: true
 
 jobs:
@@ -23,7 +23,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir downloads
-          gh release download archive -D downloads --pattern "${{ inputs.file_pattern }}"
+          # 下载符合 pattern 的文件到 downloads 目录
+          gh release download archive -D downloads --pattern "${{ inputs.file_pattern }}" || echo "⚠️ No files found or Release missing"
           
       - name: Upload to HF
         env:
@@ -35,9 +36,32 @@ jobs:
           import os
           import glob
           
+          # 1. 获取所有下载的文件
+          files = glob.glob('downloads/*')
+          print(f'📂 Found {len(files)} files in downloads folder.')
+          
+          if len(files) == 0:
+              print('⚠️ No files found to upload. Please check if the Release exists and contains files.')
+              exit(0) # 优雅退出
+          
           api = HfApi(token=os.getenv('HF_TOKEN'))
-          files = glob.glob('downloads/*.parquet')
+          repo = os.getenv('HF_REPO')
+          
+          print(f'🎯 Target Repo: {repo}')
+          
           for f in files:
-              print(f'Uploading {f}...')
-              api.upload_file(path_or_fileobj=f, path_in_repo=os.path.basename(f), repo_id=os.getenv('HF_REPO'), repo_type='dataset')
+              if os.path.isfile(f):
+                  fname = os.path.basename(f)
+                  print(f'🚀 Uploading {fname} ...')
+                  try:
+                      api.upload_file(
+                          path_or_fileobj=f, 
+                          path_in_repo=fname, 
+                          repo_id=repo, 
+                          repo_type='dataset'
+                      )
+                      print(f'✅ {fname} success.')
+                  except Exception as e:
+                      print(f'❌ Failed to upload {fname}: {e}')
+                      # 不退出，继续传下一个
           "
