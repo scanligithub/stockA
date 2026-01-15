@@ -9,25 +9,33 @@ NUM_CHUNKS = 20
 
 def main():
     bs.login()
-    # 尝试回溯最近交易日获取列表
     data = []
     for i in range(10):
         d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
         rs = bs.query_all_stock(day=d)
-        while rs.next(): data.append(rs.get_row_data())
-        if data: break
+        if rs.error_code == '0':
+            while rs.next():
+                row = rs.get_row_data()
+                # 过滤：code_name 不能为空
+                if row[2] and row[2].strip():
+                    data.append(row)
+            if data: break
     bs.logout()
     
-    # 过滤指数
-    all_codes = [x[0] for x in data if x[0].startswith(('sh.', 'sz.', 'bj.'))]
-    random.shuffle(all_codes) # 随机打乱
-    print(f"Total stocks: {len(all_codes)}, shuffling...")
+    if not data: return
 
-    chunk_size = math.ceil(len(all_codes) / NUM_CHUNKS)
+    # 过滤：只留 A 股
+    valid_codes = [x[0] for x in data if x[0].startswith(('sh.', 'sz.', 'bj.'))]
+    random.shuffle(valid_codes)
+    
+    print(f"Total valid stocks: {len(valid_codes)}")
+
+    chunk_size = math.ceil(len(valid_codes) / NUM_CHUNKS)
     chunks = []
     for i in range(NUM_CHUNKS):
-        subset = all_codes[i * chunk_size : (i + 1) * chunk_size]
-        if subset: chunks.append({"index": i, "codes": subset})
+        subset = valid_codes[i * chunk_size : (i + 1) * chunk_size]
+        if subset:
+            chunks.append({"index": i, "codes": subset})
 
     with open("stock_matrix.json", "w") as f:
         json.dump(chunks, f)
