@@ -2,7 +2,7 @@ name: Daily Update to HF (Matrix)
 
 on:
   schedule:
-    - cron: '0 18 * * *' # UTC 18:00 = 北京时间凌晨 02:00
+    - cron: '0 17 * * *' # UTC 18:00 = 北京时间凌晨 01:00
   workflow_dispatch:     # 允许手动点击测试
 
 permissions:
