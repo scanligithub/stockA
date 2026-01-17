@@ -33,11 +33,11 @@ def fetch_sina_flow(code, start, end):
                 'r4_net': 'small_net'
             }
             df.rename(columns=rename_map, inplace=True)
+            # 根据请求的 start/end 过滤
             mask = (df['date'] >= start) & (df['date'] <= end)
             df = df.loc[mask].copy()
             if not df.empty: 
                 df['code'] = code
-            # 注意：这里返回原始 DF，清洗工作统一在 main 中做
             return df
         except: time.sleep(1)
     return pd.DataFrame()
@@ -89,17 +89,20 @@ def main():
     
     codes = json.loads(args.codes)
     
-    # 日期逻辑
+    # === 极简逻辑：直接请求到最新时间 (2099年) ===
+    # 这样无论是时区差异还是服务器结算延迟，只要数据源有了，就一定能下到
+    future_date = "2099-12-31"
+    
     if args.year == 9999:
-        start = "2005-01-01"
-        end = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        # 全量模式
+        start, end = "2005-01-01", future_date
     elif args.year > 0:
-        start = f"{args.year}-01-01"
-        end = f"{args.year}-12-31"
+        # 历史指定年份模式 (保持精确)
+        start, end = f"{args.year}-01-01", f"{args.year}-12-31"
     else:
+        # 默认模式 (YTD)：从今年1月1日到最新
         curr_year = datetime.datetime.now().year
-        start = f"{curr_year}-01-01"
-        end = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+        start, end = f"{curr_year}-01-01", future_date
 
     print(f"Job {args.index}: Fetching {len(codes)} stocks ({start}~{end})...")
     
@@ -109,8 +112,6 @@ def main():
         return
 
     res_k, res_f = [], []
-    
-    # 初始化清洗器
     cleaner = DataCleaner()
     
     for code in tqdm(codes):
@@ -123,17 +124,14 @@ def main():
     
     os.makedirs("temp_parts", exist_ok=True)
     
-    # === 关键修改：保存前进行清洗和瘦身 ===
     if res_k: 
         df_k_all = pd.concat(res_k)
-        # 清洗K线 (类型转换 + 去重)
         df_k_all = cleaner.clean_stock_kline(df_k_all)
         df_k_all.to_parquet(f"temp_parts/kline_part_{args.index}.parquet", index=False)
         print(f"✅ Saved K-Line part {args.index}: {len(df_k_all)} rows")
     
     if res_f: 
         df_f_all = pd.concat(res_f)
-        # 清洗资金流 (剔除冗余字段 + 单位转万元 + float32)
         df_f_all = cleaner.clean_money_flow(df_f_all)
         df_f_all.to_parquet(f"temp_parts/flow_part_{args.index}.parquet", index=False)
         print(f"✅ Saved Flow part {args.index}: {len(df_f_all)} rows")
