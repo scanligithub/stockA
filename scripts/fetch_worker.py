@@ -61,12 +61,46 @@ def process_one(code, start, end):
             while rs_fac.next():
                 fac_data.append(rs_fac.get_row_data())
         
-        if fac_data and not df_k.empty:
-            df_fac = pd.DataFrame(fac_data, columns=["code","date","fore","back","adjustFactor"])
-            df_k = pd.merge(df_k, df_fac[['date','adjustFactor']], on='date', how='left')
-            df_k['adjustFactor'] = df_k['adjustFactor'].ffill().fillna(1.0)
-        elif not df_k.empty:
-            df_k['adjustFactor'] = 1.0
+# ================= 替换掉旧的 rs_fac 获取逻辑 =================
+        if not df_k.empty:
+            # 1. 【强力修复】不论抓取哪一年的K线，永远拉取从古至今所有的复权因子事件
+            # 这确保了即使今年没分红，也能准确继承去年的因子
+            rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
+            fac_data = []
+            if rs_fac.error_code == '0':
+                while rs_fac.next():
+                    fac_data.append(rs_fac.get_row_data())
+            
+            if fac_data:
+                # 2. 转换为 DataFrame
+                df_fac = pd.DataFrame(fac_data, columns=["code","date","fore","back","adjustFactor"])
+                
+                # 3. 核心修复：使用 merge_asof 进行"时间轴最近邻"匹配
+                # 必须先将 date 转换为 datetime 并排序
+                df_k['date'] = pd.to_datetime(df_k['date'])
+                df_fac['date'] = pd.to_datetime(df_fac['date'])
+                df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
+                
+                df_k = df_k.sort_values('date')
+                df_fac = df_fac.sort_values('date')
+                
+                # merge_asof 会为 df_k 的每一天，去 df_fac 中寻找 <= 该天的最近一条因子记录
+                df_k = pd.merge_asof(
+                    df_k, 
+                    df_fac[['date', 'adjustFactor']], 
+                    on='date', 
+                    direction='backward'
+                )
+                
+                # 转换回字符串，方便后续 cleaner 处理
+                df_k['date'] = df_k['date'].dt.strftime('%Y-%m-%d')
+                
+                # 如果某天早于历史上第一次分红，会匹配不到，填充为 1.0 (原始价格)
+                df_k['adjustFactor'] = df_k['adjustFactor'].fillna(1.0)
+            else:
+                # 如果这只股票历史上从来没分红过，全是 1.0
+                df_k['adjustFactor'] = 1.0
+        # ==============================================================
             
     except Exception as e:
         print(f"⚠️ Error fetching {code}: {e}")
