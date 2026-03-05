@@ -43,7 +43,7 @@ def fetch_sina_flow(code, start, end):
     return pd.DataFrame()
 
 def process_one(code, start, end):
-    # 1. Baostock KLine
+    # 1. Baostock KLine (坚决使用 adjustflag="3" 获取不复权真实价格)
     fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST" 
     try:
         rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
@@ -54,17 +54,9 @@ def process_one(code, start, end):
         
         df_k = pd.DataFrame(k_data, columns=fields.split(",")) if k_data else pd.DataFrame()
         
-        # 复权因子
-        rs_fac = bs.query_adjust_factor(code, start_date=start, end_date=end)
-        fac_data = []
-        if rs_fac.error_code == '0':
-            while rs_fac.next():
-                fac_data.append(rs_fac.get_row_data())
-        
-# ================= 替换掉旧的 rs_fac 获取逻辑 =================
+        # ================= 修复后的复权因子获取逻辑 =================
         if not df_k.empty:
-            # 1. 【强力修复】不论抓取哪一年的K线，永远拉取从古至今所有的复权因子事件
-            # 这确保了即使今年没分红，也能准确继承去年的因子
+            # 获取从古至今所有的复权因子事件
             rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
             fac_data = []
             if rs_fac.error_code == '0':
@@ -72,11 +64,14 @@ def process_one(code, start, end):
                     fac_data.append(rs_fac.get_row_data())
             
             if fac_data:
-                # 2. 转换为 DataFrame
-                df_fac = pd.DataFrame(fac_data, columns=["code","date","fore","back","adjustFactor"])
+                # Baostock返回的5列: 股票代码, 除权除息日, 前复权因子, 后复权因子, 单次除权比例
+                # 我们将最后一列命名为 ratio，避免与我们要用的目标字段混淆
+                df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
                 
-                # 3. 核心修复：使用 merge_asof 进行"时间轴最近邻"匹配
-                # 必须先将 date 转换为 datetime 并排序
+                # 【核心修复】：提取 back（后复权因子），并将其重命名为 adjustFactor 供系统使用
+                df_fac = df_fac[['date', 'back']].rename(columns={'back': 'adjustFactor'})
+                
+                # 时间轴对齐准备
                 df_k['date'] = pd.to_datetime(df_k['date'])
                 df_fac['date'] = pd.to_datetime(df_fac['date'])
                 df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
@@ -84,21 +79,20 @@ def process_one(code, start, end):
                 df_k = df_k.sort_values('date')
                 df_fac = df_fac.sort_values('date')
                 
-                # merge_asof 会为 df_k 的每一天，去 df_fac 中寻找 <= 该天的最近一条因子记录
+                # 寻找小于等于当前 K 线日期的最新一条后复权因子记录
                 df_k = pd.merge_asof(
                     df_k, 
-                    df_fac[['date', 'adjustFactor']], 
+                    df_fac, 
                     on='date', 
                     direction='backward'
                 )
                 
-                # 转换回字符串，方便后续 cleaner 处理
                 df_k['date'] = df_k['date'].dt.strftime('%Y-%m-%d')
                 
-                # 如果某天早于历史上第一次分红，会匹配不到，填充为 1.0 (原始价格)
+                # 完美自洽：如果某天早于历史上第一次分红（即上市初期），后复权因子本身就是 1.0
                 df_k['adjustFactor'] = df_k['adjustFactor'].fillna(1.0)
             else:
-                # 如果这只股票历史上从来没分红过，全是 1.0
+                # 历史上从来没分红过，后复权因子全是 1.0
                 df_k['adjustFactor'] = 1.0
         # ==============================================================
             
@@ -123,18 +117,14 @@ def main():
     
     codes = json.loads(args.codes)
     
-    # === 极简逻辑：直接请求到最新时间 (2099年) ===
-    # 这样无论是时区差异还是服务器结算延迟，只要数据源有了，就一定能下到
+    # 极简逻辑：直接请求到最新时间 (2099年)
     future_date = "2099-12-31"
     
     if args.year == 9999:
-        # 全量模式
         start, end = "2005-01-01", future_date
     elif args.year > 0:
-        # 历史指定年份模式 (保持精确)
         start, end = f"{args.year}-01-01", f"{args.year}-12-31"
     else:
-        # 默认模式 (YTD)：从今年1月1日到最新
         curr_year = datetime.datetime.now().year
         start, end = f"{curr_year}-01-01", future_date
 
