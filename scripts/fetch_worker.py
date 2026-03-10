@@ -20,7 +20,7 @@ HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0
 def fetch_sina_flow(code, start, end):
     """
     通过 Cloudflare Worker 代理拉取新浪资金流数据，
-    避免单机高频请求暴露真实 IP 导致被新浪永久封禁。
+    避免单机高频请求暴露真实 IP 导致被新浪封禁。
     """
     symbol = code.replace(".", "")
     raw_url = os.getenv("CF_WORKER_URL", "").strip()
@@ -144,16 +144,26 @@ def run_stock_pipeline(year=0):
 
     # ================= 主进程获取全量股票列表 =================
     bs.login()
-    d = datetime.datetime.now().strftime("%Y-%m-%d")
-    rs = bs.query_all_stock(day=d)
     data = []
-    if rs.error_code == '0':
-        while rs.next(): data.append(rs.get_row_data())
+    
+    # 【修复】：回溯前 10 天，寻找最近一个交易日的股票列表，防止周末或节假日返回空列表
+    for i in range(10):
+        d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+        rs = bs.query_all_stock(day=d)
+        if rs.error_code == '0' and len(rs.data) > 0:
+            while rs.next():
+                data.append(rs.get_row_data())
+            break
+            
     bs.logout()
 
     # 过滤：仅保留沪深北 A 股，且股票名称不为空
     valid_codes = [x[0] for x in data if x[0].startswith(('sh.', 'sz.', 'bj.')) and x[2].strip()]
     print(f"Total {len(valid_codes)} valid A-shares to fetch (from {start} to {end}).")
+
+    if not valid_codes:
+        print("⚠️ 未获取到股票列表，请检查网络或 Baostock 服务状态！")
+        return
 
     tasks = [(code, start, end) for code in valid_codes]
     res_k, res_f = [], []
@@ -162,7 +172,7 @@ def run_stock_pipeline(year=0):
     os.makedirs("temp_parts", exist_ok=True)
     
     # ================= 启动进程池高并发抓取 =================
-    # 在阿里云创空间 2vCPU 或 4vCPU 环境中，5-8个并发是极限，再高会触发平台断网或高频封禁
+    # 限制最大 5 个并发避免触发反爬机制断流
     with ProcessPoolExecutor(max_workers=5) as executor:
         for k, f in tqdm(executor.map(process_single_stock, tasks), total=len(tasks), desc="Fetching Stocks"):
             if not k.empty: res_k.append(k)
