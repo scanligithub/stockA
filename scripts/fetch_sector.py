@@ -50,7 +50,7 @@ def main():
     print(f"Fetching {len(df_list)} sectors...")
 
     all_k, all_c = [], []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = {executor.submit(fetch_one_sector, row): row['name'] for _, row in df_list.iterrows()}
         for fut in tqdm(concurrent.futures.as_completed(futures), total=len(futures)):
             k, c = fut.result()
