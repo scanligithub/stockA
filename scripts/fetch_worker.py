@@ -18,15 +18,18 @@ from utils.cleaner import DataCleaner
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
+# 【黑魔法】：用于强制屏蔽 Baostock 内部写死的霸屏 print 输出
+class HiddenPrints:
+    def __enter__(self):
+        self._original_stdout = sys.stdout
+        sys.stdout = open(os.devnull, 'w')
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        sys.stdout.close()
+        sys.stdout = self._original_stdout
+
 def fetch_sina_flow(code, start, end, cf_url):
-    """
-    通过传入的 cf_url 代理拉取新浪资金流数据
-    """
     symbol = code.replace(".", "")
-    
-    # 显式判断传入的代理 URL 是否有效
     if not cf_url:
-        print(f"⚠️ 跳过 {code} 资金流: 代理未配置")
         return pd.DataFrame()
         
     worker_url = f"https://{cf_url}" if not cf_url.startswith("http") else cf_url
@@ -69,16 +72,16 @@ def fetch_sina_flow(code, start, end, cf_url):
     return pd.DataFrame()
 
 def process_single_stock(args):
-    """
-    单进程执行函数。接收包含 4 个元素的元组。
-    """
-    # 【核心修复】：显式接收 cf_url 参数
     code, start, end, cf_url = args
-    bs.login()
     
     df_k = pd.DataFrame()
     df_f = pd.DataFrame()
     
+    # 1. ================= 获取 Baostock 数据 =================
+    # 使用屏蔽器包住 login 和 logout，控制台再也不会出现 login success!
+    with HiddenPrints():
+        bs.login()
+        
     fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST" 
     try:
         rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
@@ -113,14 +116,17 @@ def process_single_stock(args):
     except Exception as e:
         pass 
 
+    # 抓取完数据，立刻光速登出，不给 Baostock 超时报错的机会
+    with HiddenPrints():
+        bs.logout()
+
+    # 2. ================= 获取新浪资金流 =================
     try:
-        # 【核心修复】：将 cf_url 传递给新浪资金流抓取函数
         df_f = fetch_sina_flow(code, start, end, cf_url)
     except:
         pass
 
-    bs.logout()
-    time.sleep(0.1) 
+    time.sleep(0.05) 
     return df_k, df_f
 
 def run_stock_pipeline(year=0, codes=None, part_index="all"):
@@ -140,7 +146,8 @@ def run_stock_pipeline(year=0, codes=None, part_index="all"):
         valid_codes = codes
         print(f"Job {part_index}: Using {len(valid_codes)} provided codes (from {start} to {end}).")
     else:
-        bs.login()
+        with HiddenPrints():
+            bs.login()
         data = []
         for i in range(10):
             d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
@@ -149,7 +156,8 @@ def run_stock_pipeline(year=0, codes=None, part_index="all"):
                 while rs.next():
                     data.append(rs.get_row_data())
                 break
-        bs.logout()
+        with HiddenPrints():
+            bs.logout()
 
         valid_codes = [x[0] for x in data if x[0].startswith(('sh.', 'sz.', 'bj.')) and x[2].strip()]
         print(f"Total {len(valid_codes)} valid A-shares to fetch (from {start} to {end}).")
@@ -158,10 +166,7 @@ def run_stock_pipeline(year=0, codes=None, part_index="all"):
         print("⚠️ 未获取到股票列表，跳过任务！")
         return
 
-    # 【核心修复】：在主进程统一获取一次环境变量，并打包塞入每一个任务元组中
     cf_url_global = os.getenv("CF_WORKER_URL", "").strip()
-    if not cf_url_global:
-        print("⚠️ 警告：主进程未检测到 CF_WORKER_URL 环境变量！资金流抓取将被跳过。")
         
     tasks = [(code, start, end, cf_url_global) for code in valid_codes]
     res_k, res_f = [], []
@@ -169,6 +174,7 @@ def run_stock_pipeline(year=0, codes=None, part_index="all"):
 
     os.makedirs("temp_parts", exist_ok=True)
     
+    # 使用多进程加速，且保持进度条丝滑纯净
     with ProcessPoolExecutor(max_workers=5) as executor:
         for k, f in tqdm(executor.map(process_single_stock, tasks), total=len(tasks), desc=f"Job {part_index}"):
             if not k.empty: res_k.append(k)
