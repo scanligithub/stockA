@@ -1,77 +1,110 @@
 import sys
 import os
-# 1. 解决导入路径问题
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import argparse
-import json
-import pandas as pd
 import datetime
 import requests
 import time
 import baostock as bs
+import pandas as pd
+from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
-# 2. 引入清洗器
+
+# 确保能正确导入 utils 下的模块
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.append(BASE_DIR)
+
 from utils.cleaner import DataCleaner
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
 def fetch_sina_flow(code, start, end):
+    """
+    通过 Cloudflare Worker 代理拉取新浪资金流数据，
+    避免单机高频请求暴露真实 IP 导致被新浪永久封禁。
+    """
     symbol = code.replace(".", "")
-    # num=10000 确保拉取全量历史
-    url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page=1&num=10000&sort=opendate&asc=0&daima={symbol}"
-    for _ in range(3):
+    raw_url = os.getenv("CF_WORKER_URL", "").strip()
+    
+    # 如果未配置代理环境变量，直接放弃拉取以保护本机 IP
+    if not raw_url:
+        print(f"⚠️ 跳过 {code} 资金流: CF_WORKER_URL 未配置")
+        return pd.DataFrame()
+        
+    worker_url = f"https://{raw_url}" if not raw_url.startswith("http") else raw_url
+    
+    # 组装透传给 JS 代理的参数，加上 target_func 路由
+    params = {
+        "target_func": "sina_flow",
+        "page": 1,
+        "num": 10000,
+        "sort": "opendate",
+        "asc": 0,
+        "daima": symbol
+    }
+    
+    for attempt in range(3):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
-            data = r.json()
-            if not data: return pd.DataFrame()
-            df = pd.DataFrame(data)
-            rename_map = {
-                'opendate': 'date', 'netamount': 'net_amount',
-                'r0_net': 'main_net', 'r1_net': 'super_net',
-                'r2_net': 'large_net', 'r3_net': 'medium_net',
-                'r4_net': 'small_net'
-            }
-            df.rename(columns=rename_map, inplace=True)
-            # 根据请求的 start/end 过滤
-            mask = (df['date'] >= start) & (df['date'] <= end)
-            df = df.loc[mask].copy()
-            if not df.empty: 
-                df['code'] = code
-            return df
-        except: time.sleep(1)
+            r = requests.get(worker_url, params=params, headers=HEADERS, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                if not data: return pd.DataFrame()
+                
+                df = pd.DataFrame(data)
+                rename_map = {
+                    'opendate': 'date', 'netamount': 'net_amount',
+                    'r0_net': 'main_net', 'r1_net': 'super_net',
+                    'r2_net': 'large_net', 'r3_net': 'medium_net',
+                    'r4_net': 'small_net'
+                }
+                df.rename(columns=rename_map, inplace=True)
+                
+                # 按照请求的时间窗口过滤数据
+                mask = (df['date'] >= start) & (df['date'] <= end)
+                df = df.loc[mask].copy()
+                if not df.empty: 
+                    df['code'] = code
+                return df
+            else:
+                time.sleep(1)
+        except Exception as e:
+            time.sleep(1)
+            
     return pd.DataFrame()
 
-def process_one(code, start, end):
-    # 1. Baostock KLine (坚决使用 adjustflag="3" 获取不复权真实价格)
+def process_single_stock(args):
+    """
+    单进程执行函数。
+    核心原则：必须在进程内部独立执行 bs.login() 和 logout()，
+    否则底层 C 语言 socket 在多进程下会引发段错误(Segfault)或数据串位。
+    """
+    code, start, end = args
+    bs.login()
+    
+    df_k = pd.DataFrame()
+    df_f = pd.DataFrame()
+    
+    # 1. 获取 Baostock 日线数据与复权因子
     fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST" 
     try:
+        # 获取不复权真实价格 (adjustflag="3")
         rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
         k_data = []
         if rs.error_code == '0':
-            while rs.next():
-                k_data.append(rs.get_row_data())
-        
+            while rs.next(): k_data.append(rs.get_row_data())
+            
         df_k = pd.DataFrame(k_data, columns=fields.split(",")) if k_data else pd.DataFrame()
         
-        # ================= 修复后的复权因子获取逻辑 =================
+        # 匹配后复权因子
         if not df_k.empty:
-            # 获取从古至今所有的复权因子事件
             rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
             fac_data = []
             if rs_fac.error_code == '0':
-                while rs_fac.next():
-                    fac_data.append(rs_fac.get_row_data())
+                while rs_fac.next(): fac_data.append(rs_fac.get_row_data())
             
             if fac_data:
-                # Baostock返回的5列: 股票代码, 除权除息日, 前复权因子, 后复权因子, 单次除权比例
-                # 我们将最后一列命名为 ratio，避免与我们要用的目标字段混淆
                 df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
-                
-                # 【核心修复】：提取 back（后复权因子），并将其重命名为 adjustFactor 供系统使用
                 df_fac = df_fac[['date', 'back']].rename(columns={'back': 'adjustFactor'})
                 
-                # 时间轴对齐准备
                 df_k['date'] = pd.to_datetime(df_k['date'])
                 df_fac['date'] = pd.to_datetime(df_fac['date'])
                 df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
@@ -79,86 +112,76 @@ def process_one(code, start, end):
                 df_k = df_k.sort_values('date')
                 df_fac = df_fac.sort_values('date')
                 
-                # 寻找小于等于当前 K 线日期的最新一条后复权因子记录
-                df_k = pd.merge_asof(
-                    df_k, 
-                    df_fac, 
-                    on='date', 
-                    direction='backward'
-                )
-                
+                # asof 聚合复权因子
+                df_k = pd.merge_asof(df_k, df_fac, on='date', direction='backward')
                 df_k['date'] = df_k['date'].dt.strftime('%Y-%m-%d')
-                
-                # 完美自洽：如果某天早于历史上第一次分红（即上市初期），后复权因子本身就是 1.0
                 df_k['adjustFactor'] = df_k['adjustFactor'].fillna(1.0)
             else:
-                # 历史上从来没分红过，后复权因子全是 1.0
                 df_k['adjustFactor'] = 1.0
-        # ==============================================================
-            
     except Exception as e:
-        print(f"⚠️ Error fetching {code}: {e}")
-        df_k = pd.DataFrame()
+        pass # 容错处理，由上层清理时过滤
 
-    # 2. Sina Flow
+    # 2. 获取新浪资金流
     try:
         df_f = fetch_sina_flow(code, start, end)
     except:
-        df_f = pd.DataFrame()
-    
+        pass
+
+    bs.logout()
+    time.sleep(0.1)  # 给目标服务器留点喘息时间，防止被判定为 DDoS
     return df_k, df_f
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--index", type=int, required=True)
-    parser.add_argument("--codes", type=str, required=True)
-    parser.add_argument("--year", type=int, default=0, help="Year to fetch (0=YTD, 9999=Full History)")
-    args = parser.parse_args()
-    
-    codes = json.loads(args.codes)
-    
-    # 极简逻辑：直接请求到最新时间 (2099年)
+def run_stock_pipeline(year=0):
     future_date = "2099-12-31"
     
-    if args.year == 9999:
+    if year == 9999:
         start, end = "2005-01-01", future_date
-    elif args.year > 0:
-        start, end = f"{args.year}-01-01", f"{args.year}-12-31"
+    elif year > 0:
+        start, end = f"{year}-01-01", f"{year}-12-31"
     else:
         curr_year = datetime.datetime.now().year
         start, end = f"{curr_year}-01-01", future_date
 
-    print(f"Job {args.index}: Fetching {len(codes)} stocks ({start}~{end})...")
-    
-    lg = bs.login()
-    if lg.error_code != '0':
-        print(f"Login failed: {lg.error_msg}")
-        return
+    # ================= 主进程获取全量股票列表 =================
+    bs.login()
+    d = datetime.datetime.now().strftime("%Y-%m-%d")
+    rs = bs.query_all_stock(day=d)
+    data = []
+    if rs.error_code == '0':
+        while rs.next(): data.append(rs.get_row_data())
+    bs.logout()
 
+    # 过滤：仅保留沪深北 A 股，且股票名称不为空
+    valid_codes = [x[0] for x in data if x[0].startswith(('sh.', 'sz.', 'bj.')) and x[2].strip()]
+    print(f"Total {len(valid_codes)} valid A-shares to fetch (from {start} to {end}).")
+
+    tasks = [(code, start, end) for code in valid_codes]
     res_k, res_f = [], []
     cleaner = DataCleaner()
-    
-    for code in tqdm(codes):
-        k, f = process_one(code, start, end)
-        if not k.empty: res_k.append(k)
-        if not f.empty: res_f.append(f)
-        time.sleep(0.02)
-            
-    bs.logout()
-    
+
     os.makedirs("temp_parts", exist_ok=True)
     
+    # ================= 启动进程池高并发抓取 =================
+    # 在阿里云创空间 2vCPU 或 4vCPU 环境中，5-8个并发是极限，再高会触发平台断网或高频封禁
+    with ProcessPoolExecutor(max_workers=5) as executor:
+        for k, f in tqdm(executor.map(process_single_stock, tasks), total=len(tasks), desc="Fetching Stocks"):
+            if not k.empty: res_k.append(k)
+            if not f.empty: res_f.append(f)
+
+    # ================= 清洗并保存至本地临时目录 =================
     if res_k: 
+        print(f"Cleaning {len(res_k)} K-Line parts...")
         df_k_all = pd.concat(res_k)
         df_k_all = cleaner.clean_stock_kline(df_k_all)
-        df_k_all.to_parquet(f"temp_parts/kline_part_{args.index}.parquet", index=False)
-        print(f"✅ Saved K-Line part {args.index}: {len(df_k_all)} rows")
+        df_k_all.to_parquet("temp_parts/kline_part_all.parquet", index=False)
+        print(f"✅ Saved K-Line total: {len(df_k_all)} rows.")
     
     if res_f: 
+        print(f"Cleaning {len(res_f)} Money Flow parts...")
         df_f_all = pd.concat(res_f)
         df_f_all = cleaner.clean_money_flow(df_f_all)
-        df_f_all.to_parquet(f"temp_parts/flow_part_{args.index}.parquet", index=False)
-        print(f"✅ Saved Flow part {args.index}: {len(df_f_all)} rows")
+        df_f_all.to_parquet("temp_parts/flow_part_all.parquet", index=False)
+        print(f"✅ Saved Flow total: {len(df_f_all)} rows.")
 
 if __name__ == "__main__":
-    main()
+    run_stock_pipeline()
