@@ -10,7 +10,6 @@ import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 
-# 确保能正确导入 utils 下的模块
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.append(BASE_DIR)
@@ -19,19 +18,18 @@ from utils.cleaner import DataCleaner
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
-def fetch_sina_flow(code, start, end):
+def fetch_sina_flow(code, start, end, cf_url):
     """
-    通过 Cloudflare Worker 代理拉取新浪资金流数据，
-    避免单机高频请求暴露真实 IP 导致被新浪封禁。
+    通过传入的 cf_url 代理拉取新浪资金流数据
     """
     symbol = code.replace(".", "")
-    raw_url = os.getenv("CF_WORKER_URL", "").strip()
     
-    if not raw_url:
-        print(f"⚠️ 跳过 {code} 资金流: CF_WORKER_URL 未配置")
+    # 显式判断传入的代理 URL 是否有效
+    if not cf_url:
+        print(f"⚠️ 跳过 {code} 资金流: 代理未配置")
         return pd.DataFrame()
         
-    worker_url = f"https://{raw_url}" if not raw_url.startswith("http") else raw_url
+    worker_url = f"https://{cf_url}" if not cf_url.startswith("http") else cf_url
     
     params = {
         "target_func": "sina_flow",
@@ -72,9 +70,10 @@ def fetch_sina_flow(code, start, end):
 
 def process_single_stock(args):
     """
-    单进程执行函数。必须在进程内部独立执行 bs.login() 和 logout()
+    单进程执行函数。接收包含 4 个元素的元组。
     """
-    code, start, end = args
+    # 【核心修复】：显式接收 cf_url 参数
+    code, start, end, cf_url = args
     bs.login()
     
     df_k = pd.DataFrame()
@@ -115,7 +114,8 @@ def process_single_stock(args):
         pass 
 
     try:
-        df_f = fetch_sina_flow(code, start, end)
+        # 【核心修复】：将 cf_url 传递给新浪资金流抓取函数
+        df_f = fetch_sina_flow(code, start, end, cf_url)
     except:
         pass
 
@@ -124,11 +124,6 @@ def process_single_stock(args):
     return df_k, df_f
 
 def run_stock_pipeline(year=0, codes=None, part_index="all"):
-    """
-    year: 获取年份 (0=YTD, 9999=全量)
-    codes: 外部传入的股票代码列表 (如果不传，则内部自动获取全量A股)
-    part_index: 分片索引 (用于保存文件名)
-    """
     future_date = "2099-12-31"
     
     if year == 9999:
@@ -141,7 +136,6 @@ def run_stock_pipeline(year=0, codes=None, part_index="all"):
 
     valid_codes = []
 
-    # === 判断是 GHA 传入了分片代码，还是魔塔模式需自行获取全量 ===
     if codes is not None and len(codes) > 0:
         valid_codes = codes
         print(f"Job {part_index}: Using {len(valid_codes)} provided codes (from {start} to {end}).")
@@ -164,7 +158,12 @@ def run_stock_pipeline(year=0, codes=None, part_index="all"):
         print("⚠️ 未获取到股票列表，跳过任务！")
         return
 
-    tasks = [(code, start, end) for code in valid_codes]
+    # 【核心修复】：在主进程统一获取一次环境变量，并打包塞入每一个任务元组中
+    cf_url_global = os.getenv("CF_WORKER_URL", "").strip()
+    if not cf_url_global:
+        print("⚠️ 警告：主进程未检测到 CF_WORKER_URL 环境变量！资金流抓取将被跳过。")
+        
+    tasks = [(code, start, end, cf_url_global) for code in valid_codes]
     res_k, res_f = [], []
     cleaner = DataCleaner()
 
@@ -188,14 +187,11 @@ def run_stock_pipeline(year=0, codes=None, part_index="all"):
         print(f"✅ Job {part_index} Saved Flow: {len(df_f_all)} rows.")
 
 if __name__ == "__main__":
-    # 解析 GHA 传进来的命令行参数
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", type=str, default="all", help="分片索引")
     parser.add_argument("--codes", type=str, default=None, help="JSON格式的股票代码列表")
     parser.add_argument("--year", type=int, default=0, help="年份 (0=YTD, 9999=全部)")
     args = parser.parse_args()
     
-    # 将 JSON 字符串解析为 List
     codes_list = json.loads(args.codes) if args.codes else None
-    
     run_stock_pipeline(year=args.year, codes=codes_list, part_index=args.index)
