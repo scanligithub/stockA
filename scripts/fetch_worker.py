@@ -3,6 +3,8 @@ import os
 import datetime
 import requests
 import time
+import json
+import argparse
 import baostock as bs
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
@@ -25,14 +27,12 @@ def fetch_sina_flow(code, start, end):
     symbol = code.replace(".", "")
     raw_url = os.getenv("CF_WORKER_URL", "").strip()
     
-    # 如果未配置代理环境变量，直接放弃拉取以保护本机 IP
     if not raw_url:
         print(f"⚠️ 跳过 {code} 资金流: CF_WORKER_URL 未配置")
         return pd.DataFrame()
         
     worker_url = f"https://{raw_url}" if not raw_url.startswith("http") else raw_url
     
-    # 组装透传给 JS 代理的参数，加上 target_func 路由
     params = {
         "target_func": "sina_flow",
         "page": 1,
@@ -58,7 +58,6 @@ def fetch_sina_flow(code, start, end):
                 }
                 df.rename(columns=rename_map, inplace=True)
                 
-                # 按照请求的时间窗口过滤数据
                 mask = (df['date'] >= start) & (df['date'] <= end)
                 df = df.loc[mask].copy()
                 if not df.empty: 
@@ -73,9 +72,7 @@ def fetch_sina_flow(code, start, end):
 
 def process_single_stock(args):
     """
-    单进程执行函数。
-    核心原则：必须在进程内部独立执行 bs.login() 和 logout()，
-    否则底层 C 语言 socket 在多进程下会引发段错误(Segfault)或数据串位。
+    单进程执行函数。必须在进程内部独立执行 bs.login() 和 logout()
     """
     code, start, end = args
     bs.login()
@@ -83,10 +80,8 @@ def process_single_stock(args):
     df_k = pd.DataFrame()
     df_f = pd.DataFrame()
     
-    # 1. 获取 Baostock 日线数据与复权因子
     fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST" 
     try:
-        # 获取不复权真实价格 (adjustflag="3")
         rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
         k_data = []
         if rs.error_code == '0':
@@ -94,7 +89,6 @@ def process_single_stock(args):
             
         df_k = pd.DataFrame(k_data, columns=fields.split(",")) if k_data else pd.DataFrame()
         
-        # 匹配后复权因子
         if not df_k.empty:
             rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
             fac_data = []
@@ -112,26 +106,29 @@ def process_single_stock(args):
                 df_k = df_k.sort_values('date')
                 df_fac = df_fac.sort_values('date')
                 
-                # asof 聚合复权因子
                 df_k = pd.merge_asof(df_k, df_fac, on='date', direction='backward')
                 df_k['date'] = df_k['date'].dt.strftime('%Y-%m-%d')
                 df_k['adjustFactor'] = df_k['adjustFactor'].fillna(1.0)
             else:
                 df_k['adjustFactor'] = 1.0
     except Exception as e:
-        pass # 容错处理，由上层清理时过滤
+        pass 
 
-    # 2. 获取新浪资金流
     try:
         df_f = fetch_sina_flow(code, start, end)
     except:
         pass
 
     bs.logout()
-    time.sleep(0.1)  # 给目标服务器留点喘息时间，防止被判定为 DDoS
+    time.sleep(0.1) 
     return df_k, df_f
 
-def run_stock_pipeline(year=0):
+def run_stock_pipeline(year=0, codes=None, part_index="all"):
+    """
+    year: 获取年份 (0=YTD, 9999=全量)
+    codes: 外部传入的股票代码列表 (如果不传，则内部自动获取全量A股)
+    part_index: 分片索引 (用于保存文件名)
+    """
     future_date = "2099-12-31"
     
     if year == 9999:
@@ -142,27 +139,29 @@ def run_stock_pipeline(year=0):
         curr_year = datetime.datetime.now().year
         start, end = f"{curr_year}-01-01", future_date
 
-    # ================= 主进程获取全量股票列表 =================
-    bs.login()
-    data = []
-    
-    # 【修复】：回溯前 10 天，寻找最近一个交易日的股票列表，防止周末或节假日返回空列表
-    for i in range(10):
-        d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
-        rs = bs.query_all_stock(day=d)
-        if rs.error_code == '0' and len(rs.data) > 0:
-            while rs.next():
-                data.append(rs.get_row_data())
-            break
-            
-    bs.logout()
+    valid_codes = []
 
-    # 过滤：仅保留沪深北 A 股，且股票名称不为空
-    valid_codes = [x[0] for x in data if x[0].startswith(('sh.', 'sz.', 'bj.')) and x[2].strip()]
-    print(f"Total {len(valid_codes)} valid A-shares to fetch (from {start} to {end}).")
+    # === 判断是 GHA 传入了分片代码，还是魔塔模式需自行获取全量 ===
+    if codes is not None and len(codes) > 0:
+        valid_codes = codes
+        print(f"Job {part_index}: Using {len(valid_codes)} provided codes (from {start} to {end}).")
+    else:
+        bs.login()
+        data = []
+        for i in range(10):
+            d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
+            rs = bs.query_all_stock(day=d)
+            if rs.error_code == '0' and len(rs.data) > 0:
+                while rs.next():
+                    data.append(rs.get_row_data())
+                break
+        bs.logout()
+
+        valid_codes = [x[0] for x in data if x[0].startswith(('sh.', 'sz.', 'bj.')) and x[2].strip()]
+        print(f"Total {len(valid_codes)} valid A-shares to fetch (from {start} to {end}).")
 
     if not valid_codes:
-        print("⚠️ 未获取到股票列表，请检查网络或 Baostock 服务状态！")
+        print("⚠️ 未获取到股票列表，跳过任务！")
         return
 
     tasks = [(code, start, end) for code in valid_codes]
@@ -171,27 +170,32 @@ def run_stock_pipeline(year=0):
 
     os.makedirs("temp_parts", exist_ok=True)
     
-    # ================= 启动进程池高并发抓取 =================
-    # 限制最大 5 个并发避免触发反爬机制断流
     with ProcessPoolExecutor(max_workers=5) as executor:
-        for k, f in tqdm(executor.map(process_single_stock, tasks), total=len(tasks), desc="Fetching Stocks"):
+        for k, f in tqdm(executor.map(process_single_stock, tasks), total=len(tasks), desc=f"Job {part_index}"):
             if not k.empty: res_k.append(k)
             if not f.empty: res_f.append(f)
 
-    # ================= 清洗并保存至本地临时目录 =================
     if res_k: 
-        print(f"Cleaning {len(res_k)} K-Line parts...")
         df_k_all = pd.concat(res_k)
         df_k_all = cleaner.clean_stock_kline(df_k_all)
-        df_k_all.to_parquet("temp_parts/kline_part_all.parquet", index=False)
-        print(f"✅ Saved K-Line total: {len(df_k_all)} rows.")
+        df_k_all.to_parquet(f"temp_parts/kline_part_{part_index}.parquet", index=False)
+        print(f"✅ Job {part_index} Saved K-Line: {len(df_k_all)} rows.")
     
     if res_f: 
-        print(f"Cleaning {len(res_f)} Money Flow parts...")
         df_f_all = pd.concat(res_f)
         df_f_all = cleaner.clean_money_flow(df_f_all)
-        df_f_all.to_parquet("temp_parts/flow_part_all.parquet", index=False)
-        print(f"✅ Saved Flow total: {len(df_f_all)} rows.")
+        df_f_all.to_parquet(f"temp_parts/flow_part_{part_index}.parquet", index=False)
+        print(f"✅ Job {part_index} Saved Flow: {len(df_f_all)} rows.")
 
 if __name__ == "__main__":
-    run_stock_pipeline()
+    # 解析 GHA 传进来的命令行参数
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--index", type=str, default="all", help="分片索引")
+    parser.add_argument("--codes", type=str, default=None, help="JSON格式的股票代码列表")
+    parser.add_argument("--year", type=int, default=0, help="年份 (0=YTD, 9999=全部)")
+    args = parser.parse_args()
+    
+    # 将 JSON 字符串解析为 List
+    codes_list = json.loads(args.codes) if args.codes else None
+    
+    run_stock_pipeline(year=args.year, codes=codes_list, part_index=args.index)
