@@ -5,6 +5,7 @@ import requests
 import time
 import json
 import argparse
+import random
 import baostock as bs
 import pandas as pd
 from concurrent.futures import ProcessPoolExecutor
@@ -18,7 +19,6 @@ from utils.cleaner import DataCleaner
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
 
-# 【黑魔法】：用于强制屏蔽 Baostock 内部写死的霸屏 print 输出
 class HiddenPrints:
     def __enter__(self):
         self._original_stdout = sys.stdout
@@ -65,9 +65,9 @@ def fetch_sina_flow(code, start, end, cf_url):
                     df['code'] = code
                 return df
             else:
-                time.sleep(1)
+                time.sleep(1.5)
         except Exception as e:
-            time.sleep(1)
+            time.sleep(2)
             
     return pd.DataFrame()
 
@@ -76,60 +76,69 @@ def process_single_stock(args):
     
     df_k = pd.DataFrame()
     df_f = pd.DataFrame()
-    
-    # 1. ================= 获取 Baostock 数据 =================
-    # 使用屏蔽器包住 login 和 logout，控制台再也不会出现 login success!
-    with HiddenPrints():
-        bs.login()
-        
     fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST" 
-    try:
-        rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
-        k_data = []
-        if rs.error_code == '0':
-            while rs.next(): k_data.append(rs.get_row_data())
+    
+    # ================= 核心修复1：Baostock 增加显式重试，剔除 pass =================
+    for attempt in range(3):
+        try:
+            with HiddenPrints():
+                bs.login()
+                
+            rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
+            k_data = []
             
-        df_k = pd.DataFrame(k_data, columns=fields.split(",")) if k_data else pd.DataFrame()
-        
-        if not df_k.empty:
-            rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
-            fac_data = []
-            if rs_fac.error_code == '0':
-                while rs_fac.next(): fac_data.append(rs_fac.get_row_data())
-            
-            if fac_data:
-                df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
-                df_fac = df_fac[['date', 'back']].rename(columns={'back': 'adjustFactor'})
+            if rs.error_code == '0':
+                while rs.next(): k_data.append(rs.get_row_data())
+                df_k = pd.DataFrame(k_data, columns=fields.split(",")) if k_data else pd.DataFrame()
                 
-                df_k['date'] = pd.to_datetime(df_k['date'])
-                df_fac['date'] = pd.to_datetime(df_fac['date'])
-                df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
+                if not df_k.empty:
+                    rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
+                    fac_data = []
+                    if rs_fac.error_code == '0':
+                        while rs_fac.next(): fac_data.append(rs_fac.get_row_data())
+                    
+                    if fac_data:
+                        df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
+                        df_fac = df_fac[['date', 'back']].rename(columns={'back': 'adjustFactor'})
+                        
+                        df_k['date'] = pd.to_datetime(df_k['date'])
+                        df_fac['date'] = pd.to_datetime(df_fac['date'])
+                        df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
+                        
+                        df_k = df_k.sort_values('date')
+                        df_fac = df_fac.sort_values('date')
+                        
+                        df_k = pd.merge_asof(df_k, df_fac, on='date', direction='backward')
+                        df_k['date'] = df_k['date'].dt.strftime('%Y-%m-%d')
+                        df_k['adjustFactor'] = df_k['adjustFactor'].fillna(1.0)
+                    else:
+                        df_k['adjustFactor'] = 1.0
                 
-                df_k = df_k.sort_values('date')
-                df_fac = df_fac.sort_values('date')
-                
-                df_k = pd.merge_asof(df_k, df_fac, on='date', direction='backward')
-                df_k['date'] = df_k['date'].dt.strftime('%Y-%m-%d')
-                df_k['adjustFactor'] = df_k['adjustFactor'].fillna(1.0)
+                # 如果成功走到这里，跳出重试循环
+                break
             else:
-                df_k['adjustFactor'] = 1.0
-    except Exception as e:
-        pass 
+                # 接口返回非 0 错误码，主动休眠后重试
+                time.sleep(2)
+        except Exception as e:
+            # 捕获断网、超时异常，不再无声无息地丢弃
+            time.sleep(2)
+        finally:
+            with HiddenPrints():
+                bs.logout()
 
-    # 抓取完数据，立刻光速登出，不给 Baostock 超时报错的机会
-    with HiddenPrints():
-        bs.logout()
-
-    # 2. ================= 获取新浪资金流 =================
-    try:
-        df_f = fetch_sina_flow(code, start, end, cf_url)
-    except:
-        pass
+    # ================= 获取新浪资金流 =================
+    df_f = fetch_sina_flow(code, start, end, cf_url)
 
     time.sleep(0.05) 
     return df_k, df_f
 
 def run_stock_pipeline(year=0, codes=None, part_index="all"):
+    # 核心修复2：如果是分片任务，错峰启动，防止 20 台机器瞬间击穿 Baostock
+    if part_index != "all":
+        wait_time = random.uniform(0, 30)
+        print(f"Job {part_index}: 错峰休眠 {wait_time:.1f} 秒...")
+        time.sleep(wait_time)
+
     future_date = "2099-12-31"
     
     if year == 9999:
@@ -174,8 +183,8 @@ def run_stock_pipeline(year=0, codes=None, part_index="all"):
 
     os.makedirs("temp_parts", exist_ok=True)
     
-    # 使用多进程加速，且保持进度条丝滑纯净
-    with ProcessPoolExecutor(max_workers=5) as executor:
+    # 核心修复3：并发降维，5 -> 3。在 20 个 Job 并发下，总线程数降至 60，Baostock 更稳定
+    with ProcessPoolExecutor(max_workers=3) as executor:
         for k, f in tqdm(executor.map(process_single_stock, tasks), total=len(tasks), desc=f"Job {part_index}"):
             if not k.empty: res_k.append(k)
             if not f.empty: res_f.append(f)
