@@ -1,8 +1,9 @@
 import os
 import requests
 from requests.adapters import HTTPAdapter
-from time import sleep
+from urllib3.util.retry import Retry
 import logging
+from time import sleep
 
 class EastMoneyProxy:
     def __init__(self):
@@ -11,7 +12,6 @@ class EastMoneyProxy:
             logging.warning("⚠️ CF_WORKER_URL 未设置！")
             self.worker_url = None
         else:
-            # 自动补全 https 协议前缀
             self.worker_url = f"https://{raw_url}" if not raw_url.startswith("http") else raw_url
             
         self.headers = {
@@ -21,36 +21,46 @@ class EastMoneyProxy:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         
-        # 【核心修复】：挂载 HTTPAdapter 扩大连接池
-        # pool_connections: 缓存的连接池数量 (适应多线程)
-        # pool_maxsize: 缓存池中最多保存多少个连接
-        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=2)
-        self.session.mount('http://', adapter)
+        # 核心优化：指数退避重试策略
+        # total=3: 最多重试3次
+        # backoff_factor=1: 重试间隔分别为 1s, 2s, 4s (1 * 2^(n-1))
+        # status_forcelist: 遇到这些状态码自动重试
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"]
+        )
+        
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry_strategy)
         self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
 
-    def _request(self, target_func, params, retries=4):
+    def _request(self, target_func, params):
         if not self.worker_url:
             return None
             
         payload = params.copy()
         payload["target_func"] = target_func
         
-        for attempt in range(retries):
-            try:
-                # 增加 timeout 到 20 秒，适应跨国代理的延迟波动
-                resp = self.session.get(self.worker_url, params=payload, timeout=20)
-                if resp.status_code == 200: 
-                    return resp.json()
-                elif resp.status_code == 500:
-                    logging.warning(f"CF Proxy Error (500) on attempt {attempt+1}")
-                sleep(1.5)
-            except requests.exceptions.Timeout:
-                logging.warning(f"CF Proxy Timeout on attempt {attempt+1}")
-                sleep(2)  # 超时后多休息一会儿再重试
-            except Exception as e:
-                logging.error(f"CF Proxy Request Failed: {e}")
-                sleep(2)
-        return None
+        try:
+            # 这里的 timeout=(connect, read)
+            # connect=10s: 握手如果不通，快速放弃
+            # read=45s: 给东财接口返回长数据留出足够窗口
+            resp = self.session.get(self.worker_url, params=payload, timeout=(10, 45))
+            
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                logging.error(f"CF Proxy Response Error: {resp.status_code} for {target_func}")
+                return None
+                
+        except requests.exceptions.ReadTimeout:
+            logging.error(f"CF Proxy Read Timeout (45s reached) for {target_func}")
+            return None
+        except Exception as e:
+            logging.error(f"CF Proxy Request Failed: {e}")
+            return None
 
     def get_sector_list(self, fs_code):
         all_items = []
@@ -68,8 +78,10 @@ class EastMoneyProxy:
                 all_items.extend(batch)
                 if len(batch) < 100: break
                 page += 1
+                # 增加防御性跳出
                 if page > 100: break
-            else: break
+            else: 
+                break
         return all_items
 
     def get_sector_kline(self, secid, beg="19900101", end="20500101"):
