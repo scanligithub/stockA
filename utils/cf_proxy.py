@@ -21,14 +21,11 @@ class EastMoneyProxy:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         
-        # 核心优化：指数退避重试策略
-        # total=3: 最多重试3次
-        # backoff_factor=1: 重试间隔分别为 1s, 2s, 4s (1 * 2^(n-1))
-        # status_forcelist: 遇到这些状态码自动重试
+        # 核心修复1：拦截 CF 特有的 520 未知错误，并引入指数退避重试
         retry_strategy = Retry(
             total=3,
             backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504],
+            status_forcelist=[429, 500, 502, 503, 504, 520], 
             allowed_methods=["GET"]
         )
         
@@ -44,9 +41,7 @@ class EastMoneyProxy:
         payload["target_func"] = target_func
         
         try:
-            # 这里的 timeout=(connect, read)
-            # connect=10s: 握手如果不通，快速放弃
-            # read=45s: 给东财接口返回长数据留出足够窗口
+            # timeout=(10, 45) -> 10秒连通性探测，45秒等待东财数据库慢查询
             resp = self.session.get(self.worker_url, params=payload, timeout=(10, 45))
             
             if resp.status_code == 200:
@@ -78,8 +73,7 @@ class EastMoneyProxy:
                 all_items.extend(batch)
                 if len(batch) < 100: break
                 page += 1
-                # 增加防御性跳出
-                if page > 100: break
+                if page > 100: break # 防御性阻断
             else: 
                 break
         return all_items
@@ -90,6 +84,30 @@ class EastMoneyProxy:
         return self._request("kline", params)
 
     def get_sector_constituents(self, sector_code):
-        params = {"pn": 1, "pz": 3000, "po": 1, "np": 1, "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                  "fltt": 2, "invt": 2, "fid": "f3", "fs": f"b:{sector_code}", "fields": "f12,f13,f14"}
-        return self._request("constituents", params)
+        """
+        核心修复2：东财对 pz=3000 的大单查询容易直接切断连接报 520
+        改为 pz=500 分页拉取，模拟普通用户的行为。
+        """
+        all_items = []
+        page = 1
+        while True:
+            params = {
+                "pn": page, "pz": 500, "po": 1, "np": 1, 
+                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                "fltt": 2, "invt": 2, "fid": "f3", "fs": f"b:{sector_code}", "fields": "f12,f13,f14"
+            }
+            res = self._request("constituents", params)
+            if res and res.get('data') and res['data'].get('diff'):
+                items = res['data']['diff']
+                batch = list(items.values()) if isinstance(items, dict) else items
+                all_items.extend(batch)
+                if len(batch) < 500: break
+                page += 1
+                if page > 50: break # 防止死循环，A股没有哪个板块超25000只股
+            else:
+                break
+                
+        # 包装成与原先单次查询一致的字典结构返回
+        if all_items:
+            return {'data': {'diff': all_items}}
+        return None
