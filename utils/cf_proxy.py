@@ -1,15 +1,15 @@
 import os
 import requests
+import time
+import random
+import logging
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-import logging
-from time import sleep
 
 class EastMoneyProxy:
     def __init__(self):
         raw_url = os.getenv("CF_WORKER_URL", "").strip()
         if not raw_url:
-            logging.warning("⚠️ CF_WORKER_URL 未设置！")
             self.worker_url = None
         else:
             self.worker_url = f"https://{raw_url}" if not raw_url.startswith("http") else raw_url
@@ -21,41 +21,32 @@ class EastMoneyProxy:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         
-        # 核心修复1：拦截 CF 特有的 520 未知错误，并引入指数退避重试
+        # 核心改进：增大 backoff_factor (1->2)，遇到 520 时等待更久
         retry_strategy = Retry(
-            total=3,
-            backoff_factor=1,
-            status_forcelist=[429, 500, 502, 503, 504, 520, 522], 
+            total=5, # 增加重试次数
+            backoff_factor=2, 
+            status_forcelist=[429, 500, 502, 503, 504, 520, 522],
             allowed_methods=["GET"]
         )
         
-        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=retry_strategy)
+        adapter = HTTPAdapter(pool_connections=50, pool_maxsize=100, max_retries=retry_strategy)
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
 
     def _request(self, target_func, params):
-        if not self.worker_url:
-            return None
-            
+        if not self.worker_url: return None
         payload = params.copy()
         payload["target_func"] = target_func
         
         try:
-            # timeout=(10, 45) -> 10秒连通性探测，45秒等待东财数据库慢查询
-            resp = self.session.get(self.worker_url, params=payload, timeout=(10, 45))
-            
+            # 增加随机抖动延迟，错开 Matrix Job 的并发峰值
+            time.sleep(random.uniform(0.1, 0.3))
+            resp = self.session.get(self.worker_url, params=payload, timeout=(10, 60))
             if resp.status_code == 200:
                 return resp.json()
-            else:
-                logging.error(f"CF Proxy Response Error: {resp.status_code} for {target_func}")
-                return None
-                
-        except requests.exceptions.ReadTimeout:
-            logging.error(f"CF Proxy Read Timeout (45s reached) for {target_func}")
-            return None
         except Exception as e:
-            logging.error(f"CF Proxy Request Failed: {e}")
-            return None
+            logging.error(f"CF Proxy Error [{target_func}]: {e}")
+        return None
 
     def get_sector_list(self, fs_code):
         all_items = []
@@ -73,7 +64,8 @@ class EastMoneyProxy:
                 all_items.extend(batch)
                 if len(batch) < 100: break
                 page += 1
-                if page > 100: break # 防御性阻断
+                # 核心改进：翻页之间强行休眠，防止被东财 WAF 封锁
+                time.sleep(random.uniform(0.5, 1.0))
             else: 
                 break
         return all_items
@@ -84,10 +76,6 @@ class EastMoneyProxy:
         return self._request("kline", params)
 
     def get_sector_constituents(self, sector_code):
-        """
-        核心修复2：东财对 pz=3000 的大单查询容易直接切断连接报 520
-        改为 pz=500 分页拉取，模拟普通用户的行为。
-        """
         all_items = []
         page = 1
         while True:
@@ -103,11 +91,7 @@ class EastMoneyProxy:
                 all_items.extend(batch)
                 if len(batch) < 500: break
                 page += 1
-                if page > 50: break # 防止死循环，A股没有哪个板块超25000只股
-            else:
-                break
-                
-        # 包装成与原先单次查询一致的字典结构返回
-        if all_items:
-            return {'data': {'diff': all_items}}
+                time.sleep(random.uniform(0.3, 0.6))
+            else: break
+        if all_items: return {'data': {'diff': all_items}}
         return None
