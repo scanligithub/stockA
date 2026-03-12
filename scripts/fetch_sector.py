@@ -93,7 +93,7 @@ def main():
 
     all_k, all_c = [], []
     # 使用较小的并发数以确保稳定性
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
         futures = {executor.submit(fetch_one_sector, row): row['name'] for _, row in df_list.iterrows()}
         for fut in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Fetching Sectors"):
             try:
