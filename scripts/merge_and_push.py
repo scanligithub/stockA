@@ -1,7 +1,5 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import duckdb
 import glob
 import datetime
@@ -9,19 +7,24 @@ import argparse
 import shutil
 import pandas as pd
 import baostock as bs
+
+# 确保能引用到项目根目录的 utils
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from utils.hf_manager import HFManager
 from utils.qc import QualityControl
 
 def get_stock_list_with_names():
-    """获取带名称的股票列表 (增加名称为空的过滤)"""
-    print("📋 Fetching stock list metadata...")
+    """获取带名称的股票基准名册"""
+    print("📋 Fetching stock list metadata as baseline...")
     try:
         bs.login()
-        date = datetime.datetime.now().strftime("%Y-%m-%d")
+        # 尝试获取最近一个交易日的名册
         for i in range(10):
             d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
             rs = bs.query_all_stock(day=d)
-            if rs.error_code == '0' and len(rs.data) > 0: break
+            if rs.error_code == '0' and len(rs.data) > 0:
+                break
         
         data = []
         while rs.next():
@@ -30,9 +33,8 @@ def get_stock_list_with_names():
         
         if data:
             df = pd.DataFrame(data, columns=["code", "tradeStatus", "code_name"])
-            # 过滤1：code_name 不能为空
+            # 核心过滤：必须有代码名称，且属于 A 股范围
             df = df[df['code_name'].notna() & (df['code_name'].str.strip() != "")]
-            # 过滤2：只留 A 股个股
             df = df[df['code'].str.startswith(('sh.', 'sz.', 'bj.'))]
             return df
     except Exception as e:
@@ -50,95 +52,85 @@ def main():
     print("🦆 Initializing DuckDB...")
     con = duckdb.connect()
     con.execute("SET memory_limit='5GB'")
-    con.execute("SET temp_directory='duckdb_temp.tmp'")
     
-    # 注册视图
+    # 1. 注册碎片视图
     k_files = glob.glob("all_artifacts/kline_part_*.parquet")
     f_files = glob.glob("all_artifacts/flow_part_*.parquet")
     sec_k_files = glob.glob("all_artifacts/sector_kline_full.parquet")
     
+    # 即使没文件也创建空视图防止 SQL 崩溃
     if k_files: con.execute(f"CREATE OR REPLACE VIEW v_kline AS SELECT * FROM read_parquet({k_files}, union_by_name=True)")
     else: con.execute("CREATE OR REPLACE VIEW v_kline AS SELECT * FROM read_parquet([], schema={'date': 'VARCHAR', 'code': 'VARCHAR'})")
+    
     if f_files: con.execute(f"CREATE OR REPLACE VIEW v_flow AS SELECT * FROM read_parquet({f_files}, union_by_name=True)")
     else: con.execute("CREATE OR REPLACE VIEW v_flow AS SELECT * FROM read_parquet([], schema={'date': 'VARCHAR', 'code': 'VARCHAR'})")
+    
     if sec_k_files: con.execute(f"CREATE OR REPLACE VIEW v_sec_k AS SELECT * FROM read_parquet('{sec_k_files[0]}')")
     else: con.execute("CREATE OR REPLACE VIEW v_sec_k AS SELECT * FROM read_parquet([], schema={'date': 'VARCHAR', 'code': 'VARCHAR'})")
 
     os.makedirs("output", exist_ok=True)
     targets = {}
 
-    # 1. 生成股票列表元数据 (包含 code_name 过滤)
-    df_stocks = get_stock_list_with_names()
-    if not df_stocks.empty:
+    # 2. 差异诊断：找出那 47 只股票
+    df_baseline = get_stock_list_with_names()
+    if not df_baseline.empty:
+        # 获取实际抓取到的唯一代码
+        actual_codes = con.execute("SELECT DISTINCT code FROM v_kline").df()['code'].tolist()
+        actual_set = set(actual_codes)
+        intended_set = set(df_baseline['code'].tolist())
+        
+        missing_codes = list(intended_set - actual_set)
+        df_missing = df_baseline[df_baseline['code'].isin(missing_codes)]
+        
+        # 将诊断结果注入 QC 系统
+        qc.set_missing_analysis(df_missing[['code', 'code_name']].to_dict(orient='records'))
+        
+        # 保存基准列表
         p = "output/stock_list.parquet"
-        df_stocks.to_parquet(p, index=False)
+        df_baseline.to_parquet(p, index=False)
         targets[p] = "stock_list.parquet"
-        qc.check_dataframe(df_stocks, "stock_list.parquet", ["code_name"], file_path=p)
+        qc.check_dataframe(df_baseline, "stock_list.parquet", file_path=p)
 
-    # 2. 生成板块列表元数据
-    if sec_k_files:
-        p = 'output/sector_list.parquet'
-        con.execute(f"COPY (SELECT DISTINCT code, name, type FROM v_sec_k ORDER BY type, code) TO '{p}' (FORMAT 'PARQUET')")
-        targets[p] = "sector_list.parquet"
-        qc.check_dataframe(pd.read_parquet(p), "sector_list.parquet", ["name"], file_path=p)
-
-    # 3. 确定处理年份并切分
+    # 3. 数据切分与保存逻辑 (按年份)
+    curr_year = datetime.datetime.now().year
+    years = [args.year] if args.year > 0 and args.year != 9999 else [curr_year]
     if args.year == 9999:
-        years = range(2005, datetime.datetime.now().year)
-    elif args.year > 0:
-        years = [args.year]
-    else:
-        years = [datetime.datetime.now().year]
+        years = range(2005, curr_year + 1)
 
     for y in years:
-        print(f"🔪 Processing Year {y}...")
-        start_date, end_date = f"{y}-01-01", f"{y}-12-31"
+        start_d, end_d = f"{y}-01-01", f"{y}-12-31"
         
-        tasks = [
+        # 定义需要处理的任务
+        task_list = [
             ("v_kline", f"stock_kline_{y}.parquet", ["close", "volume"]),
             ("v_flow", f"stock_money_flow_{y}.parquet", ["net_amount"]),
             ("v_sec_k", f"sector_kline_{y}.parquet", ["close"])
         ]
         
-        for view_name, out_name, check_cols in tasks:
+        for view, out_name, check_cols in task_list:
             out_path = f"output/{out_name}"
-            try:
-                # 检查数据是否存在
-                count = con.execute(f"SELECT count(*) FROM {view_name} WHERE date >= '{start_date}' AND date <= '{end_date}'").fetchone()[0]
-                if count == 0: continue
+            # 检查该年份是否有数据
+            cnt = con.execute(f"SELECT count(*) FROM {view} WHERE date >= '{start_d}' AND date <= '{end_d}'").fetchone()[0]
+            if cnt == 0: continue
+            
+            con.execute(f"COPY (SELECT * FROM {view} WHERE date >= '{start_d}' AND date <= '{end_d}' ORDER BY code, date) TO '{out_path}' (FORMAT 'PARQUET', COMPRESSION 'ZSTD')")
+            
+            if os.path.exists(out_path):
+                qc.check_dataframe(pd.read_parquet(out_path), out_name, check_cols=check_cols, file_path=out_path)
+                targets[out_path] = out_name
 
-                # DuckDB 切分
-                con.execute(f"COPY (SELECT * FROM {view_name} WHERE date >= '{start_date}' AND date <= '{end_date}' ORDER BY code, date) TO '{out_path}' (FORMAT 'PARQUET', COMPRESSION 'ZSTD')")
-                
-                if os.path.exists(out_path):
-                    df_check = pd.read_parquet(out_path)
-                    # 执行增强版质检 (含文件路径)
-                    qc.check_dataframe(df_check, out_name, check_cols, file_path=out_path)
-                    targets[out_path] = out_name
-            except Exception as e:
-                print(f"❌ Error processing {out_name}: {e}")
-
-        # 4. 板块成分股快照
-        sec_c_files = glob.glob("all_artifacts/sector_constituents_latest.parquet")
-        if sec_c_files:
-            c_out = f"output/sector_constituents_{y}.parquet"
-            try:
-                shutil.copy(sec_c_files[0], c_out)
-                targets[c_out] = f"sector_constituents_{y}.parquet"
-            except: pass
-
-    # 5. 生成汇总报告
-    print("📝 Generating QC Report...")
+    # 4. 报告生成与上传
     qc.save_report("output/qc_report.json")
-    with open("output/qc_summary.md", "w") as f: f.write(qc.get_summary_md())
+    with open("output/qc_summary.md", "w", encoding="utf-8") as f:
+        f.write(qc.get_summary_md())
     
     targets["output/qc_report.json"] = "qc_report.json"
     targets["output/qc_summary.md"] = "qc_summary.md"
 
-    # 6. 上传
     if args.mode == "hf" and os.getenv("HF_TOKEN"):
         hf = HFManager(os.getenv("HF_TOKEN"), os.getenv("HF_REPO"))
-        for local, remote in targets.items(): hf.upload_file(local, remote)
+        for local, remote in targets.items():
+            hf.upload_file(local, remote)
 
 if __name__ == "__main__":
     main()
