@@ -1,70 +1,80 @@
 name: Daily Update to HF (Matrix)
 
-# 强制使用 Node 24 消除弃用警告
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 on:
   schedule:
     - cron: '0 17 * * *' # 北京时间凌晨 01:00
-  workflow_dispatch:     # 允许手动触发
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  # 1. 准备分片矩阵 (随机打乱 20 个分片)
+  # 1. 准备阶段：预抓取股票矩阵和板块名册 (静默环境，无并发竞争)
   prepare:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
-      - uses: actions/checkout@v4 # 使用稳定版 v4
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install baostock pandas
+      - run: pip install baostock pandas requests urllib3
       - id: set-matrix
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
         run: |
-          # 确保 prepare_matrix.py 里的 NUM_CHUNKS = 20
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
+      - name: Upload Pre-fetched Lists
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-fetched-lists
+          path: sector_list.json
+          retention-days: 1
 
-  # 2. 并发下载当年数据 (20路分布式)
+  # 2. 并发下载股票行情 (19路分布式)
   fetch-stocks:
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
       matrix:
         task: ${{ fromJson(needs.prepare.outputs.matrix) }}
-      fail-fast: false # 即使某个 Job 失败，也不要取消其他 19 个任务
+      fail-fast: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: 'pip' # 开启缓存，加速 pip install 速度
+          cache: 'pip'
       - run: pip install -r requirements.txt
-      - name: Fetch Current Year Data
+      - name: Fetch Current Year Stock Data
         env:
           CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
             --codes '${{ toJson(matrix.task.codes) }}'
-            
       - name: Upload Part Artifact
-        uses: actions/upload-artifact@v4 # v4 支持极速上传
+        uses: actions/upload-artifact@v4
         with:
-          name: daily-parts-${{ matrix.task.index }} # 每个分片独立名称
+          name: daily-stock-part-${{ matrix.task.index }}
           path: temp_parts/*.parquet
           retention-days: 1
 
-  # 3. 下载板块行情 (独立任务)
+  # 3. 下载板块行情 (基于 Prepare 阶段抓到的名册)
   fetch-sectors:
+    needs: prepare
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Download Pre-fetched Lists
+        uses: actions/download-artifact@v4
+        with:
+          name: pre-fetched-lists
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -80,7 +90,7 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
-  # 4. 汇总合并、质检、推送到 Hugging Face
+  # 4. 汇总、质检、推送
   finalize:
     needs: [fetch-stocks, fetch-sectors]
     runs-on: ubuntu-latest
@@ -90,33 +100,18 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install -r requirements.txt
-      
       - name: Download All Artifacts
-        uses: actions/download-artifact@v4 # v4 效率极高
+        uses: actions/download-artifact@v4
         with:
-          pattern: '*'          # 匹配所有分片
-          merge-multiple: true  # 【神技】自动将所有 20+ 碎片合并到一个文件夹中
+          pattern: '*'
+          merge-multiple: true
           path: all_artifacts
-          
       - name: Merge & Push to HF
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ secrets.HF_REPO }}
           CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-        run: |
-          # 确保 merge_and_push.py 读取的是 all_artifacts 文件夹
-          python scripts/merge_and_push.py --mode hf
-          
-      - name: Upload QC Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: daily-qc-report
-          path: |
-            output/qc_report.json
-            output/qc_summary.md
-          retention-days: 3
-          
-      - name: Publish Summary to UI
+        run: python scripts/merge_and_push.py --mode hf
+      - name: Publish Summary
         if: always()
         run: cat output/qc_summary.md >> $GITHUB_STEP_SUMMARY
