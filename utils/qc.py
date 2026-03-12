@@ -4,82 +4,91 @@ import os
 
 class QualityControl:
     def __init__(self):
-        self.report = {"errors": [], "stats": {}}
-
-    def check_dataframe(self, df, name, critical_cols=[], file_path=None):
-        """
-        深度质检：包含字段清单、文件大小、异常统计等
-        """
-        stats = {
-            "total_rows": len(df),
-            "columns": list(df.columns),  # 保存字段清单
-            "anomalies": {},
-            "anomaly_count": 0,
-            "file_size_mb": 0.0
+        self.stats = {}
+        self.diagnostics = {
+            "missing_stocks": []  # 专门存放那 47 只“失踪人口”
         }
-        
+
+    def check_dataframe(self, df, name, check_cols=None, file_path=None):
+        """
+        对 DataFrame 进行通用质检统计
+        """
         if df.empty:
-            self.report["errors"].append(f"{name} is empty!")
+            self.stats[name] = {"rows": 0, "count": 0, "error": "Empty DataFrame"}
             return
 
-        # 1. 获取文件大小 (MB)
-        if file_path and os.path.exists(file_path):
-            stats["file_size_mb"] = round(os.path.getsize(file_path) / (1024 * 1024), 2)
-
+        # 1. 基础维度统计
+        rows = len(df)
+        unique_codes = df['code'].nunique() if 'code' in df.columns else 1
+        
         # 2. 时间范围统计
-        if "date" in df.columns:
-            stats["start_date"] = str(df["date"].min())
-            stats["end_date"] = str(df["date"].max())
-
-        # 3. 个股/板块数量统计
-        if "code" in df.columns:
-            stats["unique_codes"] = int(df["code"].nunique())
+        date_range = "---"
+        if 'date' in df.columns:
+            date_range = f"{df['date'].min()}~{df['date'].max()}"
             
-        # 4. 异常检测与计数
-        anomaly_details = {}
-        if "high" in df.columns and "low" in df.columns:
-            # 过滤正常范围，只计真正异常
-            mask = (df['high'] > 0) & (df['low'] > 0) & (df['high'] < df['low'])
-            err = int(df[mask].shape[0])
-            if err > 0: anomaly_details["high_lt_low"] = err
+        # 3. 文件大小统计
+        size_mb = 0
+        if file_path and os.path.exists(file_path):
+            size_mb = round(os.path.getsize(file_path) / (1024 * 1024), 2)
             
-        if "volume" in df.columns:
-            err = int(df[df['volume'] < 0].shape[0])
-            if err > 0: anomaly_details["neg_volume"] = err
+        # 4. 异常值/空值检测 (简易版)
+        anomaly_count = 0
+        if check_cols:
+            for col in check_cols:
+                if col in df.columns:
+                    anomaly_count += df[col].isna().sum()
 
-        for col in critical_cols:
-            if col in df.columns:
-                nulls = int(df[col].isnull().sum())
-                if nulls > 0: anomaly_details[f"null_{col}"] = nulls
+        self.stats[name] = {
+            "rows": rows,
+            "stock_count": unique_codes,
+            "date_range": date_range,
+            "size_mb": size_mb,
+            "anomaly_count": int(anomaly_count),
+            "columns": ", ".join(df.columns.tolist())
+        }
 
-        stats["anomalies"] = anomaly_details
-        stats["anomaly_count"] = sum(anomaly_details.values())
-        stats["anomaly_types"] = list(anomaly_details.keys())
+    def set_missing_analysis(self, missing_list):
+        """
+        存入缺失股票的详细信息
+        missing_list: [{'code': '...', 'code_name': '...'}, ...]
+        """
+        self.diagnostics["missing_stocks"] = missing_list
 
-        self.report["stats"][name] = stats
+    def get_report_dict(self):
+        return {
+            "file_stats": self.stats,
+            "diagnostics": self.diagnostics
+        }
 
     def save_report(self, path):
-        dir_name = os.path.dirname(path)
-        if dir_name:
-            os.makedirs(dir_name, exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(self.report, f, indent=2, ensure_ascii=False)
-            
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.get_report_dict(), f, ensure_ascii=False, indent=2)
+
     def get_summary_md(self):
-        md = "# 📊 数据质量深度质检报告\n\n"
-        if self.report["errors"]:
-            md += "## ❌ 严重错误\n"
-            for e in self.report["errors"]: md += f"- {e}\n"
+        """
+        生成 GitHub Step Summary 使用的 Markdown 摘要
+        """
+        md = "## 📈 数据产物概览\n\n"
+        md += "| 文件名 | 行数 | 标的数量 | 时间范围 | 大小 (MB) | 异常数 | 字段清单 |\n"
+        md += "| --- | --- | --- | --- | --- | --- | --- |\n"
         
-        md += "## 📈 数据产物概览\n"
-        # 增加了“字段清单”列
-        md += "| 文件名 | 行数 | 标的数量 | 时间范围 | 大小(MB) | 异常数 | 字段清单 |\n"
-        md += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
-        
-        for name, stat in self.report["stats"].items():
-            range_str = f"{stat.get('start_date','-')}~{stat.get('end_date','-')}"
-            # 字段清单较长，用逗号连接
-            fields_str = ", ".join(stat.get("columns", []))
-            md += f"| {name} | {stat['total_rows']:,} | {stat.get('unique_codes','-')} | {range_str} | {stat['file_size_mb']} | {stat['anomaly_count']} | {fields_str} |\n"
-        
+        for name, s in self.stats.items():
+            md += f"| {name} | {s['rows']:,} | {s['stock_count']} | {s['date_range']} | {s['size_mb']} | {s['anomaly_count']} | {s['columns']} |\n"
+
+        # 添加缺失股票诊断看板
+        missing = self.diagnostics["missing_stocks"]
+        if missing:
+            md += f"\n\n## 🔍 数据缺失诊断 (发现 {len(missing)} 只标的未获取到行情)\n\n"
+            md += "| 代码 | 名称 | 状态 |\n"
+            md += "| --- | --- | --- |\n"
+            # 仅展示前 50 只，防止 Markdown 过长
+            for item in missing[:50]:
+                md += f"| {item['code']} | {item['code_name']} | ❌ 缺失 |\n"
+            if len(missing) > 50:
+                md += f"| ... | ... | 以及其他 {len(missing)-50} 只 |\n"
+            
+            md += f"\n> **提示**：请检查这些股票是否处于长期停牌、退市或为北交所新上市标的。"
+        else:
+            md += "\n\n✅ **完整性检查**：所有目标股票均已成功获取数据。"
+            
         return md
