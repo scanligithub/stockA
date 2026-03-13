@@ -1,0 +1,26 @@
+name: Test Serial Thin Fetching
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          
+      - name: Install dependencies
+        run: pip install requests
+        
+      - name: Run Serial Thin Test
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+        run: |
+          # 1. 尝试下载 prepare 阶段可能产生的 sector_list.json (可选)
+          # 如果没有，脚本会用兜底数据测试逻辑
+          python scripts/test_serial_thin_fetch.py
