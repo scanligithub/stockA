@@ -1,0 +1,20 @@
+name: Test Sector Detail Limits
+
+on:
+  workflow_dispatch:
+
+jobs:
+  stress-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install requests
+        run: pip install requests
+      - name: Run Sector Stress Test
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
+        run: python scripts/test_sector_detail_limit.py
