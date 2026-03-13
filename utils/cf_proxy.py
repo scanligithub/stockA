@@ -21,7 +21,6 @@ class EastMoneyProxy:
         self.session = requests.Session()
         self.session.headers.update(self.headers)
         
-        # 核心防线：5次重试，指数退避，专门拦截 520 和网关超时
         retry_strategy = Retry(
             total=5,
             backoff_factor=2, 
@@ -29,7 +28,6 @@ class EastMoneyProxy:
             allowed_methods=["GET"]
         )
         
-        # 提高连接池水位，防止高并发下大量线程等待连接建立
         adapter = HTTPAdapter(pool_connections=50, pool_maxsize=100, max_retries=retry_strategy)
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
@@ -40,41 +38,30 @@ class EastMoneyProxy:
         payload["target_func"] = target_func
         
         try:
-            # 基础抖动：每次请求前随机休眠，打散并发洪峰
             time.sleep(random.uniform(0.1, 0.4))
-            
-            # 增加 timeout 到 (10, 60)，允许东财有更长的计算时间而不被 requests 强行切断
             resp = self.session.get(self.worker_url, params=payload, timeout=(10, 60))
             if resp.status_code == 200:
                 return resp.json()
         except Exception as e:
-            # 只有在 5 次退避重试全部耗尽后，才会打印这个错误
             logging.error(f"CF Proxy Error [{target_func}]: {e}")
         return None
 
     def get_sector_list(self, fs_code):
-        all_items = []
-        page = 1
-        while True:
-            params = {
-                "pn": page, "pz": 100, "po": 1, "np": 1, 
-                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-                "fltt": 2, "invt": 2, "fid": "f3", "fs": fs_code, "fields": "f12,f13,f14" 
-            }
-            res = self._request("list", params)
-            if res and res.get('data') and res['data'].get('diff'):
-                items = res['data']['diff']
-                batch = list(items.values()) if isinstance(items, dict) else items
-                all_items.extend(batch)
-                
-                if len(batch) < 100: break
-                page += 1
-                
-                # 翻页强休眠：模拟人类翻页速度，防止封 IP
-                time.sleep(random.uniform(0.5, 1.2))
-            else: 
-                break
-        return all_items
+        """
+        核心提速点：东财单类板块（如概念）最多也就 900 多个。
+        直接设置 pz=3000 一次性请求完毕，彻底干掉翻页循环和休眠！
+        """
+        params = {
+            "pn": 1, "pz": 3000, "po": 1, "np": 1, 
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": 2, "invt": 2, "fid": "f3", "fs": fs_code, "fields": "f12,f13,f14" 
+        }
+        res = self._request("list", params)
+        
+        if res and res.get('data') and res['data'].get('diff'):
+            items = res['data']['diff']
+            return list(items.values()) if isinstance(items, dict) else items
+        return []
 
     def get_sector_kline(self, secid, beg="19900101", end="20500101"):
         params = {"secid": secid, "fields1": "f1,f2,f3,f4,f5,f6", "fields2": "f51,f52,f53,f54,f55,f56,f57,f58", 
@@ -82,11 +69,10 @@ class EastMoneyProxy:
         return self._request("kline", params)
 
     def get_sector_constituents(self, sector_code):
+        """成分股可能超出 3000（如全A指数），保留翻页更为稳妥"""
         all_items = []
         page = 1
         while True:
-            # === 核心优化：化整为零 ===
-            # 将 pz 从 500 降为 100，避免单次请求包过大触发东财 WAF 拦截 (520)
             params = {
                 "pn": page, "pz": 100, "po": 1, "np": 1, 
                 "ut": "bd1d9ddb04089700cf9c27f6f7426281",
@@ -99,11 +85,8 @@ class EastMoneyProxy:
                 batch = list(items.values()) if isinstance(items, dict) else items
                 all_items.extend(batch)
                 
-                # 退出条件同步修改为 100
                 if len(batch) < 100: break
                 page += 1
-                
-                # 翻页间隙：对于成分股这种相对低频的数据，多休眠一会儿更安全
                 time.sleep(random.uniform(0.4, 0.8))
             else: 
                 break
