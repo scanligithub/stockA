@@ -50,17 +50,19 @@ def main():
     if not cf_url:
         print("⚠️ CF_WORKER_URL not found, skipping sector discovery.")
     else:
-        print("📡 Quiet Phase: Triple-pass sector discovery...")
-        for pass_idx in range(1, 4):
-            for label, fs in targets.items():
-                try:
-                    lst = proxy.get_sector_list(fs)
-                    for x in lst:
-                        code = x['f12']
-                        if code not in master_sectors:
-                            master_sectors[code] = {"code": code, "market": x['f13'], "name": x['f14'], "type": label}
-                except: pass
-            time.sleep(2)
+        # 核心优化：去除了 for pass_idx in range(1, 4) 的三重智商税循环
+        print("📡 Fast Phase: Single-pass sector discovery (using pz=3000)...")
+        for label, fs in targets.items():
+            try:
+                print(f"   -> Fetching {label} sectors...")
+                lst = proxy.get_sector_list(fs)
+                for x in lst:
+                    code = x['f12']
+                    if code not in master_sectors:
+                        master_sectors[code] = {"code": code, "market": x['f13'], "name": x['f14'], "type": label}
+            except Exception as e: 
+                print(f"   ❌ Failed to fetch {label}: {e}")
+            time.sleep(1)
         
         with open("sector_list.json", "w", encoding='utf-8') as f:
             json.dump(list(master_sectors.values()), f, ensure_ascii=False)
