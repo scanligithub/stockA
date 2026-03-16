@@ -1,0 +1,29 @@
+name: Eastmoney Stealth API Scraper
+
+on:
+  workflow_dispatch: 
+  schedule:
+    - cron: '30 7 * * 1-5'
+
+jobs:
+  scrape-quant-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          
+      - name: Install Quant Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # 核心依赖替换：curl_cffi 用于终极防封锁，polars 备用作数据处理
+          pip install curl_cffi polars
+
+      - name: Run Stealth API Scraper
+        run: python fetch_boards.py
