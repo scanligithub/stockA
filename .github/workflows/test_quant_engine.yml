@@ -1,0 +1,55 @@
+name: Test Quant Eastmoney Engine
+
+on:
+  # 允许手动触发测试
+  workflow_dispatch:
+  # 定时触发（可选，例如每天下午 16:00 运行）
+  schedule:
+    - cron: '0 8 * * 1-5' # UTC 08:00 是北京时间 16:00
+
+jobs:
+  run-quant-engine:
+    name: Run Engine and Export Data
+    runs-on: ubuntu-latest
+    # 设置超时时间，防止异常死循环占用额度
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip' # 自动缓存 pip 依赖
+
+      - name: Install Quant Toolchain
+        run: |
+          python -m pip install --upgrade pip
+          # curl_cffi: TLS 穿透
+          # polars: 极速数据处理
+          # pyarrow: Parquet 文件存储后端
+          pip install curl_cffi polars pyarrow
+
+      - name: Execute Quant Engine
+        # 运行你编写的引擎脚本
+        run: python quant_eastmoney_engine.py
+
+      - name: Check Output Files
+        # 在日志中打印生成的 Parquet 文件大小，确认数据量是否正常
+        run: |
+          echo "--- Generated Data Files ---"
+          ls -lh *.parquet
+          
+      - name: Upload Parquet Artifacts
+        # 将生成的 Parquet 文件上传到 GitHub Actions 结果页面
+        # 你可以点击 Run 详情页右上角的 Artifacts 下载这些数据文件
+        uses: actions/upload-artifact@v4
+        with:
+          name: eastmoney-quant-data
+          path: |
+            quant_boards_list.parquet
+            quant_boards_constituents.parquet
+            quant_boards_klines.parquet
+          retention-days: 7 # 数据保留 7 天
