@@ -5,7 +5,7 @@ import polars as pl
 from curl_cffi.requests import AsyncSession, exceptions
 
 # 信号量控制：降低瞬时并发压力
-SEMAPHORE = asyncio.Semaphore(10)
+SEMAPHORE = asyncio.Semaphore(5)
 
 def get_default_params():
     """统一参数模板，防止因参数缺失被指纹识别"""
