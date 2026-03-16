@@ -1,0 +1,35 @@
+name: Eastmoney Playwright Scraper
+
+on:
+  workflow_dispatch: # 允许在 GitHub 网页上直接手动点击运行
+  schedule:
+    # 每天北京时间下午 15:30 运行 (UTC时间 07:30)
+    # 此时A股刚收盘，数据已稳定
+    - cron: '30 7 * * 1-5'
+
+jobs:
+  run-scraper:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          # 如果后续需要接入极速数据清洗，取消下面的注释
+          # pip install polars aiohttp
+
+      - name: Install Playwright Browsers & System Dependencies
+        # --with-deps 会自动安装 Ubuntu 跑无头浏览器所需的系统库（如 libgbm1 等）
+        run: playwright install chromium --with-deps
+          
+      - name: Run Playwright Scraper
+        run: python fetch_boards.py
