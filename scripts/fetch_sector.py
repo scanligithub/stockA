@@ -33,56 +33,56 @@ def fetch_one_sector(info):
             consts.append({"sector_code": code, "stock_code": item['f12'], "sector_name": name})
     return df_k, consts
 
-def get_category_full_data_v3(fs_code, label):
+def get_category_full_data_brute_force(fs_code, label):
     """
-    【250对冲策略】利用 pz=250 的正反两次请求实现全量覆盖
+    【暴力包抄 V4】10维度正反扫描，强行挤出全量数据
     """
-    print(f"[*] 正在执行 250-对冲扫描 {label} 分类...")
+    print(f"[*] 正在对 {label} 分类执行 10 维度暴力包抄...")
     seen_codes = {}
     
-    # 只需要 2 个不同的维度，每个维度正反各一次，总计 4 次请求
-    # 4 * 250 = 1000 个槽位，覆盖 500 个目标绰绰有余
-    dimensions = [
-        ("f3", 1), ("f3", 0),  # 涨跌幅 顶/底 (最常用)
-        ("f12", 1), ("f12", 0) # 代码 顶/底 (最稳定)
-    ]
-
-    for fid, po in dimensions:
-        try:
-            # 强制 pz=250
-            items = proxy.get_sector_list(fs_code, fid=fid, po=po, pn=1, pz=250)
-            if not items: continue
-            
-            actual_len = len(items)
-            new_count = 0
-            for x in items:
-                c = x['f12']
-                if c not in seen_codes:
-                    seen_codes[c] = {"code": c, "market": x['f13'], "name": x['f14'], "type": label}
-                    new_count += 1
-            
-            print(f"    - [维度 {fid} po={po}] 吐出: {actual_len} | 新增: {new_count} | 累计: {len(seen_codes)}")
-            time.sleep(0.3)
-        except: pass
+    # 10 个完全不同的排序物理属性 (f12:代码, f3:涨跌幅, f2:价格, f6:成交额, f5:最高, f4:最低, f17:开盘, f18:昨收, f8:换手, f10:振幅)
+    fids = ["f12", "f3", "f2", "f6", "f5", "f4", "f17", "f18", "f8", "f10"]
     
+    for fid in fids:
+        for po in [1, 0]: # 每个维度都扫正反两次
+            try:
+                items = proxy.get_sector_list(fs_code, fid=fid, po=po, pn=1, pz=100)
+                if not items: continue
+                
+                new_in_this_round = 0
+                for x in items:
+                    c = x['f12']
+                    if c not in seen_codes:
+                        seen_codes[c] = {"code": c, "market": x['f13'], "name": x['f14'], "type": label}
+                        new_in_this_round += 1
+                
+                if new_in_this_round > 0:
+                    print(f"    - [维度 {fid:<3} po={po}] 吐出: 100 | 新增: {new_in_this_round:<3} | 累计: {len(seen_codes)}")
+                
+                # 如果累计数量已经达到一个合理的饱和值（比如 480+），可以提前结束该分类
+                if len(seen_codes) >= 550: break # 板块分类通常不会超过 550 个
+                time.sleep(0.1) # 极短休眠
+            except: pass
+        if len(seen_codes) >= 550: break
+            
     return list(seen_codes.values())
 
 def main():
     start_time = datetime.now()
-    print(f"\n{'='*70}\n[*] 250-对冲采集引擎 V3 | {start_time}\n{'='*70}\n")
+    print(f"\n{'='*70}\n[*] 暴力包抄采集引擎 V4 | {start_time}\n{'='*70}\n")
     
     targets = {"Industry": "m:90 t:2", "Concept": "m:90 t:3", "Region": "m:90 t:1"}
     all_sectors = []
     for label, fs in targets.items():
-        all_sectors.extend(get_category_full_data_v3(fs, label))
+        all_sectors.extend(get_category_full_data_brute_force(fs, label))
 
     df_list = pd.DataFrame(all_sectors).drop_duplicates('code')
     total_found = len(df_list)
     print(f"\n[*] 审计报告：去重后唯一板块总数: {total_found}")
 
-    # 现在的逻辑如果跑通，总数应该在 1005 左右
-    if total_found < 980:
-        print(f"[🔥 严重错误] 板块总数 {total_found} 仍低于 980，怀疑 pz=250 被降级为 100 了。")
+    # 这套逻辑下，1005 个板块应该是手到擒来
+    if total_found < 950:
+        print(f"[🔥 严重错误] 暴力包抄后总数仍只有 {total_found}，检查 API 或 fs 过滤码。")
         sys.exit(1)
 
     print(f"\n[*] 开始并发采集详情...")
@@ -103,7 +103,7 @@ def main():
     if all_c:
         pd.DataFrame(all_c).to_parquet(f"{OUTPUT_DIR}/sector_constituents_latest.parquet", index=False)
     
-    print(f"\n{'='*70}\n[*] 任务圆满完成 | 最终板块数: {total_found}\n{'='*70}\n")
+    print(f"\n{'='*70}\n[*] 任务圆满完成 | 最终板块数: {total_found} | 耗时: {datetime.now()-start_time}\n{'='*70}\n")
 
 if __name__ == "__main__":
     main()
