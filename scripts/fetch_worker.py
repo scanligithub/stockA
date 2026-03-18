@@ -41,8 +41,18 @@ def fetch_adjust_factor_batch(codes):
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_to_code = {executor.submit(fetch_one, code): code for code in codes}
         for future in tqdm(concurrent.futures.as_completed(future_to_code), total=len(codes), desc="获取复权因子"):
-            code, factors = future.result()
-            all_factors[code] = factors
+            try:
+                # 每个请求最多等待 120 秒，避免单个请求卡死整个流程
+                code, factors = future.result(timeout=120)
+                all_factors[code] = factors
+            except concurrent.futures.TimeoutError:
+                code = future_to_code[future]
+                print(f"⏱️ Timeout for {code}, skipping...")
+                all_factors[code] = []
+            except Exception as e:
+                code = future_to_code[future]
+                print(f"⚠️ Error for {code}: {e}")
+                all_factors[code] = []
 
     return all_factors
 
