@@ -59,6 +59,43 @@ def fetch_sina_flow(code, start, end):
     return df
 
 # ==============================
+# 获取交易日历
+# ==============================
+def get_trade_calendar(start_date, end_date):
+    """获取交易日历"""
+    lg = bs.login()
+    rs = bs.query_trade_dates(start_date=start_date, end_date=end_date)
+    dates = []
+    while rs.next():
+        row = rs.get_row_data()
+        if row[1] == '1':
+            dates.append(row[0])
+    bs.logout()
+    return set(dates)
+
+# ==============================
+# 检测缺失股票
+# ==============================
+def find_missing_stocks(df, trade_dates, tolerance=0.1):
+    """
+    检测数据缺失的股票
+    tolerance: 允许缺失的比例（默认 10%，用于容忍停牌）
+    """
+    if df.empty:
+        return list(df["code"].unique())
+    
+    grouped = df.groupby("code")["date"].nunique()
+    expected = len(trade_dates)
+    bad_codes = []
+    
+    for code, count in grouped.items():
+        ratio = count / expected
+        if ratio < (1 - tolerance):
+            bad_codes.append(code)
+    
+    return bad_codes
+
+# ==============================
 # 核心：单股票处理（多进程执行）
 # ==============================
 def process_one(args):
@@ -131,6 +168,7 @@ def main():
     parser.add_argument("--index", type=int, required=True)
     parser.add_argument("--codes", type=str, required=True)
     parser.add_argument("--year", type=int, default=0)
+    parser.add_argument("--refill", action="store_true", help="启用补抓模式：检测并补抓缺失股票")
     args = parser.parse_args()
 
     codes = json.loads(args.codes)
@@ -150,27 +188,65 @@ def main():
     res_k = []
     res_f = []
 
-    # 🚀 多进程核心
-    workers = min(6, os.cpu_count())
-    with ProcessPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(process_one, (code, start, end))
-            for code in codes
-        ]
-        for future in tqdm(as_completed(futures), total=len(futures), desc="处理股票"):
-            k, f = future.result()
-            if k is not None and not k.empty:
-                res_k.append(k)
-            if f is not None and not f.empty:
-                res_f.append(f)
+    if args.refill:
+        # 🔄 补抓模式：先检测缺失，再补抓
+        print("[*] 读取已有数据，检测缺失...")
+        existing_file = f"temp_parts/kline_part_{args.index}.parquet"
+        if os.path.exists(existing_file):
+            df_existing = pd.read_parquet(existing_file)
+            trade_dates = get_trade_calendar(start, end)
+            missing_codes = find_missing_stocks(df_existing, trade_dates, tolerance=0.1)
+            print(f"[+] 检测到 {len(missing_codes)} 只股票需要补抓")
+            
+            if missing_codes:
+                # 只补抓缺失的股票
+                codes_to_fetch = missing_codes
+                print(f"[*] 开始补抓 {len(codes_to_fetch)} 只股票...")
+            else:
+                print("✅ 数据完整，无需补抓")
+                codes_to_fetch = []
+        else:
+            print("[*] 无现有数据，全量下载")
+            codes_to_fetch = codes
+            df_existing = None
+    else:
+        codes_to_fetch = codes
+        df_existing = None
 
-    print(f"[+] K 线完成：{len(res_k)}")
-    print(f"[+] 资金流完成：{len(res_f)}")
+    # 🚀 多进程核心
+    if codes_to_fetch:
+        workers = min(6, os.cpu_count())
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [
+                executor.submit(process_one, (code, start, end))
+                for code in codes_to_fetch
+            ]
+            for future in tqdm(as_completed(futures), total=len(futures), desc="处理股票"):
+                k, f = future.result()
+                if k is not None and not k.empty:
+                    res_k.append(k)
+                if f is not None and not f.empty:
+                    res_f.append(f)
+
+    # 合并已有数据和新数据
+    if args.refill and df_existing is not None and res_k:
+        print("[*] 合并已有数据和新数据...")
+        # 删除已有数据中的缺失股票
+        codes_to_remove = [c for c in codes_to_fetch if c in df_existing["code"].values]
+        if codes_to_remove:
+            df_existing = df_existing[~df_existing["code"].isin(codes_to_remove)]
+        df_k_all = pd.concat([df_existing] + res_k)
+    elif res_k:
+        df_k_all = pd.concat(res_k)
+    else:
+        df_k_all = df_existing if df_existing is not None else pd.DataFrame()
+
+    print(f"[+] K 线完成：{len(df_k_all)} 行")
+    print(f"[+] 资金流完成：{len(res_f)} 只")
 
     os.makedirs("temp_parts", exist_ok=True)
 
-    if res_k:
-        df_k_all = pd.concat(res_k)
+    if not df_k_all.empty:
         df_k_all = cleaner.clean_stock_kline(df_k_all)
         df_k_all.to_parquet(f"temp_parts/kline_part_{args.index}.parquet", index=False)
         print(f"✅ Saved KLine {args.index}: {len(df_k_all)}")
