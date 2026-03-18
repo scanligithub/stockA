@@ -102,6 +102,14 @@ jobs:
           gh release edit archive --draft=false --prerelease=false
           gh release upload archive output/*.parquet output/*.json output/*.md --clobber
 
+      # === 新增：发布质检报告到 GitHub Step Summary ===
+      - name: Publish Summary
+        if: always()
+        run: |
+          if [ -f output/qc_summary.md ]; then
+            cat output/qc_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
+
       - name: Upload QC Report to Artifacts
         if: always()
         uses: actions/upload-artifact@v4
