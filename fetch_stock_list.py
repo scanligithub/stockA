@@ -8,9 +8,8 @@ def fetch_all_a_shares():
     print(f"[*] 正在获取股票列表... {datetime.now().strftime('%H:%M:%S')}")
     
     try:
-        # akshare 的 stock_board_industry_name_em 接口获取 A 股列表
-        # 使用 stock_zh_a_spot_em 获取实时行情（包含所有 A 股）
-        df_ak = ak.stock_zh_a_spot_em()
+        # 使用静态股票列表接口（不走高频行情接口，几乎不会被封）
+        df_ak = ak.stock_info_a_code_name()
         
         if df_ak is None or df_ak.empty:
             print("[-] 获取数据为空")
