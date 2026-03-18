@@ -145,6 +145,10 @@ async def fetch_all_a_shares():
             print(f"成功 ({len(page_data)}条)")
         else:
             print("失败")
+        
+        # 每页之间额外休眠，避免连续请求
+        if i < total_pages:
+            await asyncio.sleep(random.uniform(5.0, 10.0))
 
     # 3. 汇总
     all_stocks = []
