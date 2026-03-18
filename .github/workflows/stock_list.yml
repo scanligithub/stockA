@@ -1,0 +1,32 @@
+name: Get Full A-Share List
+
+on:
+  workflow_dispatch:  # 手动触发
+  schedule:
+    - cron: '0 1 * * 1-5' # 周一到周五，UTC时间1:00 (北京时间9:00) 自动运行
+
+jobs:
+  fetch-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install aiohttp polars
+
+      - name: Run Scraper
+        run: python fetch_stock_list.py
+
+      - name: Upload Stock List Artifact
+        uses: upload-artifact@v3
+        with:
+          name: stock-directory
+          path: a_share_list.csv
