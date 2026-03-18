@@ -237,6 +237,9 @@ def main():
             pass
         time.sleep(0.02)
 
+    print(f"[+] K 线数据获取完成：{len(res_k)} 只股票")
+    print(f"[+] 资金流向数据获取完成：{len(res_f)} 只股票")
+
     # 注释掉 logout，让进程自然退出时自动清理连接
     # bs.logout()
     
