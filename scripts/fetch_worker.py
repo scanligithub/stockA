@@ -76,7 +76,7 @@ def get_trade_calendar(start_date, end_date):
 # ==============================
 # 检测缺失股票
 # ==============================
-def find_missing_stocks(df, trade_dates, tolerance=0.1):
+def find_missing_stocks(df, trade_dates, tolerance=0):
     """
     检测数据缺失的股票
     tolerance: 允许缺失的比例（默认 10%，用于容忍停牌）
