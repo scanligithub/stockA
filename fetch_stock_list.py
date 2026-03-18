@@ -20,20 +20,20 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
 ]
 
+# 从浏览器复制的 Cookie（可能需要定期更新）
+BASE_COOKIE = "st_nvi=MJNWkKqjKkBD93J-Apho-3bc6; qgqp_b_id=6d57c7e69409abb75903df4cc479ce2c; fullscreengg=1; fullscreengg2=1; st_si=00276916396440; nid18=0bcd9d7a85d5e7327284b540d8fb8064; nid18_create_time=1773292264104; gviem=ZdwJF-ELbNavPS9R72inPa9aa; gviem_create_time=1773292264104; wsc_checkuser_ok=1; st_asi=delete; st_pvi=35200028334811; st_sp=2024-02-18%2013%3A14%3A52; st_inirUrl=https%3A%2F%2Fwww.baidu.com%2Flink; st_sn=28; st_psi=20260316133113635-111000300841-3342104928"
+
 def get_headers():
     return {
         "User-Agent": random.choice(USER_AGENTS),
         "Referer": "https://quote.eastmoney.com/center/gridlist.html",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate, br, zstd",
         "Connection": "keep-alive",
-        "Sec-Ch-Ua": '"Not_A Brand";v="8", "Chromium";v="120"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "cross-site",
+        "Cookie": BASE_COOKIE,
+        "Host": "push2.eastmoney.com",
+        "Cache-Control": "no-cache",
     }
 
 async def fetch_page(page_no, pz, url, params, retries=3):
