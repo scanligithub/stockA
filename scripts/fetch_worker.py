@@ -215,7 +215,7 @@ def main():
 
     # 🚀 多进程核心
     if codes_to_fetch:
-        workers = min(6, os.cpu_count())
+        workers = min(4, os.cpu_count())
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = [
                 executor.submit(process_one, (code, start, end))
