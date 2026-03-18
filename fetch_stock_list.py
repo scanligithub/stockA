@@ -26,13 +26,17 @@ async def fetch_all_a_shares():
         
         try:
             print("[*] 打开页面...")
-            await page.goto("https://quote.eastmoney.com/center/gridlist.html", timeout=60000)
             
-            print("[*] 等待接口返回...")
-            response = await page.wait_for_response(
+            # 先设置监听器，再跳转
+            response_future = page.wait_for_event("response",
                 lambda r: "push2.eastmoney.com/api/qt/clist/get" in r.url,
                 timeout=60000
             )
+            
+            await page.goto("https://quote.eastmoney.com/center/gridlist.html", timeout=60000)
+            
+            print("[*] 等待接口返回...")
+            response = await response_future
             
             data = await response.json()
             stocks = data.get("data", {}).get("diff", [])
