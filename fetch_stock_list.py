@@ -1,70 +1,92 @@
-import akshare as ak
 import polars as pl
 import sys
 from datetime import datetime
 
 def fetch_all_a_shares():
-    """使用 akshare 获取全市场 A 股列表"""
-    print(f"[*] 正在获取股票列表... {datetime.now().strftime('%H:%M:%S')}")
+    """使用 Playwright 模拟真浏览器获取股票列表"""
+    print(f"[*] 正在启动浏览器... {datetime.now().strftime('%H:%M:%S')}")
     
     try:
-        # 使用静态股票列表接口（不走高频行情接口，几乎不会被封）
-        df_ak = ak.stock_info_a_code_name()
-        
-        if df_ak is None or df_ak.empty:
-            print("[-] 获取数据为空")
-            sys.exit(1)
-        
-        print(f"[+] 原始数据：{len(df_ak)} 条")
-        
-        # 转换为 polars DataFrame
-        df = pl.from_pandas(df_ak)
-        
-        # 重命名列以匹配原有格式
-        # akshare 返回的列名：代码、名称、最新价、涨跌幅...
-        df = df.rename({
-            "代码": "code",
-            "名称": "name",
-            "最新价": "price",
-            "涨跌幅": "pct_chg",
-            "涨跌额": "change",
-            "成交量": "volume",
-            "成交额": "amount",
-            "总市值": "market_value",
-            "市盈率": "pe",
-            "市净率": "pb",
-        })
-        
-        # 添加市场后缀
-        df = df.with_columns([
-            pl.when(pl.col("code").str.starts_with("6")).then(pl.col("code") + ".SH")
-            .when(pl.col("code").str.starts_with("0")).then(pl.col("code") + ".SZ")
-            .when(pl.col("code").str.starts_with("3")).then(pl.col("code") + ".SZ")
-            .when(pl.col("code").str.starts_with("8")).then(pl.col("code") + ".BJ")
-            .when(pl.col("code").str.starts_with("4")).then(pl.col("code") + ".BJ")
-            .otherwise(pl.col("code"))
-            .alias("symbol")
-        ])
-        
-        # 类型转换
-        df = df.with_columns([
-            pl.col("price").cast(pl.Float64, strict=False),
-            pl.col("pct_chg").cast(pl.Float64, strict=False),
-        ])
-        
-        # 去重并排序
-        df = df.filter(pl.col("code").is_not_null()).unique(subset=["symbol"])
-        df = df.sort("symbol")
-        
-        print(f"[+] 有效个股：{len(df)} 只")
-        print(df.head(5))
-        
-        df.write_csv("a_share_list.csv")
-        print("[*] a_share_list.csv 已就绪")
-        
-    except Exception as e:
-        print(f"[-] 获取失败：{type(e).__name__}: {e}")
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[-] 请先安装 playwright: pip install playwright")
+        print("[-] 然后运行：playwright install")
         sys.exit(1)
+
+    with sync_playwright() as p:
+        # 启动浏览器（headless 模式）
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            viewport={"width": 1920, "height": 1080}
+        )
+        page = context.new_page()
+        
+        try:
+            print("[*] 正在访问东方财富股票列表页面...")
+            page.goto("https://quote.eastmoney.com/center/gridlist.html#stock_a_all", timeout=60000)
+            
+            # 等待表格加载
+            print("[*] 等待数据加载...")
+            page.wait_for_selector(".table-content table", timeout=60000)
+            
+            # 提取表格数据
+            print("[*] 提取数据...")
+            rows = page.query_selector_all(".table-content table tbody tr")
+            
+            data = []
+            for row in rows:
+                cells = row.query_selector_all("td")
+                if len(cells) >= 5:
+                    code = cells[0].inner_text()
+                    name = cells[1].inner_text()
+                    price = cells[2].inner_text()
+                    pct_chg = cells[3].inner_text()
+                    
+                    # 处理 "-" 值
+                    price = None if price == "-" else float(price)
+                    pct_chg = None if pct_chg == "-" else float(pct_chg)
+                    
+                    # 添加市场后缀
+                    if code.startswith("6"):
+                        symbol = code + ".SH"
+                    elif code.startswith(("0", "3")):
+                        symbol = code + ".SZ"
+                    elif code.startswith(("8", "4")):
+                        symbol = code + ".BJ"
+                    else:
+                        symbol = code
+                    
+                    data.append({
+                        "code": code,
+                        "name": name,
+                        "symbol": symbol,
+                        "price": price,
+                        "pct_chg": pct_chg
+                    })
+            
+            print(f"[+] 成功获取 {len(data)} 条数据")
+            
+            browser.close()
+            
+        except Exception as e:
+            browser.close()
+            print(f"[-] 获取失败：{type(e).__name__}: {e}")
+            sys.exit(1)
+
+    if not data:
+        print("[-] 没有获取到任何数据")
+        sys.exit(1)
+
+    # 转换为 Polars DataFrame
+    df = pl.DataFrame(data)
+    df = df.sort("symbol")
+    
+    print(f"[+] 有效个股：{len(df)} 只")
+    print(df.head(5))
+    
+    df.write_csv("a_share_list.csv")
+    print("[*] a_share_list.csv 已就绪")
 
 if __name__ == "__main__":
     fetch_all_a_shares()
