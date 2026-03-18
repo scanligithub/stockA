@@ -40,7 +40,7 @@ def fetch_adjust_factor_batch(codes):
     # 并发度设为 10，平衡速度和 baostock 负载
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         future_to_code = {executor.submit(fetch_one, code): code for code in codes}
-        for future in concurrent.futures.as_completed(future_to_code):
+        for future in tqdm(concurrent.futures.as_completed(future_to_code), total=len(codes), desc="获取复权因子"):
             code, factors = future.result()
             all_factors[code] = factors
 
