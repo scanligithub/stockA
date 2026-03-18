@@ -4,6 +4,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
+import concurrent.futures
 import json
 import pandas as pd
 import datetime
@@ -15,6 +16,36 @@ from tqdm import tqdm
 from utils.cleaner import DataCleaner
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+
+
+def fetch_adjust_factor_batch(codes):
+    """
+    批量并发获取所有股票的复权因子，返回 {code: list_of_factor_rows}
+    """
+    all_factors = {}
+
+    def fetch_one(code):
+        try:
+            rs = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
+            if rs.error_code == '0':
+                factors = []
+                while rs.next():
+                    factors.append(rs.get_row_data())
+                return code, factors
+            return code, []
+        except Exception as e:
+            print(f"⚠️ Error fetching factor for {code}: {e}")
+            return code, []
+
+    # 并发度设为 10，平衡速度和 baostock 负载
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_code = {executor.submit(fetch_one, code): code for code in codes}
+        for future in concurrent.futures.as_completed(future_to_code):
+            code, factors = future.result()
+            all_factors[code] = factors
+
+    return all_factors
+
 
 def fetch_sina_flow(code, start, end):
     symbol = code.replace(".", "")
@@ -108,6 +139,51 @@ def process_one(code, start, end):
     
     return df_k, df_f
 
+
+def process_one_with_factors(code, start, end, adj_factors):
+    """
+    使用预获取的复权因子处理单只股票，避免重复 API 调用
+    adj_factors: {code: list_of_factor_rows}
+    """
+    fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST"
+    df_k = pd.DataFrame()
+
+    try:
+        rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
+        k_data = []
+        if rs.error_code == '0':
+            while rs.next():
+                k_data.append(rs.get_row_data())
+
+        df_k = pd.DataFrame(k_data, columns=fields.split(",")) if k_data else pd.DataFrame()
+
+        # 使用预获取的复权因子
+        if not df_k.empty:
+            fac_data = adj_factors.get(code, [])
+            if fac_data:
+                df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
+                df_fac = df_fac[['date', 'back']].rename(columns={'back': 'adjustFactor'})
+
+                df_k['date'] = pd.to_datetime(df_k['date'])
+                df_fac['date'] = pd.to_datetime(df_fac['date'])
+                df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
+
+                df_k = df_k.sort_values('date')
+                df_fac = df_fac.sort_values('date')
+
+                df_k = pd.merge_asof(df_k, df_fac, on='date', direction='backward')
+                df_k['date'] = df_k['date'].dt.strftime('%Y-%m-%d')
+                df_k['adjustFactor'] = df_k['adjustFactor'].fillna(1.0)
+            else:
+                df_k['adjustFactor'] = 1.0
+
+    except Exception as e:
+        print(f"⚠️ Error fetching {code}: {e}")
+        df_k = pd.DataFrame()
+
+    return df_k
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--index", type=int, required=True)
@@ -129,22 +205,40 @@ def main():
         start, end = f"{curr_year}-01-01", future_date
 
     print(f"Job {args.index}: Fetching {len(codes)} stocks ({start}~{end})...")
-    
+
     lg = bs.login()
     if lg.error_code != '0':
         print(f"Login failed: {lg.error_msg}")
         return
 
-    res_k, res_f = [], []
     cleaner = DataCleaner()
-    
-    for code in tqdm(codes):
-        k, f = process_one(code, start, end)
-        if not k.empty: res_k.append(k)
-        if not f.empty: res_f.append(f)
+
+    # ================= 优化核心：批量并发获取复权因子 =================
+    print(f"[*] 正在批量获取 {len(codes)} 只股票的复权因子...")
+    start_factor_time = time.time()
+    adj_factors = fetch_adjust_factor_batch(codes)
+    print(f"[+] 复权因子获取完成：{len(codes)} 只 | 耗时 {time.time() - start_factor_time:.2f}秒")
+    # ================================================================
+
+    res_k = []
+    res_f = []
+
+    # 使用预获取的复权因子，只调用 K 线 API
+    for code in tqdm(codes, desc="下载 K 线"):
+        k = process_one_with_factors(code, start, end, adj_factors)
+        if not k.empty:
+            res_k.append(k)
+        # Sina Flow 仍然单独获取（可选优化）
+        try:
+            f = fetch_sina_flow(code, start, end)
+            if not f.empty:
+                res_f.append(f)
+        except:
+            pass
         time.sleep(0.02)
-            
-    bs.logout()
+
+    # 注释掉 logout，让进程自然退出时自动清理连接
+    # bs.logout()
     
     os.makedirs("temp_parts", exist_ok=True)
     
