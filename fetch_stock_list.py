@@ -8,8 +8,8 @@ import socket
 import random
 from datetime import datetime
 
-# 极致稳健：限制并发为 1，串行请求避免被封锁
-sem = asyncio.Semaphore(1)
+# 适度并发：限制为 5，平衡速度和稳定性
+sem = asyncio.Semaphore(5)
 
 async def fetch_page(session, page_no, pz, url, params, retries=5):
     """极致稳健的分页抓取：带随机休眠和深度重试"""
@@ -21,10 +21,13 @@ async def fetch_page(session, page_no, pz, url, params, retries=5):
         
         for attempt in range(retries):
             try:
-                # 每个任务前随机微休眠，打碎并发特征
-                await asyncio.sleep(random.uniform(0.5, 1.5))
+                # 首次请求前休眠，后续重试时休眠更久
+                if attempt == 0:
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
+                else:
+                    await asyncio.sleep(random.uniform(2.0, 4.0))
                 
-                async with session.get(url, params=page_params, timeout=60) as resp:
+                async with session.get(url, params=page_params, timeout=90) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         raw_list = data.get("data", {}).get("diff", [])
@@ -40,11 +43,11 @@ async def fetch_page(session, page_no, pz, url, params, retries=5):
                         return clean_list
                     
                     elif resp.status == 403:
-                        print(f"[!] 403 被拒，请求过快，尝试深度休眠...")
-                        await asyncio.sleep(10)
-            except (aiohttp.ServerDisconnectedError, asyncio.TimeoutError, aiohttp.ClientError):
-                wait_time = (attempt + 1) * 10  # 增加等待时间
-                print(f"[!] 连接断开或超时，第 {attempt+1} 次重试，等待 {wait_time}s...")
+                        print(f"[!] 403 被拒，请求过快，深度休眠 30s...")
+                        await asyncio.sleep(30)  # 增加休眠时间
+            except (aiohttp.ServerDisconnectedError, asyncio.TimeoutError, aiohttp.ClientError) as e:
+                wait_time = (attempt + 1) * 15  # 增加等待时间
+                print(f"[!] 第 {attempt+1} 次重试，等待 {wait_time}s... ({type(e).__name__})")
                 await asyncio.sleep(wait_time)
             except Exception as e:
                 print(f"[-] 页面 {page_no} 未知错误: {type(e).__name__}")
@@ -93,19 +96,23 @@ async def fetch_all_a_shares():
 
         print(f"[+] 目标总数: {total_count} 只")
         
-        # 2. 分页串行抓取（避免并发过高被封锁）
+        # 2. 分页并发抓取（适度并发）
         page_size = 100
         total_pages = math.ceil(total_count / page_size)
-        print(f"[*] 启动 {total_pages} 个串行抓取任务...")
+        print(f"[*] 启动 {total_pages} 个并发抓取任务（并发度 5）...")
         
+        # 分批执行，避免瞬间冲击
+        batch_size = 10
         pages_data = []
-        for i in range(1, total_pages + 1):
-            print(f"[*] 正在获取第 {i}/{total_pages} 页...")
-            page_data = await fetch_page(session, i, page_size, API_URL, base_params)
-            if page_data:
-                pages_data.append(page_data)
-            else:
-                print(f"[!] 第 {i} 页获取失败，跳过")
+        for batch_start in range(1, total_pages + 1, batch_size):
+            batch_end = min(batch_start + batch_size, total_pages + 1)
+            print(f"[*] 处理批次：第 {batch_start}-{batch_end-1} 页...")
+            batch_tasks = [fetch_page(session, i, page_size, API_URL, base_params) for i in range(batch_start, batch_end)]
+            batch_results = await asyncio.gather(*batch_tasks)
+            pages_data.extend([r for r in batch_results if r])
+            if batch_end <= total_pages:
+                print(f"[*] 批次完成，休眠 5s 准备下一批...")
+                await asyncio.sleep(5)
         
         # 3. 汇总数据
         all_stocks = []
