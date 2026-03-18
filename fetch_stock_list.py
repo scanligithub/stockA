@@ -51,8 +51,8 @@ async def fetch_page(page_no, pz, url, params, retries=3):
                 # 随机休眠 2-5 秒
                 await asyncio.sleep(random.uniform(2.0, 5.0))
 
-                conn = aiohttp.TCPConnector(limit=1, family=socket.AF_INET)
-                async with aiohttp.ClientSession(headers=headers, connector=conn) as session:
+                conn = aiohttp.TCPConnector(limit=1, family=socket.AF_INET, ssl=False, verify_ssl=False)
+                async with aiohttp.ClientSession(headers=headers, connector=conn, auto_redirects=False) as session:
                     async with session.get(url, params=page_params, timeout=60) as resp:
                         if resp.status == 200:
                             data = await resp.json()
@@ -112,8 +112,8 @@ async def fetch_all_a_shares():
             test_p = {**base_params, "pn": "1", "pz": "1", "_": str(int(time.time() * 1000))}
             headers = get_headers()
 
-            conn_test = aiohttp.TCPConnector(limit=1, family=socket.AF_INET)
-            async with aiohttp.ClientSession(headers=headers, connector=conn_test) as session:
+            conn_test = aiohttp.TCPConnector(limit=1, family=socket.AF_INET, ssl=False, verify_ssl=False)
+            async with aiohttp.ClientSession(headers=headers, connector=conn_test, auto_redirects=False) as session:
                 async with session.get(API_URL, params=test_p, timeout=30) as resp:
                     if resp.status == 200:
                         res_json = await resp.json()
