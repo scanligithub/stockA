@@ -278,19 +278,6 @@ def main():
                 else:
                     flow_failed_codes.append(code)
 
-    # 合并已有数据和新数据
-    if args.refill and df_existing is not None and res_k:
-        print("[*] 合并已有数据和新数据...")
-        # 删除已有数据中的缺失股票
-        codes_to_remove = [c for c in codes_to_fetch if c in df_existing["code"].values]
-        if codes_to_remove:
-            df_existing = df_existing[~df_existing["code"].isin(codes_to_remove)]
-        df_k_all = pd.concat([df_existing] + res_k)
-    elif res_k:
-        df_k_all = pd.concat(res_k)
-    else:
-        df_k_all = df_existing if df_existing is not None else pd.DataFrame()
-
     # 🔄 自动补抓失败股票（最多 3 次）
     for retry_round in range(3):
         if not k_failed_codes:
@@ -309,9 +296,12 @@ def main():
             else:
                 k_failed_codes.append(code)
 
-    # 重新合并数据（包含补抓成功的股票）
+    # 合并已有数据和新数据（包含补抓成功的股票）
     if args.refill and df_existing is not None and res_k:
-        codes_to_remove = [c for c in retry_codes if c in df_existing["code"].values]
+        print("[*] 合并已有数据和新数据...")
+        # 删除已有数据中的缺失股票（本次下载的所有股票，包括补抓的）
+        all_fetched_codes = codes_to_fetch  # 已经包含补抓的股票
+        codes_to_remove = [c for c in all_fetched_codes if c in df_existing["code"].values]
         if codes_to_remove:
             df_existing = df_existing[~df_existing["code"].isin(codes_to_remove)]
         df_k_all = pd.concat([df_existing] + res_k)
