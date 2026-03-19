@@ -135,10 +135,16 @@ def main():
     targets["output/qc_report.json"] = "qc_report.json"
     targets["output/qc_summary.md"] = "qc_summary.md"
 
-    # 6. 上传
+    # 6. 上传逻辑（根据 mode 决定）
     if args.mode == "hf" and os.getenv("HF_TOKEN"):
+        # 旧模式：使用 HF API 逐文件上传（会产生历史记录，不推荐）
         hf = HFManager(os.getenv("HF_TOKEN"), os.getenv("HF_REPO"))
-        for local, remote in targets.items(): hf.upload_file(local, remote)
+        for local, remote in targets.items():
+            hf.upload_file(local, remote)
+    elif args.mode == "release":
+        # 新模式：仅生成数据，由 GitHub Actions Workflow 负责 force push
+        print("✅ Data merging completed in 'output/' folder.")
+        print("🚀 Skipping internal upload_file. Use git force-push via Workflow instead.")
 
 if __name__ == "__main__":
     main()

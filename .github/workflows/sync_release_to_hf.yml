@@ -24,28 +24,30 @@ jobs:
           # 下载文件到专用目录
           gh release download archive -D hf_sync_dir --pattern "${{ inputs.file_pattern }}" || echo "⚠️ No files found"
           
-      - name: Push to Hugging Face (Force Overwrite)
+      - name: Merge & Push to HF (Force Overwrite)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: ${{ secrets.HF_REPO }} # 格式如: username/dataset-name
+          HF_REPO: ${{ secrets.HF_REPO }}
         run: |
-          cd hf_sync_dir
+          # 1. 运行合并脚本（生成最终数据到 output/）
+          python scripts/merge_and_push.py --mode release
           
-          # 1. 初始化全新的 Git 环境
+          # 2. 进入输出目录
+          cd output
+          
+          # 3. 初始化全新的 Git 环境（抹除历史）
           git init -b main
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           
-          # 2. 启用 LFS 并追踪所有下载的文件
+          # 4. 启用 LFS 并追踪 parquet 文件
           git lfs install
-          # 追踪所有文件（既然是数据集，通常所有大文件都需要 LFS）
-          git lfs track "*"
+          git lfs track "*.parquet"
           git add .gitattributes
           
-          # 3. 添加文件并创建唯一的 Commit
+          # 5. 提交当前最新数据
           git add .
-          git commit -m "Auto-sync from GitHub Release: $(date +'%Y-%m-%d %H:%M:%S')"
+          git commit -m "Daily data refresh: $(date +'%Y-%m-%d %H:%M:%S')"
           
-          # 4. 强制推送到 HF 远程仓库
-          # 注意：这将抹除远程仓库的所有历史记录，仅保留当前内容
+          # 6. 强制覆盖 HF 远程仓库（只保留最新版本）
           git push https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO main --force
