@@ -278,7 +278,7 @@ def main():
                 else:
                     flow_failed_codes.append(code)
 
-    # 🔄 自动补抓失败股票（最多 3 次）
+    # 🔄 自动补抓 K 线失败股票（最多 3 次）
     for retry_round in range(3):
         if not k_failed_codes:
             break
@@ -286,7 +286,7 @@ def main():
         retry_codes = k_failed_codes.copy()
         k_failed_codes = []
 
-        for code in tqdm(retry_codes, desc=f"补抓{retry_round + 1}"):
+        for code in tqdm(retry_codes, desc=f"补抓 K{retry_round + 1}"):
             k, f = process_one((code, start, end))
             if k is not None and not k.empty:
                 res_k.append(k)
@@ -295,6 +295,21 @@ def main():
                     flow_failed_codes.remove(code)
             else:
                 k_failed_codes.append(code)
+
+    # 🔄 自动补抓资金流失败股票（最多 3 次）
+    for retry_round in range(3):
+        if not flow_failed_codes:
+            break
+        print(f"\n[*] 第 {retry_round + 1} 次补抓 {len(flow_failed_codes)} 只资金流失败股票...")
+        retry_codes = flow_failed_codes.copy()
+        flow_failed_codes = []
+
+        for code in tqdm(retry_codes, desc=f"补抓 F{retry_round + 1}"):
+            _, f = process_one((code, start, end))
+            if f is not None and not f.empty:
+                res_f.append(f)
+            else:
+                flow_failed_codes.append(code)
 
     # 合并已有数据和新数据（包含补抓成功的股票）
     if args.refill and df_existing is not None and res_k:
