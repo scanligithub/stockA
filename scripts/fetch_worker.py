@@ -309,6 +309,17 @@ def main():
             else:
                 k_failed_codes.append(code)
 
+    # 重新合并数据（包含补抓成功的股票）
+    if args.refill and df_existing is not None and res_k:
+        codes_to_remove = [c for c in retry_codes if c in df_existing["code"].values]
+        if codes_to_remove:
+            df_existing = df_existing[~df_existing["code"].isin(codes_to_remove)]
+        df_k_all = pd.concat([df_existing] + res_k)
+    elif res_k:
+        df_k_all = pd.concat(res_k)
+    else:
+        df_k_all = df_existing if df_existing is not None else pd.DataFrame()
+
     print(f"[+] K 线完成：{len(df_k_all)} 行，{df_k_all['code'].nunique()} 只")
     print(f"[+] 资金流完成：{len(res_f)} 只")
 
