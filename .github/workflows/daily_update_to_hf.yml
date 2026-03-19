@@ -73,7 +73,7 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
-  # 4. 汇总、质检、推送到 Hugging Face
+  # 4. 汇总、质检、推送到 Hugging Face (零历史模式)
   finalize:
     needs: [fetch-stocks, fetch-sectors]
     runs-on: ubuntu-latest
@@ -91,13 +91,37 @@ jobs:
           merge-multiple: true
           path: all_artifacts
           
-      - name: Merge & Push to HF
+      - name: Merge Data (Local Mode)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ secrets.HF_REPO }}
         run: |
-          # mode hf 会自动调用 hf_manager 进行上传
-          python scripts/merge_and_push.py --mode hf
+          # 使用 --mode release，让脚本只生成文件不上传
+          python scripts/merge_and_push.py --mode release
+          
+      - name: Force Push to HF (Zero History)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ secrets.HF_REPO }}
+        run: |
+          cd output
+          
+          # 初始化全新的 Git 环境（抹除历史）
+          git init -b main
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          
+          # 启用 LFS 并追踪 parquet 文件
+          git lfs install
+          git lfs track "*.parquet"
+          git add .gitattributes
+          
+          # 提交当前最新数据
+          git add .
+          git commit -m "Daily update: $(date +'%Y-%m-%d %H:%M:%S')"
+          
+          # 强制覆盖 HF 远程仓库（只保留最新版本，防止存储膨胀）
+          git push https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO main --force
           
       - name: Upload QC Report to Artifacts
         if: always()
