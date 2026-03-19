@@ -1,4 +1,4 @@
-name: Sync Release to HF
+name: Sync Release to HF (Zero History Mode)
 
 on:
   workflow_dispatch:
@@ -13,55 +13,39 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-      - run: pip install huggingface_hub
-      
+          fetch-depth: 0  # 获取全部历史，方便后续操作
+
       - name: Download from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir downloads
-          # 下载符合 pattern 的文件到 downloads 目录
-          gh release download archive -D downloads --pattern "${{ inputs.file_pattern }}" || echo "⚠️ No files found or Release missing"
+          mkdir -p hf_sync_dir
+          # 下载文件到专用目录
+          gh release download archive -D hf_sync_dir --pattern "${{ inputs.file_pattern }}" || echo "⚠️ No files found"
           
-      - name: Upload to HF
+      - name: Push to Hugging Face (Force Overwrite)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: ${{ secrets.HF_REPO }}
+          HF_REPO: ${{ secrets.HF_REPO }} # 格式如: username/dataset-name
         run: |
-          python -c "
-          from huggingface_hub import HfApi
-          import os
-          import glob
+          cd hf_sync_dir
           
-          # 1. 获取所有下载的文件
-          files = glob.glob('downloads/*')
-          print(f'📂 Found {len(files)} files in downloads folder.')
+          # 1. 初始化全新的 Git 环境
+          git init -b main
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
           
-          if len(files) == 0:
-              print('⚠️ No files found to upload. Please check if the Release exists and contains files.')
-              exit(0) # 优雅退出
+          # 2. 启用 LFS 并追踪所有下载的文件
+          git lfs install
+          # 追踪所有文件（既然是数据集，通常所有大文件都需要 LFS）
+          git lfs track "*"
+          git add .gitattributes
           
-          api = HfApi(token=os.getenv('HF_TOKEN'))
-          repo = os.getenv('HF_REPO')
+          # 3. 添加文件并创建唯一的 Commit
+          git add .
+          git commit -m "Auto-sync from GitHub Release: $(date +'%Y-%m-%d %H:%M:%S')"
           
-          print(f'🎯 Target Repo: {repo}')
-          
-          for f in files:
-              if os.path.isfile(f):
-                  fname = os.path.basename(f)
-                  print(f'🚀 Uploading {fname} ...')
-                  try:
-                      api.upload_file(
-                          path_or_fileobj=f, 
-                          path_in_repo=fname, 
-                          repo_id=repo, 
-                          repo_type='dataset'
-                      )
-                      print(f'✅ {fname} success.')
-                  except Exception as e:
-                      print(f'❌ Failed to upload {fname}: {e}')
-                      # 不退出，继续传下一个
-          "
+          # 4. 强制推送到 HF 远程仓库
+          # 注意：这将抹除远程仓库的所有历史记录，仅保留当前内容
+          git push https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO main --force
