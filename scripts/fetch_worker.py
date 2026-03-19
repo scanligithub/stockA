@@ -291,6 +291,24 @@ def main():
     else:
         df_k_all = df_existing if df_existing is not None else pd.DataFrame()
 
+    # 🔄 自动补抓失败股票（最多 3 次）
+    for retry_round in range(3):
+        if not k_failed_codes:
+            break
+        print(f"\n[*] 第 {retry_round + 1} 次补抓 {len(k_failed_codes)} 只 K 线失败股票...")
+        retry_codes = k_failed_codes.copy()
+        k_failed_codes = []
+
+        for code in tqdm(retry_codes, desc=f"补抓{retry_round + 1}"):
+            k, f = process_one((code, start, end))
+            if k is not None and not k.empty:
+                res_k.append(k)
+                # 如果资金流也成功了，从 flow_failed_codes 移除
+                if f is not None and not f.empty and code in flow_failed_codes:
+                    flow_failed_codes.remove(code)
+            else:
+                k_failed_codes.append(code)
+
     print(f"[+] K 线完成：{len(df_k_all)} 行，{df_k_all['code'].nunique()} 只")
     print(f"[+] 资金流完成：{len(res_f)} 只")
 
