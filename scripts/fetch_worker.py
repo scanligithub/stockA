@@ -96,51 +96,75 @@ def find_missing_stocks(df, trade_dates, tolerance=0):
     return bad_codes
 
 # ==============================
-# 核心：单股票处理（多进程执行）
+# 核心：单股票处理（多进程执行，带重试）
 # ==============================
 def process_one(args):
+    """
+    下载单只股票的 K 线数据
+    遇到"用户未登录"错误时会自动重试
+    """
     code, start, end = args
-    try:
-        lg = bs.login()
-        if lg.error_code != '0':
-            print(f"❌ [{code}] baostock 登录失败：error_code={lg.error_code}, error_msg={lg.error_msg}")
-            return None, None
+    max_retry = 3
 
-        fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST"
+    for attempt in range(max_retry):
+        try:
+            lg = bs.login()
+            if lg.error_code != '0':
+                if attempt < max_retry - 1:
+                    time.sleep(1)
+                    continue
+                print(f"❌ [{code}] baostock 登录失败：error_code={lg.error_code}, error_msg={lg.error_msg}")
+                return None, None
 
-        # ---------- K 线 ----------
-        rs = bs.query_history_k_data_plus(
-            code, fields,
-            start_date=start, end_date=end,
-            frequency="d", adjustflag="3"
-        )
+            fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST"
 
-        if rs.error_code != '0':
-            print(f"❌ [{code}] K 线 API 失败：error_code={rs.error_code}, error_msg={rs.error_msg}")
-            bs.logout()
-            return None, None
+            # ---------- K 线 ----------
+            rs = bs.query_history_k_data_plus(
+                code, fields,
+                start_date=start, end_date=end,
+                frequency="d", adjustflag="3"
+            )
 
-        k_data = []
-        while rs.next():
-            k_data.append(rs.get_row_data())
+            if rs.error_code != '0':
+                bs.logout()
+                # 如果是"用户未登录"错误，重试
+                if "用户未登录" in rs.error_msg or rs.error_code == '10001001':
+                    if attempt < max_retry - 1:
+                        time.sleep(1)
+                        continue
+                print(f"❌ [{code}] K 线 API 失败：error_code={rs.error_code}, error_msg={rs.error_msg}")
+                return None, None
 
-        if not k_data:
-            print(f"⚠️ [{code}] 未获取到 K 线数据（可能无交易记录）")
-            bs.logout()
-            return None, None
+            k_data = []
+            while rs.next():
+                k_data.append(rs.get_row_data())
 
-        df_k = pd.DataFrame(k_data, columns=fields.split(","))
+            if not k_data:
+                bs.logout()
+                if attempt < max_retry - 1:
+                    time.sleep(1)
+                    continue
+                print(f"⚠️ [{code}] 未获取到 K 线数据（可能无交易记录）")
+                return None, None
 
-        # ---------- 复权因子 ----------
-        rs_fac = bs.query_adjust_factor(
-            code, start_date="1990-01-01", end_date="2099-12-31"
-        )
-        fac_data = []
-        if rs_fac.error_code != '0':
-            print(f"⚠️ [{code}] 复权因子获取失败：error_code={rs_fac.error_code}")
-        else:
-            while rs_fac.next():
-                fac_data.append(rs_fac.get_row_data())
+            df_k = pd.DataFrame(k_data, columns=fields.split(","))
+
+            # ---------- 复权因子 ----------
+            rs_fac = bs.query_adjust_factor(
+                code, start_date="1990-01-01", end_date="2099-12-31"
+            )
+            fac_data = []
+            if rs_fac.error_code != '0':
+                # 如果是"用户未登录"错误，重试
+                if "用户未登录" in rs_fac.error_msg or rs_fac.error_code == '10001001':
+                    bs.logout()
+                    if attempt < max_retry - 1:
+                        time.sleep(1)
+                        continue
+                print(f"⚠️ [{code}] 复权因子获取失败：error_code={rs_fac.error_code}")
+            else:
+                while rs_fac.next():
+                    fac_data.append(rs_fac.get_row_data())
 
             if fac_data:
                 df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
@@ -159,19 +183,24 @@ def process_one(args):
             else:
                 df_k['adjustFactor'] = 1.0
 
-        # ---------- 资金流 ----------
-        df_f = fetch_sina_flow(code, start, end)
+            # ---------- 资金流 ----------
+            df_f = fetch_sina_flow(code, start, end)
 
-        bs.logout()
-        return df_k, df_f
-
-    except Exception as e:
-        print(f"⚠️ Error {code}: {e}")
-        try:
             bs.logout()
-        except:
-            pass
-        return None, None
+            return df_k, df_f
+
+        except Exception as e:
+            try:
+                bs.logout()
+            except:
+                pass
+            if attempt < max_retry - 1:
+                time.sleep(2)
+            else:
+                print(f"⚠️ [{code}] 异常：{e}")
+                return None, None
+
+    return None, None
 
 # ==============================
 # 主函数
