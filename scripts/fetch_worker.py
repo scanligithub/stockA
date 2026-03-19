@@ -256,19 +256,27 @@ def main():
         df_existing = None
 
     # 🚀 多进程核心
+    k_failed_codes = []  # K 线下载失败的股票
+    flow_failed_codes = []  # 资金流下载失败的股票
+
     if codes_to_fetch:
         workers = min(4, os.cpu_count())
         with ProcessPoolExecutor(max_workers=workers) as executor:
-            futures = [
-                executor.submit(process_one, (code, start, end))
+            futures = {
+                executor.submit(process_one, (code, start, end)): code
                 for code in codes_to_fetch
-            ]
+            }
             for future in tqdm(as_completed(futures), total=len(futures), desc="处理股票"):
+                code = futures[future]
                 k, f = future.result()
                 if k is not None and not k.empty:
                     res_k.append(k)
+                else:
+                    k_failed_codes.append(code)
                 if f is not None and not f.empty:
                     res_f.append(f)
+                else:
+                    flow_failed_codes.append(code)
 
     # 合并已有数据和新数据
     if args.refill and df_existing is not None and res_k:
@@ -285,6 +293,15 @@ def main():
 
     print(f"[+] K 线完成：{len(df_k_all)} 行，{df_k_all['code'].nunique()} 只")
     print(f"[+] 资金流完成：{len(res_f)} 只")
+
+    # 输出失败列表
+    if k_failed_codes:
+        print(f"\n⚠️ K 线未下载成功股票 ({len(k_failed_codes)}只):")
+        print(f"   {', '.join(k_failed_codes)}")
+
+    if flow_failed_codes:
+        print(f"\n⚠️ 资金流未下载股票 ({len(flow_failed_codes)}只):")
+        print(f"   {', '.join(flow_failed_codes)}")
 
     os.makedirs("temp_parts", exist_ok=True)
 
