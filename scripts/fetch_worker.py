@@ -30,7 +30,7 @@ def retry(func, max_retry=3, delay=1):
                     print(f"❌ Retry failed: {e}")
                     return None
                 time.sleep(delay)
-        return None
+                return None
     return wrapper
 
 # ==============================
@@ -83,16 +83,16 @@ def find_missing_stocks(df, trade_dates, tolerance=0):
     """
     if df.empty:
         return list(df["code"].unique())
-    
+
     grouped = df.groupby("code")["date"].nunique()
     expected = len(trade_dates)
     bad_codes = []
-    
+
     for code, count in grouped.items():
         ratio = count / expected
         if ratio < (1 - tolerance):
             bad_codes.append(code)
-    
+
     return bad_codes
 
 # ==============================
@@ -103,6 +103,7 @@ def process_one(args):
     try:
         lg = bs.login()
         if lg.error_code != '0':
+            print(f"❌ [{code}] baostock 登录失败：error_code={lg.error_code}, error_msg={lg.error_msg}")
             return None, None
 
         fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST"
@@ -113,21 +114,33 @@ def process_one(args):
             start_date=start, end_date=end,
             frequency="d", adjustflag="3"
         )
+
+        if rs.error_code != '0':
+            print(f"❌ [{code}] K 线 API 失败：error_code={rs.error_code}, error_msg={rs.error_msg}")
+            bs.logout()
+            return None, None
+
         k_data = []
-        if rs.error_code == '0':
-            while rs.next():
-                k_data.append(rs.get_row_data())
-        df_k = pd.DataFrame(k_data, columns=fields.split(",")) if k_data else pd.DataFrame()
+        while rs.next():
+            k_data.append(rs.get_row_data())
+
+        if not k_data:
+            print(f"⚠️ [{code}] 未获取到 K 线数据（可能无交易记录）")
+            bs.logout()
+            return None, None
+
+        df_k = pd.DataFrame(k_data, columns=fields.split(","))
 
         # ---------- 复权因子 ----------
-        if not df_k.empty:
-            rs_fac = bs.query_adjust_factor(
-                code, start_date="1990-01-01", end_date="2099-12-31"
-            )
-            fac_data = []
-            if rs_fac.error_code == '0':
-                while rs_fac.next():
-                    fac_data.append(rs_fac.get_row_data())
+        rs_fac = bs.query_adjust_factor(
+            code, start_date="1990-01-01", end_date="2099-12-31"
+        )
+        fac_data = []
+        if rs_fac.error_code != '0':
+            print(f"⚠️ [{code}] 复权因子获取失败：error_code={rs_fac.error_code}")
+        else:
+            while rs_fac.next():
+                fac_data.append(rs_fac.get_row_data())
 
             if fac_data:
                 df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
@@ -197,7 +210,7 @@ def main():
             trade_dates = get_trade_calendar(start, end)
             missing_codes = find_missing_stocks(df_existing, trade_dates, tolerance=0.1)
             print(f"[+] 检测到 {len(missing_codes)} 只股票需要补抓")
-            
+
             if missing_codes:
                 # 只补抓缺失的股票
                 codes_to_fetch = missing_codes
