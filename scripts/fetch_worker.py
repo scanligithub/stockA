@@ -283,7 +283,7 @@ def main():
     else:
         df_k_all = df_existing if df_existing is not None else pd.DataFrame()
 
-    print(f"[+] K 线完成：{len(df_k_all)} 行")
+    print(f"[+] K 线完成：{len(df_k_all)} 行，{df_k_all['code'].nunique()} 只")
     print(f"[+] 资金流完成：{len(res_f)} 只")
 
     os.makedirs("temp_parts", exist_ok=True)
