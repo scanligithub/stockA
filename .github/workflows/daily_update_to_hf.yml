@@ -121,4 +121,4 @@ jobs:
           retention-days: 3
       - name: Publish QC
         if: always()
-        run: cat qc_summary.md >> $GITHUB_STEP_SUMMARY
+        run: cat output/qc_summary.md >> $GITHUB_STEP_SUMMARY
