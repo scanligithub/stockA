@@ -1,0 +1,30 @@
+name: Eastmoney Sector Sync Test
+
+on:
+  workflow_dispatch: # 手动触发测试
+
+jobs:
+  build_and_run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          pip install baostock aiohttp polars
+
+      - name: Run Sector Fetcher
+        run: python fetch_sectors.py
+
+      - name: Upload Results
+        uses: upload-artifact@v3
+        with:
+          name: cleaned-sector-list
+          path: sector_list_cleaned.csv
