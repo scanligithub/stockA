@@ -2,101 +2,103 @@ import asyncio
 import aiohttp
 import baostock as bs
 import polars as pl
-import json
 import sys
+from datetime import datetime
 
 # --- 配置区 ---
-MAX_CONCURRENT = 15  # 严格控制并发数，防止被封
-SECTOR_API_TEMPLATE = "https://push2.eastmoney.com/api/qt/slist/get?spt=3&ut=fa5fd1943c09a822273714f23b58f2d0&pi=0&pz=100&po=1&np=1&fields=f12,f14&secid={secid}"
+MAX_CONCURRENT = 10  # Actions 环境建议保守一点，设为 10
+# 东财个股所属板块接口
+SECTOR_API = "https://push2.eastmoney.com/api/qt/slist/get?spt=3&ut=fa5fd1943c09a822273714f23b58f2d0&pi=0&pz=100&po=1&np=1&fields=f12,f14&secid={secid}"
 
 async def get_stock_sectors(session, semaphore, stock_info):
     """
-    抓取单个个股所属的所有板块
+    抓取单个个股所属的所有板块（行业+概念）
     """
     bs_code, name = stock_info
-    # Baostock 格式 sh.601318 -> 东财格式 1.601318 / sz.000001 -> 0.000001
+    # 转换代码格式: sh.601318 -> 1.601318, sz.000001 -> 0.000001
     prefix = "1." if bs_code.startswith("sh") else "0."
     pure_code = bs_code.split(".")[1]
     secid = f"{prefix}{pure_code}"
     
     async with semaphore:
-        url = SECTOR_API_TEMPLATE.format(secid=secid)
+        url = SECTOR_API.format(secid=secid)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://quote.eastmoney.com/"
+        }
         try:
-            async with session.get(url, timeout=10) as resp:
+            async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
                     return []
                 content = await resp.json()
-                data_list = content.get("data", {}).get("diff", [])
+                diff = content.get("data", {}).get("diff", [])
                 
-                # 提取板块代码和名称 (f12, f14)
-                sectors = []
-                for item in data_list:
-                    # 过滤掉非板块数据（通常板块代码以 BK 开头）
-                    if item.get("f12", "").startswith("BK"):
-                        sectors.append({
-                            "sector_code": item["f12"],
-                            "sector_name": item["f14"]
-                        })
-                return sectors
-        except Exception as e:
-            # 静默处理异常，保证整体进度
+                if not diff: return []
+                
+                # 提取板块 ID 和名称
+                return [{"sector_code": x["f12"], "sector_name": x["f14"]} for x in diff if "f12" in x]
+        except Exception:
             return []
 
 async def main():
-    # 1. 登录 Baostock 获取个股种子列表
-    print("[*] 正在连接 Baostock 获取个股列表...")
-    lg = bs.login()
-    if lg.error_code != '0':
-        print(f"[-] Baostock 登录失败: {lg.error_msg}")
-        return
-
-    # 获取全 A 股列表
-    rs = bs.query_all_stock(day=pl.date_range(pl.date(2023,1,1), pl.date(2023,12,31), eager=True)[-1].strftime("%Y-%m-%d"))
+    # 1. Baostock 获取种子
+    print("[*] 正在登录 Baostock...")
+    bs.login()
+    
+    # 获取最新的交易日个股列表
+    today = datetime.now().strftime("%Y-%m-%d")
+    rs = bs.query_all_stock(day=today)
+    
     stocks = []
     while (rs.error_code == '0') & rs.next():
         row = rs.get_row_data()
-        # 仅处理沪深主板/创业板/科创板，过滤指数
+        # 只取沪深个股，排除指数
         if row[0].startswith(("sh.6", "sz.0", "sz.3")):
             stocks.append((row[0], row[1]))
     bs.logout()
     
-    # 为了测试速度，这里可以切片前 300 支，若要全量则去掉 [:300]
-    # 全量 5000 支大约需要 3-5 分钟
-    test_stocks = stocks[:500] 
-    print(f"[+] 种子获取成功，准备分析 {len(test_stocks)} 支个股的所属板块...")
+    if not stocks:
+        print("[-] 未获取到个股列表，请检查 Baostock 状态")
+        return
 
-    # 2. 异步抓取板块关系
+    # 2. 并发抓取 (测试阶段先取 300 支，全量请去掉切片)
+    test_limit = 300 
+    target_stocks = stocks[:test_limit]
+    print(f"[*] 准备从 {len(target_stocks)} 支个股中反推板块信息...")
+
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as session:
-        tasks = [get_stock_sectors(session, semaphore, s) for s in test_stocks]
+    async with aiohttp.ClientSession() as session:
+        tasks = [get_stock_sectors(session, semaphore, s) for s in target_stocks]
         results = await asyncio.gather(*tasks)
 
-    # 3. 使用 Polars 进行数据清洗和归纳
-    print("[*] 正在使用 Polars 清洗板块数据...")
+    # 3. Polars 清洗
+    print("[*] 正在使用 Polars 进行数据去重和清洗...")
     
-    # 展开嵌套列表
-    flat_results = [item for sublist in results for item in sublist]
+    # 展平列表
+    flat_data = [item for sublist in results for item in sublist]
     
-    if not flat_results:
-        print("[-] 未获取到任何板块数据，请检查 API 连通性")
+    if not flat_data:
+        print("[-] 抓取结果为空，可能被 API 屏蔽或参数失效")
         sys.exit(1)
 
-    df = pl.DataFrame(flat_results)
+    # 转换为 DataFrame
+    df = pl.DataFrame(flat_data)
     
-    # 核心步骤：去重得到唯一的板块列表
-    unique_sectors = (
-        df.unique(subset=["sector_code"])
+    # 过滤非板块代码（东财板块通常以 BK 开头）并去重
+    cleaned_df = (
+        df.filter(pl.col("sector_code").str.starts_with("BK"))
+        .unique(subset=["sector_code"])
         .sort("sector_code")
     )
 
     print("-" * 50)
-    print(f"[+] 最终清洗完成！得到唯一板块数量: {len(unique_sectors)}")
-    print(unique_sectors.head(10))
+    print(f"[+] 成功清洗出 {len(cleaned_df)} 个唯一板块")
+    print(cleaned_df.head(10))
     print("-" * 50)
 
-    # 保存结果，供 Action Artifacts 下载
-    unique_sectors.write_csv("sector_list_cleaned.csv")
-    print("[*] 结果已保存至 sector_list_cleaned.csv")
+    # 保存结果
+    cleaned_df.write_csv("sector_list_cleaned.csv")
+    print("[*] 结果已导出至 sector_list_cleaned.csv")
 
 if __name__ == "__main__":
     asyncio.run(main())
