@@ -4,55 +4,22 @@ import pandas as pd
 import concurrent.futures
 from tqdm import tqdm
 from datetime import datetime
-import time
+
 
 # 确保能正确加载项目本地模块
 sys.path.append(os.getcwd())
 from utils.cf_proxy import EastMoneyProxy
 from utils.cleaner import DataCleaner
+from utils.sector_catalog_builder import build_sector_catalog
 
 OUTPUT_DIR = "temp_parts"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 proxy = EastMoneyProxy()
 
 # ==========================================
-# 第一阶段：极速并发扫描板块目录 (20维度全空间覆盖)
+# 第一阶段：三步式获取完整板块列表和分类
 # ==========================================
 
-def fetch_single_dimension(fs_code, fid, po):
-    """单维探针：只取 100 条，绝对安全不截断"""
-    return proxy.get_sector_list(fs_code, fid=fid, po=po, pn=1, pz=100)
-
-def get_category_full_data_brute_force(fs_code, label):
-    """
-    【并发包抄】20 维度正反扫描，强行榨干最后一滴数据
-    """
-    print(f"[*] 正在对 [{label}] 执行 20 维度并发探测...")
-    seen_codes = {}
-    
-    # 20 个不同视角的物理属性，彻底打碎“死水板块”
-    fids = [
-        "f12", "f3", "f2", "f6", "f5", "f4", "f17", "f18", "f8", "f10", 
-        "f15", "f16", "f11", "f9", "f23", "f20", "f21", "f22", "f24", "f25"
-    ]
-    tasks = [(fid, po) for fid in fids for po in [1, 0]]
-            
-    # 并发度 15，既能瞬间发完，又保护 CF Worker 节点
-    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
-        future_map = {executor.submit(fetch_single_dimension, fs_code, f, p): (f, p) for f, p in tasks}
-        for future in concurrent.futures.as_completed(future_map):
-            try:
-                items = future.result()
-                if not items: continue
-                for x in items:
-                    c = x['f12']
-                    if c not in seen_codes:
-                        seen_codes[c] = {"code": c, "market": x['f13'], "name": x['f14'], "type": label}
-            except: 
-                pass
-
-    print(f"    [✓] [{label}] 扫描完成，捕获: {len(seen_codes)} 个唯一板块")
-    return list(seen_codes.values())
 
 # ==========================================
 # 第二阶段：并发抓取详细 K 线与成份股 (内存级优化)
@@ -91,11 +58,9 @@ def main():
     start_time = datetime.now()
     print(f"\n{'='*70}\n[*] 东方财富极速全量引擎 (终极定稿版) | {start_time}\n{'='*70}\n")
     
-    # 1. 极速获取全量目录
-    targets = {"Industry": "m:90 t:2", "Concept": "m:90 t:3", "Region": "m:90 t:1"}
-    all_sectors = []
-    for label, fs in targets.items():
-        all_sectors.extend(get_category_full_data_brute_force(fs, label))
+    # 1. 三步式获取完整板块列表和分类
+    all_sectors = build_sector_catalog(proxy)
+
 
     df_list = pd.DataFrame(all_sectors).drop_duplicates('code')
     total_found = len(df_list)
@@ -115,8 +80,9 @@ def main():
                 k_list, c_list = future.result()
                 if k_list: all_k_flat.extend(k_list)
                 if c_list: all_c_flat.extend(c_list)
-            except Exception as e:
+            except Exception:
                 pass
+
 
     # 3. 清洗、时间线封锁与落库
     print(f"\n[*] 正在清洗合并数百万行数据并生成 Parquet 压缩文件...")
