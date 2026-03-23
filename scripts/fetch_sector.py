@@ -1,143 +1,148 @@
-import asyncio
-import aiohttp
-import baostock as bs
-import polars as pl
 import sys
 import os
-from datetime import datetime, timedelta
+import pandas as pd
+import concurrent.futures
+from tqdm import tqdm
+from datetime import datetime
+import time
 
-# --- 工业级配置 ---
-MAX_CONCURRENT = 15
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0"
+# 确保能正确加载项目本地模块
+sys.path.append(os.getcwd())
+from utils.cf_proxy import EastMoneyProxy
+from utils.cleaner import DataCleaner
 
-# 1. 20维探测接口 (用于拿真值)
-PROBE_API = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=100&po={po}&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid={fid}&fs={fs}&fields=f12,f14"
-# 2. 个股所属板块接口 (用于全量反推)
-STOCK_SECTOR_API = "https://push2.eastmoney.com/api/qt/slist/get?spt=3&ut=fa5fd1943c09a822273714f23b58f2d0&pi=0&pz=100&po=1&np=1&fields=f12,f14&secid={secid}"
-# 3. 板块身份路径接口 (用于识别孤儿板块的亲爹)
-BREADCRUMB_API = "https://push2.eastmoney.com/api/qt/slist/get?spt=1&ut=fa5fd1943c09a822273714f23b58f2d0&secid=90.{code}"
+OUTPUT_DIR = "temp_parts"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+proxy = EastMoneyProxy()
 
-async def probe_official_categories(session):
-    """【Phase 1】20维并发探测：获取官方行业/概念/地域真值表"""
-    targets = {"行业板块": "m:90 t:2", "概念板块": "m:90 t:3", "地域板块": "m:90 t:1"}
-    fids = ["f12", "f3", "f2", "f6", "f5", "f4", "f17", "f18", "f8", "f10", "f15", "f16"]
+# ==========================================
+# 第一阶段：极速并发扫描板块目录 (20维度全空间覆盖)
+# ==========================================
+
+def fetch_single_dimension(fs_code, fid, po):
+    """单维探针：只取 100 条，绝对安全不截断"""
+    return proxy.get_sector_list(fs_code, fid=fid, po=po, pn=1, pz=100)
+
+def get_category_full_data_brute_force(fs_code, label):
+    """
+    【并发包抄】20 维度正反扫描，强行榨干最后一滴数据
+    """
+    print(f"[*] 正在对 [{label}] 执行 20 维度并发探测...")
+    seen_codes = {}
     
-    print("[*] 正在执行 20 维探测，构建官方分类真值库...")
-    results = []
-    for label, fs in targets.items():
-        tasks = []
-        for fid in fids:
-            for po in [0, 1]:
-                tasks.append(session.get(PROBE_API.format(fs=fs, fid=fid, po=po), timeout=15))
-        
-        resps = await asyncio.gather(*tasks, return_exceptions=True)
-        seen = set()
-        for r in resps:
-            if isinstance(r, Exception): continue
-            data = await r.json()
-            for item in data.get("data", {}).get("diff", []):
-                code = item['f12']
-                if code not in seen:
-                    results.append({"sector_code": code, "sector_name": item['f14'], "sector_type": label})
-                    seen.add(code)
-        print(f"    [✓] {label} 探测完成: {len(seen)} 个")
-    return pl.DataFrame(results).unique(subset=["sector_code"])
-
-async def scan_all_stocks(session, semaphore, stocks):
-    """【Phase 2】全量个股反推：拿到 100% 的板块映射关系"""
-    print(f"[*] 正在扫描 {len(stocks)} 支个股映射关系...")
-    counter = {'done': 0, 'total': len(stocks)}
-    
-    async def fetch_task(s_info):
-        bs_code, s_name = s_info
-        prefix = "1." if bs_code.startswith("sh") else "0."
-        secid = f"{prefix}{bs_code.split('.')[1]}"
-        async with semaphore:
+    # 20 个不同视角的物理属性，彻底打碎“死水板块”
+    fids = [
+        "f12", "f3", "f2", "f6", "f5", "f4", "f17", "f18", "f8", "f10", 
+        "f15", "f16", "f11", "f9", "f23", "f20", "f21", "f22", "f24", "f25"
+    ]
+    tasks = [(fid, po) for fid in fids for po in [1, 0]]
+            
+    # 并发度 15，既能瞬间发完，又保护 CF Worker 节点
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        future_map = {executor.submit(fetch_single_dimension, fs_code, f, p): (f, p) for f, p in tasks}
+        for future in concurrent.futures.as_completed(future_map):
             try:
-                async with session.get(STOCK_SECTOR_API.format(secid=secid), timeout=20) as resp:
-                    data = await resp.json()
-                    counter['done'] += 1
-                    if counter['done'] % 1000 == 0: print(f"    - 进度: {counter['done']}/{counter['total']}")
-                    return [{"stock_code": bs_code.split('.')[1], "stock_name": s_name, 
-                             "sector_code": x['f12'], "sector_name": x['f14']} 
-                            for x in data.get("data", {}).get("diff", []) if x.get('f12','').startswith('BK')]
-            except: return []
+                items = future.result()
+                if not items: continue
+                for x in items:
+                    c = x['f12']
+                    if c not in seen_codes:
+                        seen_codes[c] = {"code": c, "market": x['f13'], "name": x['f14'], "type": label}
+            except: 
+                pass
 
-    tasks = [fetch_task(s) for s in stocks]
-    raw = await asyncio.gather(*tasks)
-    return pl.DataFrame([item for sublist in raw for item in sublist]).unique()
+    print(f"    [✓] [{label}] 扫描完成，捕获: {len(seen_codes)} 个唯一板块")
+    return list(seen_codes.values())
 
-async def identify_orphan(session, code):
-    """【Phase 4】孤儿穿透：通过面包屑路径判定分类"""
-    try:
-        async with session.get(BREADCRUMB_API.format(code=code), timeout=15) as resp:
-            data = await resp.json()
-            # 路径列表，通常包含 "行业板块", "概念板块" 等字样
-            path_items = [x['f14'] for x in data.get("data", {}).get("diff", [])]
-            path_str = "".join(path_items)
-            if "行业" in path_str: return "行业板块"
-            if "地域" in path_str: return "地域板块"
-            return "概念板块" # 默认归为概念
-    except:
-        return "概念板块"
+# ==========================================
+# 第二阶段：并发抓取详细 K 线与成份股 (内存级优化)
+# ==========================================
 
-async def main():
+def fetch_one_sector(info):
+    """
+    内存优化：直接返回原生字典列表，避免在多线程中频繁实例化 DataFrame
+    """
+    code, name = info['code'], info['name']
+    secid = f"90.{code}"
+    
+    res_k = proxy.get_sector_kline(secid)
+    k_data = []
+    if res_k and res_k.get('data') and res_k['data'].get('klines'):
+        for row_str in res_k['data']['klines']:
+            r = row_str.split(',')
+            # 扁平化字典，极大降低内存碎片
+            k_data.append({
+                'date': r[0], 'open': r[1], 'close': r[2], 'high': r[3], 'low': r[4], 
+                'volume': r[5], 'amount': r[6], 'amplitude': r[7],
+                'code': code, 'name': name, 'type': info['type']
+            })
+
+    res_c = proxy.get_sector_constituents(code)
+    consts = []
+    if res_c and res_c.get('data') and res_c['data'].get('diff'):
+        diff_data = res_c['data']['diff']
+        items_list = diff_data.values() if isinstance(diff_data, dict) else diff_data
+        for item in items_list:
+            consts.append({"sector_code": code, "stock_code": item['f12'], "sector_name": name})
+            
+    return k_data, consts
+
+def main():
     start_time = datetime.now()
-    async with aiohttp.ClientSession(headers={"User-Agent": UA}) as session:
-        # 1. 20维探测 (真值)
-        df_truth = await probe_official_categories(session)
+    print(f"\n{'='*70}\n[*] 东方财富极速全量引擎 (终极定稿版) | {start_time}\n{'='*70}\n")
+    
+    # 1. 极速获取全量目录
+    targets = {"Industry": "m:90 t:2", "Concept": "m:90 t:3", "Region": "m:90 t:1"}
+    all_sectors = []
+    for label, fs in targets.items():
+        all_sectors.extend(get_category_full_data_brute_force(fs, label))
 
-        # 2. 个股种子获取
-        bs.login()
-        # 自动找上一个交易日 (逻辑简化)
-        target_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d") 
-        rs = bs.query_all_stock(day=target_date)
-        stocks = []
-        while (rs.error_code == '0') & rs.next():
-            row = rs.get_row_data()
-            if row[0].startswith(("sh.6", "sz.0", "sz.3")): stocks.append((row[0], row[1]))
-        bs.logout()
+    df_list = pd.DataFrame(all_sectors).drop_duplicates('code')
+    total_found = len(df_list)
+    print(f"\n[*] 审计报告：去重后唯一板块总数: {total_found}")
 
-        # 3. 个股全量扫描 (映射)
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-        df_mapping = await scan_all_stocks(session, semaphore, stocks)
+    if total_found < 950:
+        print(f"[🔥 严重警告] 抓取总数 {total_found} 偏低，停止后续采集防污染。")
+        sys.exit(1)
+
+    # 2. 并发采集详情
+    print(f"\n[*] 开始并发采集 {total_found} 个板块的历史数据 (并发线程: 20)...")
+    all_k_flat, all_c_flat = [], []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
+        future_map = {executor.submit(fetch_one_sector, row): row['name'] for _, row in df_list.iterrows()}
+        for future in tqdm(concurrent.futures.as_completed(future_map), total=len(future_map), desc="下载进度"):
+            try:
+                k_list, c_list = future.result()
+                if k_list: all_k_flat.extend(k_list)
+                if c_list: all_c_flat.extend(c_list)
+            except Exception as e:
+                pass
+
+    # 3. 清洗、时间线封锁与落库
+    print(f"\n[*] 正在清洗合并数百万行数据并生成 Parquet 压缩文件...")
+    cleaner = DataCleaner()
+    today_dt = pd.Timestamp.now().normalize()
+    
+    if all_k_flat:
+        # 一次性建表，速度极快
+        full_k = pd.DataFrame(all_k_flat)
         
-        # 4. 找出孤儿板块
-        all_sector_codes = df_mapping.select("sector_code").unique()
-        truth_codes = df_truth.select("sector_code").unique()
+        # [核心防线]：物理切断所有未来日期数据 (例如 2026 年)
+        full_k['date_dt'] = pd.to_datetime(full_k['date'].astype(str).str.strip(), errors='coerce')
+        full_k = full_k[(full_k['date_dt'] <= today_dt) & (full_k['date_dt'].notnull())]
+        full_k = full_k.drop(columns=['date_dt'])
         
-        orphans = all_sector_codes.join(truth_codes, on="sector_code", how="anti")
-        print(f"[*] 发现 {len(orphans)} 个孤儿板块，准备执行身份穿透...")
+        full_k = cleaner.clean_sector_kline(full_k)
+        full_k.to_parquet(f"{OUTPUT_DIR}/sector_kline_full.parquet", index=False)
+        print(f"[+] K线数据存储成功: {len(full_k)} 行 | 真实覆盖日期至 {full_k['date'].max()}")
 
-        # 5. 孤儿身份识别
-        orphan_details = []
-        if len(orphans) > 0:
-            for code in orphans["sector_code"].to_list():
-                label = await identify_orphan(session, code)
-                # 补充名称
-                name = df_mapping.filter(pl.col("sector_code") == code)["sector_name"][0]
-                orphan_details.append({"sector_code": code, "sector_name": name, "sector_type": label})
-        
-        df_orphans = pl.DataFrame(orphan_details)
+    if all_c_flat:
+        full_c = pd.DataFrame(all_c_flat)
+        full_c['date'] = today_dt.strftime('%Y-%m-%d')
+        full_c.to_parquet(f"{OUTPUT_DIR}/sector_constituents_latest.parquet", index=False)
+        print(f"[+] 成份股关系存储成功: {len(full_c)} 条映射对")
 
-        # 6. 合并最终字典
-        sector_dictionary = pl.concat([df_truth, df_orphans]).sort(["sector_type", "sector_code"])
-        
-        # 7. 合并最终映射 (打标)
-        stock_sector_mapping = df_mapping.join(
-            sector_dictionary.select(["sector_code", "sector_type"]), 
-            on="sector_code", how="left"
-        ).fill_null("概念板块")
-
-        # 8. 持久化
-        sector_dictionary.write_csv("sector_dictionary.csv")
-        stock_sector_mapping.write_csv("stock_sector_mapping.csv")
-
-    print("-" * 60)
-    print(f"[✓] 任务圆满完成！耗时: {datetime.now() - start_time}")
-    print(f"[*] 最终板块总数: {len(sector_dictionary)}")
-    print(sector_dictionary.group_by("sector_type").count())
-    print("-" * 60)
+    print(f"\n{'='*70}\n[*] 任务圆满完成 | 入库板块数: {total_found} | 耗时: {datetime.now() - start_time}\n{'='*70}\n")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
