@@ -5,7 +5,7 @@ import math
 import random
 import datetime
 
-NUM_CHUNKS = 20
+NUM_CHUNKS = 19
 
 def main():
     bs.login()
