@@ -23,21 +23,30 @@ jobs:
           mkdir -p hf_sync_dir
           gh release download archive -D hf_sync_dir --pattern "${{ inputs.file_pattern }}" || echo "⚠️ No files found"
           
-      - name: Push to HF (Force Overwrite)
+      - name: Push to HF (Merge with Release)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ secrets.HF_REPO }}
         run: |
-          # 确保 README 配置被带入
-          cp README.md hf_sync_dir/ 2>/dev/null || echo "README not found"
+          # 1. 克隆现有 HF 仓库
+          git lfs install
+          git clone --depth 1 https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO hf_workspace
           
-          cd hf_sync_dir
+          # 2. 斩断 Git 历史
+          rm -rf hf_workspace/.git
+          
+          # 3. 将从 Release 下载的文件覆盖进去
+          cp -a hf_sync_dir/. hf_workspace/
+          cp README.md hf_workspace/ 2>/dev/null || echo "README not found"
+          
+          # 4. 初始化并强制推送
+          cd hf_workspace
           git init -b main
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git lfs install
+          
           git lfs track "*.parquet"
           git add .gitattributes
           git add .
-          git commit -m "Full Sync from Release: $(date +'%Y-%m-%d %H:%M:%S')"
+          git commit -m "Full Sync from Release (Zero History): $(date +'%Y-%m-%d %H:%M:%S')"
           git push https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO main --force
