@@ -88,30 +88,33 @@ jobs:
           # 使用 --mode release 仅在本地生成合并后的文件到 output/
           python scripts/merge_and_push.py --mode release
           
-      - name: Force Push to HF (Zero History)
+      - name: Force Push to HF (Clone & Merge Mode)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ secrets.HF_REPO }}
         run: |
-          # 1. 核心：将 README 拷贝到输出目录，确保配置生效
-          cp README.md output/ 2>/dev/null || echo "README not found"
+          # 1. 启用 LFS 并浅克隆当前的 HF 仓库（获取所有现有文件）
+          git lfs install
+          git clone --depth 1 https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO hf_workspace
           
-          cd output
-          # 2. 初始化全新仓库，抹除 Git 历史
+          # 2. 斩断 Git 历史（核心：防止产生版本历史）
+          rm -rf hf_workspace/.git
+          
+          # 3. 将今天新生成的数据（在 output 目录下）以及 README 覆盖进工作区
+          cp -a output/. hf_workspace/
+          cp README.md hf_workspace/ 2>/dev/null || echo "README not found"
+          
+          # 4. 在合并后的目录中重新初始化，并强制推送
+          cd hf_workspace
           git init -b main
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           
-          # 3. 启用 LFS
-          git lfs install
           git lfs track "*.parquet"
           git add .gitattributes
-          
-          # 4. 强制推送
           git add .
-          git commit -m "Daily update (Zero History): $(date +'%Y-%m-%d %H:%M:%S')"
+          git commit -m "Daily Merge & Update (Zero History): $(date +'%Y-%m-%d %H:%M:%S')"
           git push https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO main --force
-
       - name: Upload QC Report
         if: always()
         uses: actions/upload-artifact@v4
