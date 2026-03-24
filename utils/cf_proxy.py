@@ -1,7 +1,7 @@
 import os
 import requests
+import time
 from requests.adapters import HTTPAdapter
-from time import sleep
 
 class EastMoneyProxy:
     def __init__(self):
@@ -21,13 +21,7 @@ class EastMoneyProxy:
         
         self.session = requests.Session()
         
-        # ==========================================
-        # 【终极提速核心】：打破 requests 默认 10 个并发连接的瓶颈
-        # ==========================================
-        # pool_connections: 缓存的 TCP 连接池数量 (设为 100)
-        # pool_maxsize: 连接池中允许的最大并发连接数 (设为 100)
-        # max_retries: 底层重试次数设为 1 (业务重试交由 _request 函数控制)
-        # 这样，20 个探测线程或抓取线程都能拿到专属的 TCP 通道，无需排队等待！
+        # 100个连接池，保障 20 并发通道畅通，防止本地端口耗尽
         adapter = HTTPAdapter(
             pool_connections=100, 
             pool_maxsize=100, 
@@ -51,29 +45,28 @@ class EastMoneyProxy:
         
         for i in range(retries):
             try:
-                # 统一使用 GET 方式，由 CF Worker 转发至东财 API
-                # 超时设置 30 秒，给 CF Worker 留出足够的冷启动和边缘转发时间
-                resp = self.session.get(self.worker_url, params=payload, timeout=30)
+                # 【防线1：缓存击穿 Cache Buster】
+                # 附加毫秒级时间戳+轮次，强制穿透所有中间 CDN 节点，直达东财真实数据库
+                payload["_cb"] = f"{int(time.time() * 1000)}_{i}"
+                
+                # 超时设置 20 秒，给 CF Worker 留出足够的边缘转发时间
+                resp = self.session.get(self.worker_url, params=payload, timeout=20)
+                
                 if resp.status_code == 200:
                     try:
                         return resp.json()
                     except:
-                        # 极端情况下（如被网关拦截返回错误HTML）解析 JSON 失败
-                        return None
+                        # 极端情况下（如被网关拦截返回验证码HTML）解析 JSON 失败
+                        time.sleep(1.5)
+                        continue
                 else:
                     # 遇到 403, 502 等非 200 响应，进行简单退避重试
-                    sleep(1.5)
+                    time.sleep(1.5)
             except Exception:
-                sleep(2)
+                time.sleep(2)
         return None
 
     def get_sector_list(self, fs_code, fid="f3", po=1, pz=100, pn=1):
-        """
-        获取板块列表。
-        针对硬截断优化：
-        1. 锁定 pz=100，这是网关最信任的单页大小。
-        2. 开放 fid (排序字段) 和 po (排序方向)，用于实现 20 维度的暴力包抄。
-        """
         params = {
             "pn": pn, 
             "pz": pz, 
@@ -82,22 +75,17 @@ class EastMoneyProxy:
             "ut": "bd1d9ddb04089700cf9c27f6f7426281",
             "fltt": 2, 
             "invt": 2, 
-            "fid": fid,  # 动态排序字段：f12:代码, f3:涨跌, f2:价格, f6:额等
+            "fid": fid,
             "fs": fs_code,
-            "fields": "f12,f13,f14" # 仅取核心字段，减少流量传输
+            "fields": "f12,f13,f14" 
         }
         res = self._request("list", params)
         if res and res.get('data') and res['data'].get('diff'):
             items = res['data']['diff']
-            # 容错处理：东财 API 可能会返回 list 或以索引为 key 的 dict
             return list(items.values()) if isinstance(items, dict) else items
         return []
 
     def get_sector_kline(self, secid, beg="19900101", end="20500101"):
-        """
-        获取板块历史日K线数据。
-        fields2 映射：f51(日期), f52(开), f53(收), f54(高), f55(低), f56(量), f57(额), f58(振幅)
-        """
         params = {
             "secid": secid,
             "fields1": "f1,f2,f3,f4,f5,f6",
@@ -106,18 +94,18 @@ class EastMoneyProxy:
             "fqt": "1", 
             "beg": beg, 
             "end": end, 
-            "lmt": "1000000" # 拉满获取全量历史
+            "lmt": "1000000"
         }
         return self._request("kline", params)
 
-    def get_sector_constituents(self, sector_code):
+    def get_sector_constituents(self, sector_code, pz=5000, pn=1):
         """
         获取板块成份股列表。
-        pz=5000 确保无需翻页即可拿走最大的概念板块股票。
+        带有智能降级机制，对付“社保重仓”等慢查询策略板块。
         """
         params = {
-            "pn": 1, 
-            "pz": 5000, 
+            "pn": pn, 
+            "pz": pz, 
             "po": 1, 
             "np": 1,
             "ut": "bd1d9ddb04089700cf9c27f6f7426281",
@@ -127,4 +115,12 @@ class EastMoneyProxy:
             "fs": f"b:{sector_code}",
             "fields": "f12,f13,f14"
         }
-        return self._request("constituents", params)
+        res = self._request("constituents", params)
+        
+        # 【防线2：慢查询降级 Fallback】
+        # 策略板块(如社保重仓)请求 5000 条会触发东财数据库超时。
+        # 如果返回 None 且当前是 5000，立刻降级为 500 再次尝试抢救。
+        if res is None and pz == 5000:
+            return self.get_sector_constituents(sector_code, pz=500, pn=1)
+            
+        return res
