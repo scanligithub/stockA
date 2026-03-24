@@ -22,7 +22,7 @@ proxy = EastMoneyProxy()
 
 
 # ==========================================
-# 第二阶段：并发抓取详细 K 线与成份股 (支持失败多轮补抓)
+# 第二阶段：并发抓取详细 K 线与成份股 (支持失败多轮补抓 + 终极单线降级)
 # ==========================================
 
 def fetch_one_sector(info):
@@ -37,7 +37,7 @@ def fetch_one_sector(info):
         # --- 1. 获取 K 线 ---
         res_k = proxy.get_sector_kline(secid)
         if res_k is None:
-            return False, [], [], "K线 API 网络层返回 None"
+            return False, [], [], "K线 API 网络层超时或无响应"
             
         k_data = []
         if res_k.get('data') and res_k['data'].get('klines'):
@@ -51,12 +51,12 @@ def fetch_one_sector(info):
                 })
         elif res_k.get('data') is None:
             # 如果完全没有 data 节点，说明是被拦截或接口变更，标记为失败
-            return False, [], [], f"K线 API 缺失 data 节点: {res_k.get('rc', 'unknown')}"
+            return False, [], [], f"K线 API 被拦截或无数据: rc={res_k.get('rc', 'unknown')}"
 
         # --- 2. 获取成份股 ---
         res_c = proxy.get_sector_constituents(code)
         if res_c is None:
-            return False, [], [], "成份股 API 网络层返回 None"
+            return False, [], [], "成份股 API 网络层超时或无响应"
             
         consts = []
         if res_c.get('data') and res_c['data'].get('diff'):
@@ -65,18 +65,18 @@ def fetch_one_sector(info):
             for item in items_list:
                 consts.append({"sector_code": code, "stock_code": item['f12'], "sector_name": name})
         elif res_c.get('data') is None:
-             return False, [], [], f"成份股 API 缺失 data 节点: {res_c.get('rc', 'unknown')}"
+             return False, [], [], f"成份股 API 被拦截或无数据: rc={res_c.get('rc', 'unknown')}"
              
         # 全部成功获取，返回数据
         return True, k_data, consts, ""
         
     except Exception as e:
         # 捕获未知异常（如 JSON 解析错误、字段缺失等）
-        return False, [], [], f"发生异常: {str(e)}"
+        return False, [], [], f"发生本地异常: {str(e)}"
 
 def main():
     start_time = datetime.now()
-    print(f"\n{'='*70}\n[*] 东方财富极速全量引擎 (高可靠补抓版) | {start_time}\n{'='*70}\n")
+    print(f"\n{'='*70}\n[*] 东方财富极速全量引擎 (高可靠降级版) | {start_time}\n{'='*70}\n")
     
     # 1. 三步式获取完整板块列表和分类
     all_sectors = build_sector_catalog(proxy)
@@ -94,6 +94,7 @@ def main():
     all_k_flat, all_c_flat = [], []
     MAX_RETRIES = 3
     
+    # 【阶段 2.1】：高并发轮询抓取
     for attempt in range(MAX_RETRIES):
         if not sectors_to_fetch:
             break
@@ -114,7 +115,6 @@ def main():
                     else:
                         failed_sectors.append(row)
                 except Exception:
-                    # 极端线程崩溃情况，也记入失败队列
                     failed_sectors.append(row)
                     
         sectors_to_fetch = failed_sectors
@@ -122,11 +122,34 @@ def main():
             print(f"[-] 警告: 本轮有 {len(sectors_to_fetch)} 个板块抓取失败，暂停 3 秒后发起补抓...")
             time.sleep(3)
 
-    # 打印最终失败日志（静默漏抓的终结者）
+    # 【阶段 2.2】：终极降级单线顺序抓取 (规避频控)
     if sectors_to_fetch:
-        print(f"\n[!] 严重警告: 经过 {MAX_RETRIES} 轮重试，仍有 {len(sectors_to_fetch)} 个板块彻底失败 (数据已遗失):")
+        print(f"\n[!] 触发防御降级策略：剩余 {len(sectors_to_fetch)} 个顽固板块，启动单线低速补抓...")
+        final_failed_sectors = []
+        
+        for row in tqdm(sectors_to_fetch, desc="终极单线补抓"):
+            # 强制休眠 1 秒，彻底打消目标服务器的并发防卫机制
+            time.sleep(1)
+            try:
+                success, k_list, c_list, err_msg = fetch_one_sector(row)
+                if success:
+                    if k_list: all_k_flat.extend(k_list)
+                    if c_list: all_c_flat.extend(c_list)
+                else:
+                    row['err_msg'] = err_msg # 记录死因
+                    final_failed_sectors.append(row)
+            except Exception as e:
+                row['err_msg'] = str(e)
+                final_failed_sectors.append(row)
+                
+        sectors_to_fetch = final_failed_sectors
+
+    # 打印最终失败日志
+    if sectors_to_fetch:
+        print(f"\n[!] 极其严重警告: 经过终极降级补抓，仍有 {len(sectors_to_fetch)} 个板块彻底失败 (数据已遗失):")
         for s in sectors_to_fetch:
-            print(f"    - {s['name']} ({s['code']})")
+            # 此时打印出 error_msg，方便分析到底是不是真的没有数据
+            print(f"    - {s['name']} ({s['code']}) | 失败原因: {s.get('err_msg', '未知')}")
     else:
         print("\n[+] 完美！所有板块数据均已成功采集入列。")
 
