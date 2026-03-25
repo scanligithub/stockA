@@ -98,7 +98,7 @@ class EastMoneyProxy:
         }
         return self._request("kline", params)
 
-    def get_sector_constituents(self, sector_code, pz=5000, pn=1):
+    def get_sector_constituents(self, sector_code, pz=1000, pn=1):
         """
         获取板块成份股列表。
         带有智能降级机制，对付“社保重仓”等慢查询策略板块。
@@ -118,9 +118,9 @@ class EastMoneyProxy:
         res = self._request("constituents", params)
         
         # 【防线2：慢查询降级 Fallback】
-        # 策略板块(如社保重仓)请求 5000 条会触发东财数据库超时。
-        # 如果返回 None 且当前是 5000，立刻降级为 500 再次尝试抢救。
-        if res is None and pz == 5000:
+        # 策略板块(如社保重仓)请求 1000 条会触发东财数据库超时。
+        # 如果返回 None 且当前是 1000，立刻降级为 500 再次尝试抢救。
+        if res is None and pz == 1000:
             return self.get_sector_constituents(sector_code, pz=500, pn=1)
             
         return res
