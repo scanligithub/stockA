@@ -144,14 +144,19 @@ def build_sector_universe():
     print(f"[+] 个股反推得到唯一板块: {len(sector_map)}")
     return sector_map
 
+# 替换 utils/sector_catalog_builder.py 中的 scan_category_types
 def scan_category_types(proxy: EastMoneyProxy, fs_code, label):
-    """全量分类探测 (pz=3000 一次性拿全)"""
-    print(f"[*] 获取 [{label}] 分类目录 (一次性扫描)...")
+    """全量分类探测 (合法分页，防止 WAF 拦截)"""
+    print(f"[*] 获取 [{label}] 分类目录...")
     seen_codes = {}
-    # 使用 pz=3000 确保 1009 个板块一次性全部在列表内，不再需要 20 维包抄
-    try:
-        items = proxy.get_sector_list(fs_code, fid="f3", po=1, pn=1, pz=3000)
-        if items:
+    pn = 1
+    while True:
+        try:
+            # 每次请求 200 个，东财完全允许，极速返回
+            items = proxy.get_sector_list(fs_code, fid="f3", po=1, pn=pn, pz=200)
+            if not items:
+                break
+                
             for item in items:
                 code = item["f12"]
                 seen_codes[code] = {
@@ -160,8 +165,15 @@ def scan_category_types(proxy: EastMoneyProxy, fs_code, label):
                     "name": item["f14"],
                     "type": label
                 }
-    except Exception as e:
-        print(f"[-] 扫描 [{label}] 失败: {e}")
+            # 如果返回数量少于 200，说明到底了，退出循环
+            if len(items) < 200:
+                break
+            pn += 1
+        except Exception as e:
+            print(f"[-] 扫描 [{label}] 第 {pn} 页失败: {e}")
+            break
+            
+    print(f"    [✓] [{label}] 扫描完成，捕获: {len(seen_codes)} 个")
     return seen_codes
 
 def fetch_baseinfo_type(session: requests.Session, code: str):
