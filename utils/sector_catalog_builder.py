@@ -144,36 +144,51 @@ def build_sector_universe():
     print(f"[+] 个股反推得到唯一板块: {len(sector_map)}")
     return sector_map
 
-# 替换 utils/sector_catalog_builder.py 中的 scan_category_types
+# ==========================================
+# 请将这段代码原样替换到 utils/sector_catalog_builder.py 中
+# ==========================================
+
+def fetch_single_dimension(proxy: EastMoneyProxy, fs_code, fid, po):
+    """单维度获取前 100 名，利用东财接口漏洞"""
+    # 强制 pz=100，这是东财最信任的合法参数，绝不会被拦截
+    return proxy.get_sector_list(fs_code, fid=fid, po=po, pn=1, pz=100)
+
 def scan_category_types(proxy: EastMoneyProxy, fs_code, label):
-    """全量分类探测 (合法分页，防止 WAF 拦截)"""
-    print(f"[*] 获取 [{label}] 分类目录...")
+    """恢复：20维度正反序全向包抄法 (极其完美的 WAF 穿透策略)"""
+    print(f"[*] 正在对 [{label}] 执行 20 维度并发探测...")
     seen_codes = {}
-    pn = 1
-    while True:
-        try:
-            # 每次请求 200 个，东财完全允许，极速返回
-            items = proxy.get_sector_list(fs_code, fid="f3", po=1, pn=pn, pz=200)
-            if not items:
-                break
+    
+    # 20 个排序字段：涨跌幅、代码、最新价、换手率、振幅等...
+    fids = [
+        "f12", "f3", "f2", "f6", "f5", "f4", "f17", "f18", "f8", "f10",
+        "f15", "f16", "f11", "f9", "f23", "f20", "f21", "f22", "f24", "f25"
+    ]
+    
+    # 构建 40 个任务 (20维度 * 正反序)
+    tasks = [(fid, po) for fid in fids for po in [1, 0]]
+
+    # 使用 15 并发瞬间打穿这 40 个维度
+    with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
+        futures = {executor.submit(fetch_single_dimension, proxy, fs_code, fid, po): (fid, po) for fid, po in tasks}
+        
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                items = future.result()
+                if not items: continue
                 
-            for item in items:
-                code = item["f12"]
-                seen_codes[code] = {
-                    "code": code,
-                    "market": item.get("f13", 90),
-                    "name": item["f14"],
-                    "type": label
-                }
-            # 如果返回数量少于 200，说明到底了，退出循环
-            if len(items) < 200:
-                break
-            pn += 1
-        except Exception as e:
-            print(f"[-] 扫描 [{label}] 第 {pn} 页失败: {e}")
-            break
-            
-    print(f"    [✓] [{label}] 扫描完成，捕获: {len(seen_codes)} 个")
+                for item in items:
+                    code = item["f12"]
+                    if code not in seen_codes:
+                        seen_codes[code] = {
+                            "code": code,
+                            "market": item.get("f13", 90),
+                            "name": item["f14"],
+                            "type": label,
+                        }
+            except Exception:
+                pass
+
+    print(f"    [✓] [{label}] 扫描完成，捕获: {len(seen_codes)} 个唯一板块")
     return seen_codes
 
 def fetch_baseinfo_type(session: requests.Session, code: str):
