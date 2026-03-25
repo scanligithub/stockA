@@ -30,14 +30,14 @@ BASEINFO_TYPE_MAP = {
 
 def create_session() -> requests.Session:
     session = requests.Session()
-    # 增大连接池，并禁用 Keep-Alive 防止线程池关闭时挂起
+    # 扩大连接池，但【不禁用 Keep-Alive】，恢复底层的 TCP/TLS 通道复用，维持 60it/s 的极速
     adapter = HTTPAdapter(pool_connections=200, pool_maxsize=200, max_retries=1)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     session.headers.update({
         "User-Agent": UA,
         "Referer": "https://quote.eastmoney.com/",
-        "Connection": "close",  # 💥 关键：请求完立即关闭连接，防止句柄泄露导致线程卡死
+        # 注意：这里去掉了 "Connection": "close"，恢复极速复用
     })
     return session
 
@@ -114,7 +114,7 @@ def build_sector_universe():
     sector_map = {}
     print(f"[*] 开始从 {len(stocks)} 只股票反推完整板块列表...")
     
-    # 手动管理线程池，避免 with 块隐式等待挂起
+    # 显式控制线程池生命周期
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=UNIVERSE_WORKERS)
     try:
         futures = {executor.submit(fetch_stock_sector_relations, session, s): s for s in stocks}
@@ -128,16 +128,18 @@ def build_sector_universe():
                         sector_map[code] = {"code": code, "name": rel["sector_name"]}
             except: pass
 
-        # 💥 解决卡顿核心：在退出前显式销毁连接和引用
-        session.close()
-        del futures
-        gc.collect() 
-        executor.shutdown(wait=False) # 不再死等残留请求
-        
     except Exception as e:
         print(f"[-] 扫描中断: {e}")
     finally:
+        # 💥 极速强杀防卡死组合拳：
+        # 1. 主动关闭 session，销毁底层的 TCP Socket 连接，向服务器发送 FIN。
         session.close()
+        # 2. 清理大量 Future 对象引用，减轻垃圾回收压力
+        try: del futures 
+        except: pass
+        gc.collect() 
+        # 3. wait=False 确保主线程绝不在此死等残留的僵尸线程
+        executor.shutdown(wait=False)
 
     print(f"[+] 个股反推得到唯一板块: {len(sector_map)}")
     return sector_map
