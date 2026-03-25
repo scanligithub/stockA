@@ -144,38 +144,53 @@ def build_sector_universe():
     print(f"[+] 个股反推得到唯一板块: {len(sector_map)}")
     return sector_map
 
-# ==========================================
-# 请将这段代码原样替换到 utils/sector_catalog_builder.py 中
-# ==========================================
-
 def fetch_single_dimension(proxy: EastMoneyProxy, fs_code, fid, po):
-    """单维度获取前 100 名，利用东财接口漏洞"""
-    # 强制 pz=100，这是东财最信任的合法参数，绝不会被拦截
-    return proxy.get_sector_list(fs_code, fid=fid, po=po, pn=1, pz=100)
+    """单维度前100名探测：采用极速'游击战'策略，遇阻即撤，绝不死等"""
+    params = {
+        "pn": 1, "pz": 100, "po": po, "np": 1,
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": 2, "invt": 2, "fid": fid,
+        "fs": fs_code, "fields": "f12,f13,f14",
+        "target_func": "list",
+        "_cb": str(int(time.time() * 1000)) # 穿透缓存
+    }
+    
+    try:
+        # 💥 核心修改：绕过 proxy._request 的 3次重试和 20秒死等。
+        # 强制设置 timeout=3.5秒。只要东财 3.5 秒没算出来，说明是慢查询维度，立刻抛弃！
+        resp = proxy.session.get(proxy.worker_url, params=params, timeout=3.5)
+        
+        if resp.status_code == 200:
+            res = resp.json()
+            if res and res.get('data') and res['data'].get('diff'):
+                items = res['data']['diff']
+                return list(items.values()) if isinstance(items, dict) else items
+    except Exception:
+        # 发生超时或网络错误，一声不吭直接放弃，绝不重试阻塞线程池
+        pass
+        
+    return []
 
 def scan_category_types(proxy: EastMoneyProxy, fs_code, label):
-    """恢复：20维度正反序全向包抄法 (极其完美的 WAF 穿透策略)"""
+    """20维度正反序全向包抄法 (极速非阻塞版)"""
     print(f"[*] 正在对 [{label}] 执行 20 维度并发探测...")
     seen_codes = {}
     
-    # 20 个排序字段：涨跌幅、代码、最新价、换手率、振幅等...
     fids = [
         "f12", "f3", "f2", "f6", "f5", "f4", "f17", "f18", "f8", "f10",
         "f15", "f16", "f11", "f9", "f23", "f20", "f21", "f22", "f24", "f25"
     ]
-    
-    # 构建 40 个任务 (20维度 * 正反序)
     tasks = [(fid, po) for fid in fids for po in [1, 0]]
 
-    # 使用 15 并发瞬间打穿这 40 个维度
+    # 40 个任务瞬间打出
     with concurrent.futures.ThreadPoolExecutor(max_workers=15) as executor:
         futures = {executor.submit(fetch_single_dimension, proxy, fs_code, fid, po): (fid, po) for fid, po in tasks}
         
+        # 即使有倒霉任务卡住，最多 3.5 秒后就会被强制剔除
         for future in concurrent.futures.as_completed(futures):
             try:
                 items = future.result()
                 if not items: continue
-                
                 for item in items:
                     code = item["f12"]
                     if code not in seen_codes:
