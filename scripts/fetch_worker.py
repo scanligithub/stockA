@@ -1,5 +1,7 @@
 import sys
 import os
+import socket  # 💥 新增：用于系统级底层网络超时控制
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import argparse
@@ -22,7 +24,6 @@ HEADERS = {
 # ==============================
 def fetch_sina_flow(code, start, end):
     """
-    不再使用死板的 @retry 装饰器。
     通过内部 try-except 区分 "网络超时" 和 "新浪无此股票"。
     """
     symbol = code.replace(".", "")
@@ -30,7 +31,7 @@ def fetch_sina_flow(code, start, end):
     
     for attempt in range(3): # 底层网络重试 3 次
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10)
+            r = requests.get(url, headers=HEADERS, timeout=10) # 这里的 timeout 覆盖系统默认
             if r.status_code != 200:
                 time.sleep(1)
                 continue
@@ -64,41 +65,18 @@ def fetch_sina_flow(code, start, end):
     return None
 
 # ==============================
-# 获取交易日历 & 缺失检测 (原有逻辑保持不变)
-# ==============================
-def get_trade_calendar(start_date, end_date):
-    lg = bs.login()
-    rs = bs.query_trade_dates(start_date=start_date, end_date=end_date)
-    dates = []
-    while rs.next():
-        row = rs.get_row_data()
-        if row[1] == '1': dates.append(row[0])
-    bs.logout()
-    return set(dates)
-
-def find_missing_stocks(df, trade_dates, tolerance=0):
-    if df.empty: return list(df["code"].unique())
-    grouped = df.groupby("code")["date"].nunique()
-    expected = len(trade_dates)
-    bad_codes = []
-    for code, count in grouped.items():
-        if count / expected < (1 - tolerance):
-            bad_codes.append(code)
-    return bad_codes
-
-# ==============================
 # 核心：单股票处理（双轨解耦执行）
 # ==============================
 def process_one(args):
     """
     接收参数：(code, start, end, need_k, need_flow)
-    解耦执行，缺哪个下哪个，极大节省资源。
     返回值: (code, df_k, df_f)
-      df_k / df_f 状态：
-      - DataFrame: 成功获取数据 (或被判定为无需获取的空结构)
-      - "SKIP": 外部指定不需要获取
-      - None: 获取过程中发生网络崩溃，需要重试
     """
+    # 💥 【防挂死终极装甲】：强制设定当前进程的底层 TCP 物理超时时间为 60 秒！
+    # 这一行代码能强行覆盖 Baostock 底层无超时的致命缺陷。
+    # 如果跨国网络闪断导致 Baostock 收不到 FIN 包，60秒后会触发 socket.timeout 异常，瞬间斩断僵尸等待！
+    socket.setdefaulttimeout(60.0)
+
     code, start, end, need_k, need_flow = args
     df_k = "SKIP" if not need_k else None
     df_f = "SKIP" if not need_flow else None
@@ -114,6 +92,7 @@ def process_one(args):
                     break
                     
                 fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST"
+                # Baostock 底层请求，受 global socket.timeout 保护
                 rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
                 
                 if rs.error_code != '0':
@@ -132,7 +111,7 @@ def process_one(args):
                     
                 temp_df_k = pd.DataFrame(k_data, columns=fields.split(","))
                 
-                # 复权因子
+                # 获取复权因子
                 rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
                 fac_data = []
                 if rs_fac.error_code == '0':
@@ -157,10 +136,11 @@ def process_one(args):
                 break # 成功跳出重试
                 
             except Exception as e:
+                # 捕获 socket.timeout 等一切网络异常
                 try: bs.logout()
                 except: pass
                 if attempt == max_retry - 1:
-                    df_k = None # 判定为彻底网络崩溃
+                    df_k = None # 判定为网络崩溃，留给下一轮重试
                 else:
                     time.sleep(2)
 
@@ -194,26 +174,19 @@ def main():
 
     print(f"Job {args.index}: {len(codes)} stocks ({start}~{end})")
 
-    # 状态字典存储
     k_success_dict = {}
     f_success_dict = {}
     
-    # 失败追踪队列 (初始化为全部需要抓取)
     k_failed_set = set(codes)
     f_failed_set = set(codes)
-    
-    # 结构性缺失黑名单 (新浪确实没有的，永不重试)
     f_ignored_set = set()
 
-    # 此处省略原有 --refill 文件扫描检测逻辑...
-    # 为保证篇幅和核心逻辑聚焦，假设 codes_to_fetch 已经是最干净的初始列表
-    codes_to_fetch = codes 
+    current_tasks = codes 
 
-    # 🚀 高层并发与智能补抓循环
-    MAX_ROUNDS = 4  # 1轮主抓 + 3轮补抓
+    # 🚀 高层并发与智能补抓循环 (主抓 + 补抓)
+    MAX_ROUNDS = 4  
     
     for round_idx in range(MAX_ROUNDS):
-        # 取 K线失败 和 资金流失败 的并集作为本轮任务
         current_tasks = list(k_failed_set | f_failed_set)
         if not current_tasks:
             break
@@ -223,43 +196,52 @@ def main():
             print(f"\n[*] {desc} -> 缺 K线: {len(k_failed_set)}只 | 缺 资金流: {len(f_failed_set)}只")
 
         workers = min(4, os.cpu_count())
-        with ProcessPoolExecutor(max_workers=workers) as executor:
-            # 只下达缺失的指令
+        
+        # 💥 取消 with 块隐式等待，改用显式生命周期控制，防止主线程被残留僵尸死锁
+        executor = ProcessPoolExecutor(max_workers=workers)
+        try:
             futures = {
                 executor.submit(process_one, (c, start, end, c in k_failed_set, c in f_failed_set)): c
                 for c in current_tasks
             }
             
             for future in tqdm(as_completed(futures), total=len(futures), desc=desc):
-                code, k, f = future.result()
-                
-                # 处理 K 线结果
-                if k is not None and isinstance(k, pd.DataFrame):
-                    if not k.empty: k_success_dict[code] = k
-                    k_failed_set.discard(code) # 成功或确认无数据，移出失败队列
+                try:
+                    code, k, f = future.result()
                     
-                # 处理资金流结果
-                if f is not None and isinstance(f, pd.DataFrame):
-                    if not f.empty: 
-                        f_success_dict[code] = f
-                    else:
-                        # 【核心防线命中】新浪确认无此股票，拉入黑名单，严禁再次浪费时间
-                        f_ignored_set.add(code)
-                    f_failed_set.discard(code) # 无论有没有，只要判定结束，就移出失败队列
+                    if k is not None and isinstance(k, pd.DataFrame):
+                        if not k.empty: k_success_dict[code] = k
+                        k_failed_set.discard(code)
+                        
+                    if f is not None and isinstance(f, pd.DataFrame):
+                        if not f.empty: 
+                            f_success_dict[code] = f
+                        else:
+                            f_ignored_set.add(code)
+                        f_failed_set.discard(code)
+                except Exception as e:
+                    # 如果进程内部发生了极端异常崩溃，直接放过，留给下轮重试
+                    pass
+                    
+        finally:
+            # 💥 强杀进程池装甲：本轮结束时，如果有进程陷入内核级死锁（极少发生），
+            # 直接取消后续任务并不再等待它们退出，强制释放资源！
+            if sys.version_info >= (3, 9):
+                executor.shutdown(wait=False, cancel_futures=True)
+            else:
+                executor.shutdown(wait=False)
 
-    # 汇总数据
+    # 汇总落库
     res_k = list(k_success_dict.values())
     res_f = list(f_success_dict.values())
 
-    print(f"\n[+] K 线最终完成：成功 {len(res_k)} 只 | 彻底失败 {len(k_failed_set)} 只")
-    print(f"[+] 资金流最终完成：成功 {len(res_f)} 只 | 新浪不跟踪放弃 {len(f_ignored_set)} 只 | 网络崩溃彻底失败 {len(f_failed_set)} 只")
+    print(f"\n[+] Job {args.index} 结束: K线 成功 {len(res_k)}/失败 {len(k_failed_set)} | 资金流 成功 {len(res_f)}/放弃 {len(f_ignored_set)}/失败 {len(f_failed_set)}")
 
     if k_failed_set or f_failed_set:
-        print(f"\n⚠️ 极其严重的网络崩溃未下全列表:")
+        print(f"\n⚠️ Job {args.index} 极端网络崩溃未完成名单:")
         if k_failed_set: print(f"   K线彻底失败: {','.join(list(k_failed_set)[:20])}...")
         if f_failed_set: print(f"   资金流彻底失败: {','.join(list(f_failed_set)[:20])}...")
 
-    # 落库保存
     os.makedirs("temp_parts", exist_ok=True)
     cleaner = DataCleaner()
 
@@ -268,14 +250,12 @@ def main():
         if not df_k_all.empty:
             df_k_all = cleaner.clean_stock_kline(df_k_all)
             df_k_all.to_parquet(f"temp_parts/kline_part_{args.index}.parquet", index=False)
-            print(f"✅ Saved KLine {args.index}: {len(df_k_all)}")
 
     if res_f:
         df_f_all = pd.concat(res_f)
         if not df_f_all.empty:
             df_f_all = cleaner.clean_money_flow(df_f_all)
             df_f_all.to_parquet(f"temp_parts/flow_part_{args.index}.parquet", index=False)
-            print(f"✅ Saved Flow {args.index}: {len(df_f_all)}")
 
 if __name__ == "__main__":
     main()
