@@ -90,10 +90,10 @@ def main():
         if not sectors_to_fetch:
             break
             
-        print(f"\n[*] 开始第 {attempt + 1} 轮采集，等待任务: {len(sectors_to_fetch)} 个 (并发: 40)...")
+        print(f"\n[*] 开始第 {attempt + 1} 轮采集，等待任务: {len(sectors_to_fetch)} 个 (并发: 20)...")
         failed_sectors = []
         
-        with concurrent.futures.ThreadPoolExecutor(max_workers=80) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
             future_map = {executor.submit(fetch_one_sector, row): row for row in sectors_to_fetch}
             
             for future in tqdm(concurrent.futures.as_completed(future_map), total=len(future_map), desc=f"第 {attempt + 1} 轮进度"):
