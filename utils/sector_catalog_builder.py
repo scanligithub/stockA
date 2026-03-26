@@ -21,7 +21,7 @@ EM_SEED_API = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=6000&po=1&np
 # 板块详情接口 (仅作最后兜底)
 BASEINFO_API = "https://quote.eastmoney.com/newapi/baseinfo/90.{code}"
 
-UNIVERSE_WORKERS = 40
+UNIVERSE_WORKERS = 80
 BASEINFO_WORKERS = 40
 
 BASEINFO_TYPE_MAP = {
