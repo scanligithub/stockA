@@ -4,6 +4,8 @@ import gc
 from collections import Counter
 from datetime import datetime, timedelta
 
+import random
+
 import baostock as bs
 import requests
 from requests.adapters import HTTPAdapter
