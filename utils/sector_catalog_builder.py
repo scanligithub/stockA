@@ -157,20 +157,21 @@ def fetch_single_dimension(proxy: EastMoneyProxy, fs_code, fid, po):
         "_cb": str(int(time.time() * 1000)) # 穿透缓存
     }
     
-    try:
-        # 💥 核心修改：绕过 proxy._request 的 3次重试和 20秒死等。
-        # 强制设置 timeout=3.5秒。只要东财 3.5 秒没算出来，说明是慢查询维度，立刻抛弃！
-        resp = proxy.session.get(proxy.worker_url, params=params, timeout=3.5)
-        
-        if resp.status_code == 200:
-            res = resp.json()
-            if res and res.get('data') and res['data'].get('diff'):
-                items = res['data']['diff']
-                return list(items.values()) if isinstance(items, dict) else items
-    except Exception:
-        # 发生超时或网络错误，一声不吭直接放弃，绝不重试阻塞线程池
-        pass
-        
+    # 💥 修改点：允许重试 2 次，每次超时稍微放宽到 4.5 秒
+    for attempt in range(2):
+        try:
+            params["_cb"] = f"{int(time.time() * 1000)}_{attempt}"
+            resp = proxy.session.get(proxy.worker_url, params=params, timeout=4.5)
+            
+            if resp.status_code == 200:
+                res = resp.json()
+                if res and res.get('data') and res['data'].get('diff'):
+                    items = res['data']['diff']
+                    return list(items.values()) if isinstance(items, dict) else items
+        except Exception:
+            # 失败后短暂随机休息 0.5~1.5 秒再试，避开风控尖峰
+            time.sleep(random.uniform(0.5, 1.5))
+            
     return []
 
 def scan_category_types(proxy: EastMoneyProxy, fs_code, label):
