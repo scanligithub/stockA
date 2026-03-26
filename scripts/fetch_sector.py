@@ -77,6 +77,9 @@ def main():
     if total_found < 950:
         print(f"[🔥 严重警告] 抓取总数 {total_found} 偏低，停止后续采集防污染。")
         sys.exit(1)
+    # 💥 修改点：增加风控冷却期
+    print(f"[*] 触发反风控冷却机制，主线程休眠 10 秒，等待东财网关令牌桶恢复...")
+    time.sleep(10)
 
     sectors_to_fetch = df_list.to_dict('records')
     all_k_flat, all_c_flat = [], []
