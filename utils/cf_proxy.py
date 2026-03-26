@@ -1,7 +1,9 @@
 import os
 import requests
 import time
+import random
 from requests.adapters import HTTPAdapter
+
 
 class EastMoneyProxy:
     def __init__(self):
@@ -33,11 +35,7 @@ class EastMoneyProxy:
         self.session.headers.update(self.headers)
 
     def _request(self, target_func, params, retries=3):
-        """
-        统一底层请求逻辑：通过 CF Worker 转发请求
-        """
         if not self.worker_url:
-            print("❌ Error: 环境变量 CF_WORKER_URL 未设置。")
             return None
             
         payload = params.copy()
@@ -45,25 +43,20 @@ class EastMoneyProxy:
         
         for i in range(retries):
             try:
-                # 【防线1：缓存击穿 Cache Buster】
-                # 附加毫秒级时间戳+轮次，强制穿透所有中间 CDN 节点，直达东财真实数据库
                 payload["_cb"] = f"{int(time.time() * 1000)}_{i}"
-                
-                # 超时设置 20 秒，给 CF Worker 留出足够的边缘转发时间
                 resp = self.session.get(self.worker_url, params=payload, timeout=20)
                 
                 if resp.status_code == 200:
-                    try:
-                        return resp.json()
+                    try: return resp.json()
                     except:
-                        # 极端情况下（如被网关拦截返回验证码HTML）解析 JSON 失败
-                        time.sleep(1.5)
+                        # 💥 修改点：随机睡 1.0 到 2.5 秒，错峰重试
+                        time.sleep(random.uniform(1.0, 2.5)) 
                         continue
                 else:
-                    # 遇到 403, 502 等非 200 响应，进行简单退避重试
-                    time.sleep(1.5)
+                    time.sleep(random.uniform(1.0, 2.5))
             except Exception:
-                time.sleep(2)
+                # 💥 修改点：网络异常时，随机睡 1.5 到 3.5 秒
+                time.sleep(random.uniform(1.5, 3.5))
         return None
 
     def get_sector_list(self, fs_code, fid="f3", po=1, pz=100, pn=1):
