@@ -1,7 +1,6 @@
 import sys
 import os
 
-# 确保能正确加载项目本地模块
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import duckdb
@@ -9,17 +8,16 @@ import glob
 import datetime
 import argparse
 import shutil
+import json
 import pandas as pd
 import baostock as bs
 from utils.hf_manager import HFManager
 from utils.qc import QualityControl
 
 def get_stock_list_with_names():
-    """获取带名称的股票列表 (增加名称为空的过滤)"""
     print("📋 Fetching stock list metadata from Baostock...")
     try:
         bs.login()
-        # 尝试回溯 10 天找到最近一个有数据的交易日
         data = []
         for i in range(10):
             d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
@@ -32,7 +30,6 @@ def get_stock_list_with_names():
         
         if data:
             df = pd.DataFrame(data, columns=["code", "tradeStatus", "code_name"])
-            # 过滤：code_name 不能为空且必须是 A 股代码格式
             df = df[df['code_name'].notna() & (df['code_name'].str.strip() != "")]
             df = df[df['code'].str.startswith(('sh.', 'sz.', 'bj.'))]
             return df
@@ -42,8 +39,6 @@ def get_stock_list_with_names():
 
 def main():
     parser = argparse.ArgumentParser()
-    # mode=hf: 内部调用 API 上传 (产生历史)
-    # mode=release: 仅生成本地文件 (配合 Action 强推抹除历史)
     parser.add_argument("--mode", type=str, default="hf", choices=["hf", "release", "local"])
     parser.add_argument("--year", type=int, default=0)
     args = parser.parse_args()
@@ -52,17 +47,14 @@ def main():
     
     print("🦆 Initializing DuckDB Engine...")
     con = duckdb.connect()
-    # 限制内存使用，防止 GitHub Actions 环境崩溃
     con.execute("SET memory_limit='4GB'")
     con.execute("SET temp_directory='duckdb_temp.tmp'")
     
-    # 搜索分片文件
     k_files = glob.glob("all_artifacts/kline_part_*.parquet")
     f_files = glob.glob("all_artifacts/flow_part_*.parquet")
     sec_k_files = glob.glob("all_artifacts/sector_kline_full.parquet")
     sec_c_files = glob.glob("all_artifacts/sector_constituents_latest.parquet")
 
-    # 注册 DuckDB 视图
     if k_files:
         con.execute(f"CREATE OR REPLACE VIEW v_kline AS SELECT * FROM read_parquet({k_files}, union_by_name=True)")
     else:
@@ -81,7 +73,6 @@ def main():
     os.makedirs("output", exist_ok=True)
     targets = {}
 
-    # 1. 生成股票列表元数据
     df_stocks = get_stock_list_with_names()
     if not df_stocks.empty:
         p = "output/stock_list.parquet"
@@ -89,14 +80,12 @@ def main():
         targets[p] = "stock_list.parquet"
         qc.check_dataframe(df_stocks, "stock_list.parquet", ["code_name"], file_path=p)
 
-    # 2. 生成板块列表元数据 (从板块 K 线中提取唯一列表)
     if sec_k_files:
         p = 'output/sector_list.parquet'
         con.execute(f"COPY (SELECT DISTINCT code, name, type FROM v_sec_k ORDER BY type, code) TO '{p}' (FORMAT 'PARQUET')")
         targets[p] = "sector_list.parquet"
         qc.check_dataframe(pd.read_parquet(p), "sector_list.parquet", ["name"], file_path=p)
 
-    # 3. 确定处理年份并执行切分
     if args.year == 9999:
         years = range(2005, datetime.datetime.now().year + 1)
     elif args.year > 0:
@@ -108,7 +97,6 @@ def main():
         print(f"🔪 Merging & Splitting Data for Year {y}...")
         start_date, end_date = f"{y}-01-01", f"{y}-12-31"
         
-        # 配置各年份对应的输出任务
         tasks = [
             ("v_kline", f"stock_kline_{y}.parquet", ["close", "volume"]),
             ("v_flow", f"stock_money_flow_{y}.parquet", ["net_amount"]),
@@ -118,12 +106,10 @@ def main():
         for view_name, out_name, check_cols in tasks:
             out_path = f"output/{out_name}"
             try:
-                # 预检查该年份是否有数据
                 count = con.execute(f"SELECT count(*) FROM {view_name} WHERE date >= '{start_date}' AND date <= '{end_date}'").fetchone()[0]
                 if count == 0:
                     continue
 
-                # 使用 DuckDB 的极速 COPY 功能生成 ZSTD 压缩的 Parquet
                 con.execute(f"""
                     COPY (
                         SELECT * FROM {view_name} 
@@ -139,7 +125,6 @@ def main():
             except Exception as e:
                 print(f"❌ Error merging {out_name}: {e}")
 
-        # 4. 处理板块成分股快照 (复制到对应的年份)
         if sec_c_files:
             c_out = f"output/sector_constituents_{y}.parquet"
             try:
@@ -148,24 +133,54 @@ def main():
             except:
                 pass
 
-    # 5. 生成汇总及质检报告
     print("📝 Finalizing QC Reports...")
     qc.save_report("output/qc_report.json")
-    with open("output/qc_summary.md", "w") as f:
+    with open("output/qc_summary.md", "w", encoding="utf-8") as f:
         f.write(qc.get_summary_md())
+
+    # =========================================================
+    # 💥 新增：自愈系统跨节点数据统计与报告注入
+    # =========================================================
+    factor_stat_files = glob.glob("all_artifacts/factor_stats_*.json")
+    all_retried_codes = set()
+    for f_path in factor_stat_files:
+        try:
+            with open(f_path, 'r', encoding="utf-8") as f:
+                all_retried_codes.update(json.load(f))
+        except:
+            pass
+
+    # 1. 追加到 Markdown 供 GitHub Actions UI 展示
+    with open("output/qc_summary.md", "a", encoding="utf-8") as f:
+        f.write("\n## 🛡️ 数据源监控与自愈报告\n")
+        f.write(f"- **复权因子异常拦截：** 今日拦截并强制重试了 **{len(all_retried_codes)}** 只存在复权因子错乱(非正数/断层)的股票。\n")
+        if all_retried_codes:
+            sample = ", ".join(list(all_retried_codes)[:15])
+            f.write(f"- **受影响股票示例：** {sample}{'...' if len(all_retried_codes)>15 else ''}\n")
+
+    # 2. 注入到 JSON 提供给未来的 API 调用读取
+    try:
+        with open("output/qc_report.json", "r", encoding="utf-8") as f:
+            report_data = json.load(f)
+        report_data["Data_Healing_Stats"] = {
+            "factor_retried_count": len(all_retried_codes),
+            "retried_codes": list(all_retried_codes)
+        }
+        with open("output/qc_report.json", "w", encoding="utf-8") as f:
+            json.dump(report_data, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+    # =========================================================
     
     targets["output/qc_report.json"] = "qc_report.json"
     targets["output/qc_summary.md"] = "qc_summary.md"
 
-    # 6. 处理上传/导出
     if args.mode == "hf" and os.getenv("HF_TOKEN"):
-        # 旧模式：逐文件 API 上传 (不推荐，会导致 2.88G 膨胀)
         print("🚀 Using Legacy HF API Upload (commits per file)...")
         hf = HFManager(os.getenv("HF_TOKEN"), os.getenv("HF_REPO"))
         for local, remote in targets.items():
             hf.upload_file(local, remote)
     else:
-        # 新模式 (release/local)：仅准备好 output/ 目录
         print(f"\n{'='*50}")
         print(f"✅ Data Preparation Success!")
         print(f"📂 Location: {os.path.abspath('output/')}")
