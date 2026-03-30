@@ -1,6 +1,6 @@
 import sys
 import os
-import socket  # 💥 新增：用于系统级底层网络超时控制
+import socket  # 用于系统级底层网络超时控制
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -23,23 +23,20 @@ HEADERS = {
 # 新浪资金流 (智能判别版)
 # ==============================
 def fetch_sina_flow(code, start, end):
-    """
-    通过内部 try-except 区分 "网络超时" 和 "新浪无此股票"。
-    """
     symbol = code.replace(".", "")
     url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page=1&num=10000&sort=opendate&asc=0&daima={symbol}"
     
-    for attempt in range(3): # 底层网络重试 3 次
+    for attempt in range(3): 
         try:
-            r = requests.get(url, headers=HEADERS, timeout=10) # 这里的 timeout 覆盖系统默认
+            r = requests.get(url, headers=HEADERS, timeout=10)
             if r.status_code != 200:
                 time.sleep(1)
                 continue
                 
             data = r.json()
-            # 【核心判别】：正常返回了，但数据是空的。说明新浪根本没有这只股票。
+            # 正常返回但数据为空，说明新浪无此股票，直接放弃不重试
             if not data:
-                return pd.DataFrame() # 返回空 DF，表示“无需重试，直接放弃”
+                return pd.DataFrame() 
                 
             df = pd.DataFrame(data)
             rename_map = {
@@ -55,33 +52,29 @@ def fetch_sina_flow(code, start, end):
                 df['code'] = code
             return df
             
-        except Exception as e:
-            # 解析错误或超时，属于网络故障
+        except Exception:
             if attempt == 2:
-                # 3次都网络故障，返回 None，要求高层重试
                 return None 
             time.sleep(1.5)
             
     return None
 
 # ==============================
-# 核心：单股票处理（双轨解耦执行）
+# 核心：单股票处理（包含物理规则断言）
 # ==============================
 def process_one(args):
     """
     接收参数：(code, start, end, need_k, need_flow)
     返回值: (code, df_k, df_f)
     """
-    # 💥 【防挂死终极装甲】：强制设定当前进程的底层 TCP 物理超时时间为 60 秒！
-    # 这一行代码能强行覆盖 Baostock 底层无超时的致命缺陷。
-    # 如果跨国网络闪断导致 Baostock 收不到 FIN 包，60秒后会触发 socket.timeout 异常，瞬间斩断僵尸等待！
+    # 强制设定当前进程的底层 TCP 物理超时时间为 60 秒，斩断僵尸等待
     socket.setdefaulttimeout(60.0)
 
     code, start, end, need_k, need_flow = args
     df_k = "SKIP" if not need_k else None
     df_f = "SKIP" if not need_flow else None
 
-    # ---------- 1. 获取 K 线 (仅当需要时) ----------
+    # ---------- 1. 获取 K 线及复权因子 ----------
     if need_k:
         max_retry = 3
         for attempt in range(max_retry):
@@ -92,7 +85,6 @@ def process_one(args):
                     break
                     
                 fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST"
-                # Baostock 底层请求，受 global socket.timeout 保护
                 rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
                 
                 if rs.error_code != '0':
@@ -106,12 +98,12 @@ def process_one(args):
                 
                 if not k_data:
                     bs.logout()
-                    df_k = pd.DataFrame() # 无数据，判定为结构性缺失
+                    df_k = pd.DataFrame() # 结构性缺失
                     break
                     
                 temp_df_k = pd.DataFrame(k_data, columns=fields.split(","))
                 
-                # 获取复权因子
+                # --- 获取复权因子 ---
                 rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
                 fac_data = []
                 if rs_fac.error_code == '0':
@@ -119,32 +111,60 @@ def process_one(args):
                         
                 if fac_data:
                     df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
+                    # 仅提取后复权因子 (backAdjustFactor)
                     df_fac = df_fac[['date', 'back']].rename(columns={'back': 'adjustFactor'})
-                    temp_df_k['date'] = pd.to_datetime(temp_df_k['date'])
                     df_fac['date'] = pd.to_datetime(df_fac['date'])
                     df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
+                    df_fac = df_fac.dropna(subset=['date', 'adjustFactor']).sort_values('date')
+
+                    # =========================================================
+                    # 💥 核心防线：物理规则断言 (Physical Rule Assertions)
+                    # 如果断言失败，将抛出 ValueError，触发 try-except 重试整个下载
+                    # =========================================================
+                    if not df_fac.empty:
+                        # 断言 1：复权因子必须为严格正数
+                        if (df_fac['adjustFactor'] <= 0).any():
+                            raise ValueError(f"[{code}] 复权因子存在非正数，数据源脏数据！")
+                        
+                        # 断言 2：后复权因子必须单调不减 (允许 1e-5 的浮点误差，严防数据错位下降)
+                        if len(df_fac) > 1:
+                            diffs = df_fac['adjustFactor'].diff().dropna()
+                            if (diffs < -1e-5).any():
+                                raise ValueError(f"[{code}] 后复权因子违背单调递增定律，存在异常下降断层！")
+                    # =========================================================
+
+                    temp_df_k['date'] = pd.to_datetime(temp_df_k['date'])
                     temp_df_k = temp_df_k.sort_values('date')
-                    df_fac = df_fac.sort_values('date')
+                    
+                    # 向后对齐：寻找每个K线日期之前最近的一个事件因子
                     temp_df_k = pd.merge_asof(temp_df_k, df_fac, on='date', direction='backward')
                     temp_df_k['date'] = temp_df_k['date'].dt.strftime('%Y-%m-%d')
+                    
+                    # 这里的 NaN 仅代表“上市首日到第一次分红之间”的历史远端
+                    # 在金融物理意义上，这段时间的后复权因子绝对为 1.0，因此 fillna(1.0) 是完全合法且必须的
                     temp_df_k['adjustFactor'] = temp_df_k['adjustFactor'].fillna(1.0)
+                    
+                    # 终极拦截：如果依然存在 NaN，说明融合发生了不可预知的错误
+                    if temp_df_k['adjustFactor'].isna().any():
+                        raise ValueError(f"[{code}] 拼接完成后仍存在无法解析的 NaN 因子！")
                 else:
+                    # 从未分红过的股票，其一生因子皆为 1.0
                     temp_df_k['adjustFactor'] = 1.0
                     
                 df_k = temp_df_k
                 bs.logout()
-                break # 成功跳出重试
+                break # 成功，跳出重试循环
                 
             except Exception as e:
-                # 捕获 socket.timeout 等一切网络异常
+                # 捕获断言报错 (ValueError) 或 网络崩溃 (socket.timeout)
                 try: bs.logout()
                 except: pass
                 if attempt == max_retry - 1:
-                    df_k = None # 判定为网络崩溃，留给下一轮重试
+                    df_k = None # 判定为本轮彻底崩溃，交由外层多轮补抓机制处理
                 else:
-                    time.sleep(2)
+                    time.sleep(2) # 延时重试
 
-    # ---------- 2. 获取资金流 (仅当需要时) ----------
+    # ---------- 2. 获取资金流 ----------
     if need_flow:
         df_f = fetch_sina_flow(code, start, end)
 
@@ -181,8 +201,6 @@ def main():
     f_failed_set = set(codes)
     f_ignored_set = set()
 
-    current_tasks = codes 
-
     # 🚀 高层并发与智能补抓循环 (主抓 + 补抓)
     MAX_ROUNDS = 4  
     
@@ -197,7 +215,6 @@ def main():
 
         workers = min(4, os.cpu_count())
         
-        # 💥 取消 with 块隐式等待，改用显式生命周期控制，防止主线程被残留僵尸死锁
         executor = ProcessPoolExecutor(max_workers=workers)
         try:
             futures = {
@@ -219,13 +236,12 @@ def main():
                         else:
                             f_ignored_set.add(code)
                         f_failed_set.discard(code)
-                except Exception as e:
-                    # 如果进程内部发生了极端异常崩溃，直接放过，留给下轮重试
+                except Exception:
+                    # 进程级崩溃放过，交由下一轮
                     pass
                     
         finally:
-            # 💥 强杀进程池装甲：本轮结束时，如果有进程陷入内核级死锁（极少发生），
-            # 直接取消后续任务并不再等待它们退出，强制释放资源！
+            # 强杀内核级死锁进程
             if sys.version_info >= (3, 9):
                 executor.shutdown(wait=False, cancel_futures=True)
             else:
