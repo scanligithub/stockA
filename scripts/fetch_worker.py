@@ -104,9 +104,14 @@ def process_one(args):
                 
                 # --- 获取复权因子 ---
                 rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
+                
+                # 💥 终极拦截：网络或服务器导致因子获取失败，必须抛出异常阻断，绝不能静默赋 1.0
+                if rs_fac.error_code != '0':
+                    raise ValueError(f"[{code}] 复权因子接口获取失败(不可静默): {rs_fac.error_msg}")
+                
                 fac_data = []
-                if rs_fac.error_code == '0':
-                    while rs_fac.next(): fac_data.append(rs_fac.get_row_data())
+                while rs_fac.next(): 
+                    fac_data.append(rs_fac.get_row_data())
                         
                 if fac_data:
                     df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
@@ -135,6 +140,7 @@ def process_one(args):
                     if temp_df_k['adjustFactor'].isna().any():
                         raise ValueError(f"[{code}] 拼接完成后仍存在无法解析的 NaN 因子！")
                 else:
+                    # 只有接口调用成功（error_code=='0'），且确实没返回数据时，才说明这只股票历史上从未分红
                     temp_df_k['adjustFactor'] = 1.0
                     
                 df_k = temp_df_k
@@ -143,7 +149,7 @@ def process_one(args):
                 
             except Exception as e:
                 err_msg = str(e)
-                # 💥 新增：精准识别因子引发的异常，记录在案
+                # 💥 异常捕获：如果是因子引发的拦截，将会记录标志并被外层的 while 重试系统接管
                 if "复权因子" in err_msg or "NaN 因子" in err_msg:
                     factor_error_triggered = True
                     
