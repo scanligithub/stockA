@@ -1,6 +1,6 @@
 import sys
 import os
-import socket  # 系统级底层网络超时控制
+import socket
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -11,6 +11,7 @@ import datetime
 import requests
 import time
 import baostock as bs
+import signal  # 💥 引入系统级硬中断控制
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from utils.cleaner import DataCleaner
@@ -20,20 +21,35 @@ HEADERS = {
 }
 
 # ==============================
-# 新浪资金流 (智能指数退避版)
+# 跨平台超时熔断器 (防 C 扩展死锁)
+# ==============================
+def set_hard_timeout(seconds):
+    """向操作系统注册定时炸弹，时间一到无条件砸断当前执行流"""
+    if hasattr(signal, 'SIGALRM'):
+        def timeout_handler(signum, frame):
+            raise TimeoutError(f"底层 Socket 彻底卡死超过 {seconds} 秒，被系统硬中断强杀！")
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(seconds)
+
+def cancel_hard_timeout():
+    """解除定时炸弹"""
+    if hasattr(signal, 'SIGALRM'):
+        signal.alarm(0)
+
+# ==============================
+# 新浪资金流
 # ==============================
 def fetch_sina_flow(code, start, end):
     symbol = code.replace(".", "")
     url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page=1&num=10000&sort=opendate&asc=0&daima={symbol}"
     
     last_err = "未知网络错误"
-    max_retry = 5  # 提升重试次数
-    for attempt in range(max_retry): 
+    for attempt in range(4): 
         try:
             r = requests.get(url, headers=HEADERS, timeout=10)
             if r.status_code != 200:
                 last_err = f"HTTP 状态码异常: {r.status_code}"
-                time.sleep(2 ** attempt) # 💥 指数退避: 1, 2, 4, 8 秒
+                time.sleep(1 + attempt)
                 continue
                 
             data = r.json()
@@ -56,19 +72,19 @@ def fetch_sina_flow(code, start, end):
             
         except Exception as e:
             last_err = str(e)
-            time.sleep(2 ** attempt)
+            time.sleep(1 + attempt)
             
     raise Exception(f"新浪资金流接口重试耗尽: {last_err}")
 
 # ==============================
-# 核心：单股票处理（包含单调平滑与异常拦截）
+# 核心：单股票处理（系统级熔断版）
 # ==============================
 def process_one(args):
     """
     接收参数：(code, start, end, need_k, need_flow)
     返回值: (code, df_k, df_f, factor_error_triggered, err_k, err_f)
     """
-    socket.setdefaulttimeout(60.0)
+    socket.setdefaulttimeout(15.0) # 将普通超时缩短，逼迫底层尽快抛错
 
     code, start, end, need_k, need_flow = args
     df_k = "SKIP" if not need_k else None
@@ -80,9 +96,12 @@ def process_one(args):
 
     # ---------- 1. 获取 K 线及复权因子 ----------
     if need_k:
-        max_retry = 5  # 💥 提升到 5 次，专门对付 10001001 小黑屋
+        max_retry = 4  # 避免过多的重试导致尾部耗时过长
         for attempt in range(max_retry):
             try:
+                # 💥 启动硬中断定时炸弹，防止 Baostock 死锁挂起进程
+                set_hard_timeout(40) 
+                
                 lg = bs.login()
                 if lg.error_code != '0':
                     raise Exception(f"Baostock 登录失败: {lg.error_msg}")
@@ -98,6 +117,7 @@ def process_one(args):
                 
                 if not k_data:
                     bs.logout()
+                    cancel_hard_timeout()
                     df_k = pd.DataFrame() 
                     break
                     
@@ -120,12 +140,9 @@ def process_one(args):
                     df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
                     df_fac = df_fac.dropna(subset=['date', 'adjustFactor']).sort_values('date')
 
-                    # 💥 应对死因1：远古脏数据断层 -> 强制剔除负数并平滑为单调递增
-                    # 1. 过滤掉绝对错误的非正数因子
+                    # 应对死因1：远古脏数据断层平滑
                     df_fac = df_fac[df_fac['adjustFactor'] > 0]
-                    
                     if not df_fac.empty:
-                        # 2. 核心魔法：cummax() 强制将下降的脏数据拉平，确保严格单调递增
                         df_fac['adjustFactor'] = df_fac['adjustFactor'].cummax()
 
                         temp_df_k['date'] = pd.to_datetime(temp_df_k['date'])
@@ -144,9 +161,11 @@ def process_one(args):
                     
                 df_k = temp_df_k
                 bs.logout()
+                cancel_hard_timeout() # 成功后解除炸弹
                 break 
                 
             except Exception as e:
+                cancel_hard_timeout() # 报错也要解除炸弹
                 err_msg = str(e)
                 if "复权因子" in err_msg or "NaN 因子" in err_msg:
                     factor_error_triggered = True
@@ -158,8 +177,8 @@ def process_one(args):
                     df_k = None 
                     err_msg_k = err_msg  
                 else:
-                    # 💥 应对死因2：指数退避休眠，优雅躲避 Baostock 的并发限流防火墙
-                    time.sleep(2 ** attempt) 
+                    # 应对死因2：更温柔的退避，1秒, 2秒, 3秒（避免尾部耗时过长）
+                    time.sleep(1 + attempt) 
 
     # ---------- 2. 获取资金流 ----------
     if need_flow:
@@ -233,7 +252,6 @@ def main():
                     if factor_err:
                         factor_retry_set.add(code)
                     
-                    # 检查 K线 状态
                     if k is not None and isinstance(k, pd.DataFrame):
                         if not k.empty: 
                             k_success_dict[code] = k
@@ -242,7 +260,6 @@ def main():
                     elif k is None:
                         k_error_dict[code] = err_k
                         
-                    # 检查 资金流 状态
                     if f is not None and isinstance(f, pd.DataFrame):
                         if not f.empty: 
                             f_success_dict[code] = f
@@ -269,9 +286,7 @@ def main():
 
     print(f"\n[+] Job {args.index} 结束: K线 成功 {len(res_k)}/失败 {len(k_failed_set)} | 资金流 成功 {len(res_f)}/放弃 {len(f_ignored_set)}/失败 {len(f_failed_set)}")
 
-    # ========================================================
-    # 💥 阵亡名单与验尸报告打印
-    # ========================================================
+    # 阵亡名单与验尸报告打印
     if k_failed_set or f_failed_set:
         print("\n" + "="*60)
         print("🚨 FAILED STOCKS REPORT (阵亡名单与死因剖析)")
