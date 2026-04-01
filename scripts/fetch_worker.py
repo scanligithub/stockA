@@ -26,10 +26,12 @@ def fetch_sina_flow(code, start, end):
     symbol = code.replace(".", "")
     url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page=1&num=10000&sort=opendate&asc=0&daima={symbol}"
     
+    last_err = "未知网络错误"
     for attempt in range(3): 
         try:
             r = requests.get(url, headers=HEADERS, timeout=10)
             if r.status_code != 200:
+                last_err = f"HTTP 状态码异常: {r.status_code}"
                 time.sleep(1)
                 continue
                 
@@ -51,12 +53,12 @@ def fetch_sina_flow(code, start, end):
                 df['code'] = code
             return df
             
-        except Exception:
-            if attempt == 2:
-                return None 
+        except Exception as e:
+            last_err = str(e)
             time.sleep(1.5)
             
-    return None
+    # 💥 新增：重试耗尽后抛出明确异常供外层捕获
+    raise Exception(f"新浪资金流接口重试耗尽: {last_err}")
 
 # ==============================
 # 核心：单股票处理（包含物理规则断言与异常埋点）
@@ -64,14 +66,17 @@ def fetch_sina_flow(code, start, end):
 def process_one(args):
     """
     接收参数：(code, start, end, need_k, need_flow)
-    返回值: (code, df_k, df_f, factor_error_triggered)
+    返回值: (code, df_k, df_f, factor_error_triggered, err_k, err_f)
     """
     socket.setdefaulttimeout(60.0)
 
     code, start, end, need_k, need_flow = args
     df_k = "SKIP" if not need_k else None
     df_f = "SKIP" if not need_flow else None
-    factor_error_triggered = False  # 记录该股票是否触发了因子异常拦截
+    
+    factor_error_triggered = False  
+    err_msg_k = ""  # 记录 K 线的最终死因
+    err_msg_f = ""  # 记录资金流的最终死因
 
     # ---------- 1. 获取 K 线及复权因子 ----------
     if need_k:
@@ -80,24 +85,20 @@ def process_one(args):
             try:
                 lg = bs.login()
                 if lg.error_code != '0':
-                    if attempt < max_retry - 1: time.sleep(1); continue
-                    break
+                    raise Exception(f"Baostock 登录失败: {lg.error_msg}")
                     
                 fields = "date,code,open,high,low,close,volume,amount,turn,pctChg,peTTM,pbMRQ,isST"
                 rs = bs.query_history_k_data_plus(code, fields, start_date=start, end_date=end, frequency="d", adjustflag="3")
                 
                 if rs.error_code != '0':
-                    bs.logout()
-                    if "用户未登录" in rs.error_msg or rs.error_code == '10001001':
-                        if attempt < max_retry - 1: time.sleep(1); continue
-                    break
+                    raise Exception(f"Baostock K线接口错误 [{rs.error_code}]: {rs.error_msg}")
                     
                 k_data = []
                 while rs.next(): k_data.append(rs.get_row_data())
                 
                 if not k_data:
                     bs.logout()
-                    df_k = pd.DataFrame() 
+                    df_k = pd.DataFrame() # 数据本身为空（停牌/退市），视为合法成功
                     break
                     
                 temp_df_k = pd.DataFrame(k_data, columns=fields.split(","))
@@ -105,9 +106,9 @@ def process_one(args):
                 # --- 获取复权因子 ---
                 rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
                 
-                # 💥 终极拦截：网络或服务器导致因子获取失败，必须抛出异常阻断，绝不能静默赋 1.0
+                # 💥 终极拦截：网络或服务器导致因子获取失败
                 if rs_fac.error_code != '0':
-                    raise ValueError(f"[{code}] 复权因子接口获取失败(不可静默): {rs_fac.error_msg}")
+                    raise ValueError(f"复权因子接口获取失败 [{rs_fac.error_code}]: {rs_fac.error_msg}")
                 
                 fac_data = []
                 while rs_fac.next(): 
@@ -115,7 +116,6 @@ def process_one(args):
                         
                 if fac_data:
                     df_fac = pd.DataFrame(fac_data, columns=["code", "date", "fore", "back", "ratio"])
-                    # 取后复权因子 back，重命名为 adjustFactor 供后续处理
                     df_fac = df_fac[['date', 'back']].rename(columns={'back': 'adjustFactor'})
                     df_fac['date'] = pd.to_datetime(df_fac['date'])
                     df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
@@ -124,12 +124,12 @@ def process_one(args):
                     # 💥 核心防线：物理规则断言
                     if not df_fac.empty:
                         if (df_fac['adjustFactor'] <= 0).any():
-                            raise ValueError(f"[{code}] 复权因子存在非正数，数据源脏数据！")
+                            raise ValueError("复权因子存在非正数，触发脏数据熔断！")
                         
                         if len(df_fac) > 1:
                             diffs = df_fac['adjustFactor'].diff().dropna()
                             if (diffs < -1e-5).any():
-                                raise ValueError(f"[{code}] 后复权因子违背单调递增定律，存在异常下降断层！")
+                                raise ValueError("后复权因子违背单调递增定律，存在异常下降断层！")
 
                     temp_df_k['date'] = pd.to_datetime(temp_df_k['date'])
                     temp_df_k = temp_df_k.sort_values('date')
@@ -139,9 +139,9 @@ def process_one(args):
                     temp_df_k['adjustFactor'] = temp_df_k['adjustFactor'].fillna(1.0)
                     
                     if temp_df_k['adjustFactor'].isna().any():
-                        raise ValueError(f"[{code}] 拼接完成后仍存在无法解析的 NaN 因子！")
+                        raise ValueError("拼接完成后仍存在无法解析的 NaN 因子！")
                 else:
-                    # 只有接口调用成功（error_code=='0'），且确实没返回数据时，才说明这只股票历史上从未分红
+                    # 历史上从未分红，安全赋 1.0
                     temp_df_k['adjustFactor'] = 1.0
                     
                 df_k = temp_df_k
@@ -150,8 +150,7 @@ def process_one(args):
                 
             except Exception as e:
                 err_msg = str(e)
-                # 如果是因子引发的拦截，将会记录标志并被外层的 while 重试系统接管
-                if "复权因子" in err_msg or "NaN 因子" in err_msg:
+                if "复权因子" in err_msg or "NaN 因子" in err_msg or "脏数据" in err_msg or "单调递增" in err_msg:
                     factor_error_triggered = True
                     
                 try: bs.logout()
@@ -159,15 +158,20 @@ def process_one(args):
                 
                 if attempt == max_retry - 1:
                     df_k = None 
+                    err_msg_k = err_msg  # 💥 记录最后一次重试的最终死因
                 else:
                     time.sleep(2)
 
     # ---------- 2. 获取资金流 ----------
     if need_flow:
-        df_f = fetch_sina_flow(code, start, end)
+        try:
+            df_f = fetch_sina_flow(code, start, end)
+        except Exception as e:
+            df_f = None
+            err_msg_f = str(e)  # 💥 记录资金流的最终死因
 
-    # 返回值增加 factor_error_triggered
-    return code, df_k, df_f, factor_error_triggered
+    # 返回值增加死因记录
+    return code, df_k, df_f, factor_error_triggered, err_msg_k, err_msg_f
 
 # ==============================
 # 主函数
@@ -200,7 +204,11 @@ def main():
     f_failed_set = set(codes)
     f_ignored_set = set()
     
-    factor_retry_set = set() # 用于收集本节点触发因子重试的股票
+    factor_retry_set = set() 
+    
+    # 💥 新增：用于存储每只股票的具体死因
+    k_error_dict = {}
+    f_error_dict = {}
 
     MAX_ROUNDS = 4  
     
@@ -224,24 +232,37 @@ def main():
             
             for future in tqdm(as_completed(futures), total=len(futures), desc=desc):
                 try:
-                    # 解包增加 factor_err 标志
-                    code, k, f, factor_err = future.result()
+                    # 💥 解包增加异常信息
+                    code, k, f, factor_err, err_k, err_f = future.result()
                     
                     if factor_err:
                         factor_retry_set.add(code)
                     
+                    # 检查 K线 状态
                     if k is not None and isinstance(k, pd.DataFrame):
-                        if not k.empty: k_success_dict[code] = k
+                        if not k.empty: 
+                            k_success_dict[code] = k
                         k_failed_set.discard(code)
+                        k_error_dict.pop(code, None) # 成功则清除之前的错误记录
+                    elif k is None:
+                        k_error_dict[code] = err_k
                         
+                    # 检查 资金流 状态
                     if f is not None and isinstance(f, pd.DataFrame):
                         if not f.empty: 
                             f_success_dict[code] = f
                         else:
                             f_ignored_set.add(code)
                         f_failed_set.discard(code)
-                except Exception:
-                    pass
+                        f_error_dict.pop(code, None)
+                    elif f is None:
+                        f_error_dict[code] = err_f
+                        
+                except Exception as e:
+                    # 这个 exception 仅在 future 内部发生不可挽回崩溃时触发
+                    failed_code = futures[future]
+                    if failed_code in k_failed_set: k_error_dict[failed_code] = f"进程崩溃异常: {str(e)}"
+                    if failed_code in f_failed_set: f_error_dict[failed_code] = f"进程崩溃异常: {str(e)}"
                     
         finally:
             if sys.version_info >= (3, 9):
@@ -253,6 +274,25 @@ def main():
     res_f = list(f_success_dict.values())
 
     print(f"\n[+] Job {args.index} 结束: K线 成功 {len(res_k)}/失败 {len(k_failed_set)} | 资金流 成功 {len(res_f)}/放弃 {len(f_ignored_set)}/失败 {len(f_failed_set)}")
+
+    # ========================================================
+    # 💥 阵亡名单与验尸报告打印
+    # ========================================================
+    if k_failed_set or f_failed_set:
+        print("\n" + "="*60)
+        print("🚨 FAILED STOCKS REPORT (阵亡名单与死因剖析)")
+        print("="*60)
+        
+        if k_failed_set:
+            print(f"\n❌ K线下载失败 ({len(k_failed_set)} 只):")
+            for c in sorted(list(k_failed_set)):
+                print(f"   [{c}] -> {k_error_dict.get(c, '未知内部异常')}")
+                
+        if f_failed_set:
+            print(f"\n❌ 资金流下载失败 ({len(f_failed_set)} 只):")
+            for c in sorted(list(f_failed_set)):
+                print(f"   [{c}] -> {f_error_dict.get(c, '未知内部异常')}")
+        print("="*60 + "\n")
 
     os.makedirs("temp_parts", exist_ok=True)
     cleaner = DataCleaner()
@@ -269,7 +309,6 @@ def main():
             df_f_all = cleaner.clean_money_flow(df_f_all)
             df_f_all.to_parquet(f"temp_parts/flow_part_{args.index}.parquet", index=False)
             
-    # 持久化本节点的因子重试统计信息，供后续流程审计使用
     with open(f"temp_parts/factor_stats_{args.index}.json", "w") as f:
         json.dump(list(factor_retry_set), f)
 
