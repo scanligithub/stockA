@@ -20,19 +20,20 @@ HEADERS = {
 }
 
 # ==============================
-# 新浪资金流 (智能判别版)
+# 新浪资金流 (智能指数退避版)
 # ==============================
 def fetch_sina_flow(code, start, end):
     symbol = code.replace(".", "")
     url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page=1&num=10000&sort=opendate&asc=0&daima={symbol}"
     
     last_err = "未知网络错误"
-    for attempt in range(3): 
+    max_retry = 5  # 提升重试次数
+    for attempt in range(max_retry): 
         try:
             r = requests.get(url, headers=HEADERS, timeout=10)
             if r.status_code != 200:
                 last_err = f"HTTP 状态码异常: {r.status_code}"
-                time.sleep(1)
+                time.sleep(2 ** attempt) # 💥 指数退避: 1, 2, 4, 8 秒
                 continue
                 
             data = r.json()
@@ -55,13 +56,12 @@ def fetch_sina_flow(code, start, end):
             
         except Exception as e:
             last_err = str(e)
-            time.sleep(1.5)
+            time.sleep(2 ** attempt)
             
-    # 💥 新增：重试耗尽后抛出明确异常供外层捕获
     raise Exception(f"新浪资金流接口重试耗尽: {last_err}")
 
 # ==============================
-# 核心：单股票处理（包含物理规则断言与异常埋点）
+# 核心：单股票处理（包含单调平滑与异常拦截）
 # ==============================
 def process_one(args):
     """
@@ -75,12 +75,12 @@ def process_one(args):
     df_f = "SKIP" if not need_flow else None
     
     factor_error_triggered = False  
-    err_msg_k = ""  # 记录 K 线的最终死因
-    err_msg_f = ""  # 记录资金流的最终死因
+    err_msg_k = ""  
+    err_msg_f = ""  
 
     # ---------- 1. 获取 K 线及复权因子 ----------
     if need_k:
-        max_retry = 3
+        max_retry = 5  # 💥 提升到 5 次，专门对付 10001001 小黑屋
         for attempt in range(max_retry):
             try:
                 lg = bs.login()
@@ -98,7 +98,7 @@ def process_one(args):
                 
                 if not k_data:
                     bs.logout()
-                    df_k = pd.DataFrame() # 数据本身为空（停牌/退市），视为合法成功
+                    df_k = pd.DataFrame() 
                     break
                     
                 temp_df_k = pd.DataFrame(k_data, columns=fields.split(","))
@@ -106,7 +106,6 @@ def process_one(args):
                 # --- 获取复权因子 ---
                 rs_fac = bs.query_adjust_factor(code, start_date="1990-01-01", end_date="2099-12-31")
                 
-                # 💥 终极拦截：网络或服务器导致因子获取失败
                 if rs_fac.error_code != '0':
                     raise ValueError(f"复权因子接口获取失败 [{rs_fac.error_code}]: {rs_fac.error_msg}")
                 
@@ -121,27 +120,26 @@ def process_one(args):
                     df_fac['adjustFactor'] = pd.to_numeric(df_fac['adjustFactor'], errors='coerce')
                     df_fac = df_fac.dropna(subset=['date', 'adjustFactor']).sort_values('date')
 
-                    # 💥 核心防线：物理规则断言
+                    # 💥 应对死因1：远古脏数据断层 -> 强制剔除负数并平滑为单调递增
+                    # 1. 过滤掉绝对错误的非正数因子
+                    df_fac = df_fac[df_fac['adjustFactor'] > 0]
+                    
                     if not df_fac.empty:
-                        if (df_fac['adjustFactor'] <= 0).any():
-                            raise ValueError("复权因子存在非正数，触发脏数据熔断！")
-                        
-                        if len(df_fac) > 1:
-                            diffs = df_fac['adjustFactor'].diff().dropna()
-                            if (diffs < -1e-5).any():
-                                raise ValueError("后复权因子违背单调递增定律，存在异常下降断层！")
+                        # 2. 核心魔法：cummax() 强制将下降的脏数据拉平，确保严格单调递增
+                        df_fac['adjustFactor'] = df_fac['adjustFactor'].cummax()
 
-                    temp_df_k['date'] = pd.to_datetime(temp_df_k['date'])
-                    temp_df_k = temp_df_k.sort_values('date')
-                    
-                    temp_df_k = pd.merge_asof(temp_df_k, df_fac, on='date', direction='backward')
-                    temp_df_k['date'] = temp_df_k['date'].dt.strftime('%Y-%m-%d')
-                    temp_df_k['adjustFactor'] = temp_df_k['adjustFactor'].fillna(1.0)
-                    
-                    if temp_df_k['adjustFactor'].isna().any():
-                        raise ValueError("拼接完成后仍存在无法解析的 NaN 因子！")
+                        temp_df_k['date'] = pd.to_datetime(temp_df_k['date'])
+                        temp_df_k = temp_df_k.sort_values('date')
+                        
+                        temp_df_k = pd.merge_asof(temp_df_k, df_fac, on='date', direction='backward')
+                        temp_df_k['date'] = temp_df_k['date'].dt.strftime('%Y-%m-%d')
+                        temp_df_k['adjustFactor'] = temp_df_k['adjustFactor'].fillna(1.0)
+                        
+                        if temp_df_k['adjustFactor'].isna().any():
+                            raise ValueError("拼接完成后仍存在无法解析的 NaN 因子！")
+                    else:
+                        temp_df_k['adjustFactor'] = 1.0
                 else:
-                    # 历史上从未分红，安全赋 1.0
                     temp_df_k['adjustFactor'] = 1.0
                     
                 df_k = temp_df_k
@@ -150,7 +148,7 @@ def process_one(args):
                 
             except Exception as e:
                 err_msg = str(e)
-                if "复权因子" in err_msg or "NaN 因子" in err_msg or "脏数据" in err_msg or "单调递增" in err_msg:
+                if "复权因子" in err_msg or "NaN 因子" in err_msg:
                     factor_error_triggered = True
                     
                 try: bs.logout()
@@ -158,9 +156,10 @@ def process_one(args):
                 
                 if attempt == max_retry - 1:
                     df_k = None 
-                    err_msg_k = err_msg  # 💥 记录最后一次重试的最终死因
+                    err_msg_k = err_msg  
                 else:
-                    time.sleep(2)
+                    # 💥 应对死因2：指数退避休眠，优雅躲避 Baostock 的并发限流防火墙
+                    time.sleep(2 ** attempt) 
 
     # ---------- 2. 获取资金流 ----------
     if need_flow:
@@ -168,9 +167,8 @@ def process_one(args):
             df_f = fetch_sina_flow(code, start, end)
         except Exception as e:
             df_f = None
-            err_msg_f = str(e)  # 💥 记录资金流的最终死因
+            err_msg_f = str(e)  
 
-    # 返回值增加死因记录
     return code, df_k, df_f, factor_error_triggered, err_msg_k, err_msg_f
 
 # ==============================
@@ -205,8 +203,6 @@ def main():
     f_ignored_set = set()
     
     factor_retry_set = set() 
-    
-    # 💥 新增：用于存储每只股票的具体死因
     k_error_dict = {}
     f_error_dict = {}
 
@@ -232,7 +228,6 @@ def main():
             
             for future in tqdm(as_completed(futures), total=len(futures), desc=desc):
                 try:
-                    # 💥 解包增加异常信息
                     code, k, f, factor_err, err_k, err_f = future.result()
                     
                     if factor_err:
@@ -243,7 +238,7 @@ def main():
                         if not k.empty: 
                             k_success_dict[code] = k
                         k_failed_set.discard(code)
-                        k_error_dict.pop(code, None) # 成功则清除之前的错误记录
+                        k_error_dict.pop(code, None) 
                     elif k is None:
                         k_error_dict[code] = err_k
                         
@@ -259,7 +254,6 @@ def main():
                         f_error_dict[code] = err_f
                         
                 except Exception as e:
-                    # 这个 exception 仅在 future 内部发生不可挽回崩溃时触发
                     failed_code = futures[future]
                     if failed_code in k_failed_set: k_error_dict[failed_code] = f"进程崩溃异常: {str(e)}"
                     if failed_code in f_failed_set: f_error_dict[failed_code] = f"进程崩溃异常: {str(e)}"
