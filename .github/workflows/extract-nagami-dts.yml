@@ -1,0 +1,79 @@
+name: Extract Nagami Device Tree Sources
+
+on:
+  workflow_dispatch:
+
+jobs:
+  extract-dts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout buildroot
+        uses: actions/checkout@v4
+
+      - name: Clone NetCube U-Boot
+        run: |
+          git clone --depth=1 --branch=next https://gitlab.com/netcube-systems-austria/u-boot.git uboot-netcube
+
+      - name: Clone Linux kernel
+        run: |
+          git clone --depth=1 --branch=v6.18 https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git linux-mainline
+
+      - name: Find Nagami DTS files in U-Boot
+        run: |
+          echo "=== U-Boot DTS files ==="
+          find uboot-netcube/arch/arm/dts -name "*nagami*" -o -name "*sun8i-t113*" -o -name "*sun20i*" | tee /tmp/uboot-dts-files.txt
+          mkdir -p output/uboot-dts
+          while IFS= read -r f; do
+            cp "$f" output/uboot-dts/
+          done < /tmp/uboot-dts-files.txt
+
+      - name: Find Nagami DTS files in Linux
+        run: |
+          echo "=== Linux DTS files ==="
+          find linux-mainline/arch/arm/boot/dts -name "*nagami*" -o -name "*sun8i-t113*" -o -name "*sun20i*" | tee /tmp/linux-dts-files.txt
+          mkdir -p output/linux-dts
+          while IFS= read -r f; do
+            cp "$f" output/linux-dts/
+          done < /tmp/linux-dts-files.txt
+
+      - name: Copy DTS include files
+        run: |
+          echo "=== U-Boot .dtsi files ==="
+          find uboot-netcube/arch/arm/dts -name "*.dtsi" | grep -iE "sun8i|sun20i|t113" | while read f; do
+            cp "$f" output/uboot-dts/
+          done
+          echo "=== Linux .dtsi files ==="
+          find linux-mainline/arch/arm/boot/dts -name "*.dtsi" | grep -iE "sun8i|sun20i|t113" | while read f; do
+            cp "$f" output/linux-dts/
+          done
+
+      - name: List U-Boot board config
+        run: |
+          find uboot-netcube/configs -name "*nagami*" | while read f; do
+            mkdir -p output/uboot-configs
+            cp "$f" output/uboot-configs/
+          done
+
+      - name: Create summary
+        run: |
+          echo "## Extracted Files" > output/README.md
+          echo "" >> output/README.md
+          echo "### U-Boot DTS" >> output/README.md
+          ls -la output/uboot-dts/ >> output/README.md 2>/dev/null || echo "(none)" >> output/README.md
+          echo "" >> output/README.md
+          echo "### Linux DTS" >> output/README.md
+          ls -la output/linux-dts/ >> output/README.md 2>/dev/null || echo "(none)" >> output/README.md
+          echo "" >> output/README.md
+          echo "### U-Boot Configs" >> output/README.md
+          ls -la output/uboot-configs/ >> output/README.md 2>/dev/null || echo "(none)" >> output/README.md
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nagami-device-tree-sources
+          path: output/
+
+      - name: Print file contents
+        run: |
+          echo "========== All extracted files =========="
+          find output -type f -exec echo "--- {} ---" \; -exec cat {} \;
