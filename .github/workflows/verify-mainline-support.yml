@@ -1,0 +1,146 @@
+name: Verify Linux Mainline Support for Nagami T113-S
+
+on:
+  workflow_dispatch:
+
+jobs:
+  verify-mainline-support:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout buildroot
+        uses: actions/checkout@v4
+
+      - name: Clone Linux kernel v6.18
+        run: |
+          git clone --depth=1 --branch=v6.18 https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git linux-v6.18
+
+      - name: Clone Linux latest (for comparison)
+        run: |
+          git clone --depth=1 https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git linux-latest
+
+      - name: Search for Nagami in Linux v6.18
+        id: search-v618
+        run: |
+          echo "=== Searching for 'nagami' in Linux v6.18 ==="
+          NAGAMI_DTS=$(find linux-v6.18/arch -name "*nagami*" 2>/dev/null | tee /tmp/nagami-v618.txt || true)
+          NAGAMI_KCONFIG=$(grep -rl "nagami" linux-v6.18/arch/arm/ 2>/dev/null | tee /tmp/nagami-kconfig-v618.txt || true)
+          NAGAMI_DEFCONFIG=$(grep -rl "nagami" linux-v6.18/arch/arm/configs/ 2>/dev/null | tee /tmp/nagami-defconfig-v618.txt || true)
+
+          if [ -z "$NAGAMI_DTS" ] && [ -z "$NAGAMI_KCONFIG" ]; then
+            echo "NAGAMI_FOUND=false" >> $GITHUB_OUTPUT
+            echo "::warning::No Nagami board support found in Linux v6.18"
+          else
+            echo "NAGAMI_FOUND=true" >> $GITHUB_OUTPUT
+            echo "::notice::Nagami board support found in Linux v6.18"
+          fi
+
+      - name: Search for T113-S / sun8i-t113 in Linux v6.18
+        id: search-t113-v618
+        run: |
+          echo "=== Searching for T113-S (sun8i-t113) in Linux v6.18 ==="
+          echo "--- DTS files ---"
+          find linux-v6.18/arch/arm/boot/dts -name "*t113*" 2>/dev/null | tee /tmp/t113-dts-v618.txt || true
+          echo "--- Kconfig entries ---"
+          grep -rn "T113\|t113" linux-v6.18/arch/arm/mach-sunxi/ 2>/dev/null | tee /tmp/t113-kconfig-v618.txt || true
+          echo "--- Defconfig entries ---"
+          grep -rn "T113\|t113" linux-v6.18/arch/arm/configs/sunxi_defconfig 2>/dev/null | tee /tmp/t113-defconfig-v618.txt || true
+          echo "--- Driver entries ---"
+          grep -rn "T113\|t113" linux-v6.18/drivers/ 2>/dev/null | head -20 | tee /tmp/t113-drivers-v618.txt || true
+
+          T113_COUNT=$(find linux-v6.18 -name "*t113*" 2>/dev/null | wc -l)
+          echo "T113_COUNT_V618=$T113_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Search for T113-S in Linux latest
+        id: search-t113-latest
+        run: |
+          echo "=== Searching for T113-S (sun8i-t113) in Linux latest ==="
+          echo "--- DTS files ---"
+          find linux-latest/arch/arm/boot/dts -name "*t113*" 2>/dev/null | tee /tmp/t113-dts-latest.txt || true
+          echo "--- Kconfig entries ---"
+          grep -rn "T113\|t113" linux-latest/arch/arm/mach-sunxi/ 2>/dev/null | tee /tmp/t113-kconfig-latest.txt || true
+          echo "--- Defconfig entries ---"
+          grep -rn "T113\|t113" linux-latest/arch/arm/configs/sunxi_defconfig 2>/dev/null | tee /tmp/t113-defconfig-latest.txt || true
+          echo "--- Driver entries ---"
+          grep -rn "T113\|t113" linux-latest/drivers/ 2>/dev/null | head -20 | tee /tmp/t113-drivers-latest.txt || true
+
+          T113_COUNT=$(find linux-latest -name "*t113*" 2>/dev/null | wc -l)
+          echo "T113_COUNT_LATEST=$T113_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Check sunxi SoC support in v6.18
+        run: |
+          echo "=== sunxi Kconfig SoC options in v6.18 ==="
+          grep -A2 "MACH_SUN" linux-v6.18/arch/arm/mach-sunxi/Kconfig 2>/dev/null | head -60 || true
+          echo ""
+          echo "=== sunxi_defconfig in v6.18 ==="
+          cat linux-v6.18/arch/arm/configs/sunxi_defconfig 2>/dev/null || true
+
+      - name: Create comparison summary
+        run: |
+          cat > summary.md << 'HEADER'
+          # Linux Mainline Support Verification for Nagami T113-S
+
+          ## 1. Nagami Board Support in Linux v6.18
+          HEADER
+
+          if [ "${{ steps.search-v618.outputs.NAGAMI_FOUND }}" = "true" ]; then
+            echo "**FOUND** - Nagami board support exists in v6.18" >> summary.md
+            echo "" >> summary.md
+            echo "\`\`\`" >> summary.md
+            cat /tmp/nagami-v618.txt >> summary.md 2>/dev/null
+            echo "\`\`\`" >> summary.md
+          else
+            echo "**NOT FOUND** - No Nagami board-specific support in v6.18" >> summary.md
+          fi
+
+          cat >> summary.md << 'EOF'
+
+          ## 2. T113-S SoC Support Comparison
+
+          | Search | Linux v6.18 | Linux Latest |
+          |--------|-------------|--------------|
+          EOF
+
+          echo "| DTS/DTI files | ${{ steps.search-t113-v618.outputs.T113_COUNT_V618 }} | ${{ steps.search-t113-latest.outputs.T113_COUNT_LATEST }} |" >> summary.md
+
+          cat >> summary.md << 'EOF'
+
+          ## 3. T113-S in Linux v6.18
+          EOF
+          echo "\`\`\`" >> summary.md
+          cat /tmp/t113-dts-v618.txt >> summary.md 2>/dev/null
+          cat /tmp/t113-kconfig-v618.txt >> summary.md 2>/dev/null
+          echo "\`\`\`" >> summary.md
+
+          cat >> summary.md << 'EOF'
+
+          ## 4. T113-S in Linux Latest
+          EOF
+          echo "\`\`\`" >> summary.md
+          cat /tmp/t113-dts-latest.txt >> summary.md 2>/dev/null
+          cat /tmp/t113-kconfig-latest.txt >> summary.md 2>/dev/null
+          echo "\`\`\`" >> summary.md
+
+          cat >> summary.md << 'EOF'
+
+          ## 5. Conclusion
+          EOF
+
+          if [ "${{ steps.search-v618.outputs.NAGAMI_FOUND }}" = "false" ] && [ "${{ steps.search-t113-v618.outputs.T113_COUNT_V618 }}" = "0" ]; then
+            echo "- **Nagami board is NOT supported in Linux v6.18 mainline**" >> summary.md
+            echo "- **T113-S SoC is NOT supported in Linux v6.18 mainline**" >> summary.md
+            echo "- NetCube likely uses their own kernel tree or out-of-tree patches" >> summary.md
+          elif [ "${{ steps.search-t113-v618.outputs.T113_COUNT_V618 }}" != "0" ]; then
+            echo "- **T113-S SoC has partial/full support in Linux v6.18**" >> summary.md
+            echo "- Board-specific DTS may still be out-of-tree" >> summary.md
+          fi
+
+          cat summary.md > $GITHUB_STEP_SUMMARY
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: mainline-verification-results
+          path: |
+            summary.md
+            /tmp/nagami-*.txt
+            /tmp/t113-*.txt
