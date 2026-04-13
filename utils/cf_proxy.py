@@ -4,26 +4,21 @@ import time
 import random
 from requests.adapters import HTTPAdapter
 
-
 class EastMoneyProxy:
     def __init__(self):
-        # 1. 自动从环境变量获取 CF Worker URL，并确保格式正确
         raw_url = os.getenv("CF_WORKER_URL", "").strip()
         if raw_url and not raw_url.startswith("http"):
             self.worker_url = f"https://{raw_url}"
         else:
             self.worker_url = raw_url
             
-        # 2. 模拟真实 Chrome 浏览器的请求头，增加伪装度
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             "Referer": "https://quote.eastmoney.com/",
-            "Connection": "keep-alive" # 启用长连接，提升并发效率
+            "Connection": "keep-alive"
         }
         
         self.session = requests.Session()
-        
-        # 100个连接池，保障 20 并发通道畅通，防止本地端口耗尽
         adapter = HTTPAdapter(
             pool_connections=100, 
             pool_maxsize=100, 
@@ -31,7 +26,6 @@ class EastMoneyProxy:
         )
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
-        
         self.session.headers.update(self.headers)
 
     def _request(self, target_func, params, retries=3):
@@ -44,33 +38,38 @@ class EastMoneyProxy:
         for i in range(retries):
             try:
                 payload["_cb"] = f"{int(time.time() * 1000)}_{i}"
-                resp = self.session.get(self.worker_url, params=payload, timeout=20)
+                # 配合 CF Worker 的 15 秒超时，Python 端放宽到 18 秒，防止提前斩断
+                resp = self.session.get(self.worker_url, params=payload, timeout=18)
                 
                 if resp.status_code == 200:
-                    try: return resp.json()
+                    try: 
+                        return resp.json()
                     except:
-                        # 💥 修改点：随机睡 1.0 到 2.5 秒，错峰重试
-                        time.sleep(random.uniform(1.0, 2.5)) 
+                        time.sleep(random.uniform(1.0, 2.0))
                         continue
+                elif resp.status_code in [502, 504]:
+                    # 如果 CF Worker 返回了标准化的 JSON 错误，进行拦截
+                    try:
+                        err_data = resp.json()
+                        # rc = -2 说明是 Worker 主动阻断或超时
+                        pass 
+                    except:
+                        pass
+                    time.sleep(random.uniform(1.5, 3.0))
                 else:
                     time.sleep(random.uniform(1.0, 2.5))
+            except requests.exceptions.Timeout:
+                time.sleep(random.uniform(2.0, 3.5))
             except Exception:
-                # 💥 修改点：网络异常时，随机睡 1.5 到 3.5 秒
-                time.sleep(random.uniform(1.5, 3.5))
+                time.sleep(random.uniform(1.5, 3.0))
         return None
 
     def get_sector_list(self, fs_code, fid="f3", po=1, pz=100, pn=1):
         params = {
-            "pn": pn, 
-            "pz": pz, 
-            "po": po, 
-            "np": 1, 
+            "pn": pn, "pz": pz, "po": po, "np": 1, 
             "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-            "fltt": 2, 
-            "invt": 2, 
-            "fid": fid,
-            "fs": fs_code,
-            "fields": "f12,f13,f14" 
+            "fltt": 2, "invt": 2, "fid": fid,
+            "fs": fs_code, "fields": "f12,f13,f14" 
         }
         res = self._request("list", params)
         if res and res.get('data') and res['data'].get('diff'):
@@ -87,33 +86,52 @@ class EastMoneyProxy:
             "fqt": "1", 
             "beg": beg, 
             "end": end, 
-            "lmt": "1000000"
+            # 💥 核心修复：10000 天约合 40 年，完美覆盖A股历史，绝不触发东财后端慢查询防御
+            "lmt": "10000" 
         }
         return self._request("kline", params)
 
-    def get_sector_constituents(self, sector_code, pz=1000, pn=1):
+    def get_sector_constituents(self, sector_code):
         """
-        获取板块成份股列表。
-        带有智能降级机制，对付“社保重仓”等慢查询策略板块。
+        核心修复：自带智能翻页，将单次 pz 从 1000 降级到 500，彻底解决慢查询挂起问题
         """
-        params = {
-            "pn": pn, 
-            "pz": pz, 
-            "po": 1, 
-            "np": 1,
-            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-            "fltt": 2, 
-            "invt": 2, 
-            "fid": "f3",
-            "fs": f"b:{sector_code}",
-            "fields": "f12,f13,f14"
-        }
-        res = self._request("constituents", params)
+        all_items = []
+        pn = 1
+        pz = 500 # 💥 安全阈值
         
-        # 【防线2：慢查询降级 Fallback】
-        # 策略板块(如社保重仓)请求 1000 条会触发东财数据库超时。
-        # 如果返回 None 且当前是 1000，立刻降级为 500 再次尝试抢救。
-        if res is None and pz == 1000:
-            return self.get_sector_constituents(sector_code, pz=500, pn=1)
+        while True:
+            params = {
+                "pn": pn, 
+                "pz": pz, 
+                "po": 1, 
+                "np": 1,
+                "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                "fltt": 2, 
+                "invt": 2, 
+                "fid": "f3",
+                "fs": f"b:{sector_code}",
+                "fields": "f12,f13,f14"
+            }
+            res = self._request("constituents", params)
             
-        return res
+            if res is None:
+                # 如果 500 都超时，直接抢救性返回已获取的部分
+                break
+                
+            if res.get('data') and res['data'].get('diff'):
+                diff = res['data']['diff']
+                items = list(diff.values()) if isinstance(diff, dict) else diff
+                all_items.extend(items)
+                
+                # 如果返回数量小于 pz，说明没有下一页了
+                if len(items) < pz:
+                    break
+                pn += 1
+                time.sleep(0.5) # 翻页轻微错峰
+            else:
+                break
+                
+        # 封装为统一结构返回
+        if all_items:
+            return {"data": {"diff": all_items}}
+        return None
