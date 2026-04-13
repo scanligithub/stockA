@@ -78,8 +78,8 @@ def main():
     all_k_flat, all_c_flat = [], []
     MAX_RETRIES = 2
     
-    # 💥 核心：因为采用了 99 节点散射，无需盲目拉高本地并发，50 并发是最稳定零封杀的设置
-    CONCURRENT_WORKERS = 50 
+    # 💥 核心：因为采用了 99 节点散射，无需盲目拉高本地并发，80 并发是最稳定零封杀的设置
+    CONCURRENT_WORKERS = 80 
     
     for attempt in range(MAX_RETRIES):
         if not sectors_to_fetch: break
