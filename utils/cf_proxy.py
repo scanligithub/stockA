@@ -61,7 +61,7 @@ class EastMoneyProxy:
             "fields2": "f51,f52,f53,f54,f55,f56,f57,f58", 
             "klt": "101", 
             # 💥 核心修复：板块指数没有分红配股，强行 fqt=1 (前复权) 会导致东财部分网关返回 null 或错误码
-            "fqt": "0", 
+            "fqt": "1", 
             "beg": beg, 
             "end": end, 
             "lmt": "10000" 
