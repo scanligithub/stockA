@@ -54,7 +54,7 @@ class EastMoneyProxy:
             return list(items.values()) if isinstance(items, dict) else items
         return []
 
-    def get_sector_kline(self, secid, beg="20250101", end="20500101"):
+    def get_sector_kline(self, secid, beg="19900101", end="20500101"):
         params = {
             "secid": secid,
             "fields1": "f1,f2,f3,f4,f5,f6",
