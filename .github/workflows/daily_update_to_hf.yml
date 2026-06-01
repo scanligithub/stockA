@@ -6,7 +6,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write  # 提升权限，支持发布和克隆
+  actions: write
 
 jobs:
   prepare:
@@ -47,6 +48,7 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
+  # ====== 🛡️ 核心改造：引入自愈库的高质量发布资产 ======
   fetch-sectors:
     runs-on: ubuntu-latest
     steps:
@@ -55,12 +57,23 @@ jobs:
         with:
           python-version: "3.10"
           cache: 'pip'
-      - run: pip install -r requirements.txt
-      - name: Fetch Sectors
+          
+      - name: Install Runtime Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install polars
+
+      - name: Download Latest Healed Sectors (跨仓库拉取自愈数据)
         env:
-          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-        run: python scripts/fetch_sector.py
-      - uses: actions/upload-artifact@v4
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download --repo scanligithub/em-sector-auto-healer --pattern "Full_Sector_Klines.zip" --clobber
+
+      - name: Transform JSON to Clean Parquet (对齐精度并清洗)
+        run: python scripts/import_healed_sectors.py
+
+      - name: Upload Sector Parquet
+        uses: actions/upload-artifact@v4
         with:
           name: sector-parts
           path: temp_parts/*.parquet
@@ -85,7 +98,6 @@ jobs:
           
       - name: Merge Data (Local Only)
         run: |
-          # 使用 --mode release 仅在本地生成合并后的文件到 output/
           python scripts/merge_and_push.py --mode release
           
       - name: Force Push to HF (Clone & Merge Mode)
@@ -93,28 +105,22 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ secrets.HF_REPO }}
         run: |
-          # 1. 启用 LFS 并浅克隆当前的 HF 仓库（获取所有现有文件）
           git lfs install
           git clone --depth 1 https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO hf_workspace
-          
-          # 2. 斩断 Git 历史（核心：防止产生版本历史）
           rm -rf hf_workspace/.git
-          
-          # 3. 将今天新生成的数据（在 output 目录下）以及 README 覆盖进工作区
           cp -a output/. hf_workspace/
           cp README.md hf_workspace/ 2>/dev/null || echo "README not found"
           
-          # 4. 在合并后的目录中重新初始化，并强制推送
           cd hf_workspace
           git init -b main
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          
           git lfs track "*.parquet"
           git add .gitattributes
           git add .
           git commit -m "Daily Merge & Update (Zero History): $(date +'%Y-%m-%d %H:%M:%S')"
           git push https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO main --force
+          
       - name: Upload QC Report
         if: always()
         uses: actions/upload-artifact@v4
@@ -122,6 +128,7 @@ jobs:
           name: daily-qc-report
           path: output/qc_*
           retention-days: 3
+          
       - name: Publish QC
         if: always()
         run: cat output/qc_summary.md >> $GITHUB_STEP_SUMMARY
