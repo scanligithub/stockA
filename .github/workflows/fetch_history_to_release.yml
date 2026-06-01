@@ -3,12 +3,11 @@ name: Fetch Full History to Release
 on:
   workflow_dispatch:
 
-# === 关键修复：添加写权限 ===
 permissions:
   contents: write
+  actions: write
 
 jobs:
-  # 1. 准备分片矩阵
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -24,7 +23,6 @@ jobs:
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
 
-  # 2. 并发下载全量历史 (20个并发任务)
   fetch-full-history:
     needs: prepare
     runs-on: ubuntu-latest
@@ -53,7 +51,7 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
-  # 3. 下载板块全量历史
+  # ====== 🛡️ 核心改造：引入历史全量自愈板块 ======
   fetch-sectors:
     runs-on: ubuntu-latest
     steps:
@@ -62,17 +60,28 @@ jobs:
         with:
           python-version: "3.10"
           cache: 'pip'
-      - run: pip install -r requirements.txt
-      - name: Fetch Sectors
+          
+      - name: Install Runtime Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install polars
+
+      - name: Download Latest Healed Sectors (跨仓库拉取自愈数据)
         env:
-          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
-        run: python scripts/fetch_sector.py
-      - uses: actions/upload-artifact@v4
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download --repo scanligithub/em-sector-auto-healer --pattern "Full_Sector_Klines.zip" --clobber
+
+      - name: Transform JSON to Clean Parquet (对齐精度并清洗)
+        run: python scripts/import_healed_sectors.py
+
+      - name: Upload Sector Parquet
+        uses: actions/upload-artifact@v4
         with:
           name: sector-parts
           path: temp_parts/*.parquet
+          retention-days: 1
 
-  # 4. 汇总、切分、发布
   finalize:
     needs: [fetch-full-history, fetch-sectors]
     runs-on: ubuntu-latest
@@ -102,7 +111,6 @@ jobs:
           gh release edit archive --draft=false --prerelease=false
           gh release upload archive output/*.parquet output/*.json output/*.md --clobber
 
-      # === 新增：发布质检报告到 GitHub Step Summary ===
       - name: Publish Summary
         if: always()
         run: |
