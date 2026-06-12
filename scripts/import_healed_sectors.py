@@ -19,7 +19,7 @@ def main():
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_dir)
 
-    # 1. 构建官方分类映射字典与板块中文名映射字典 (从元数据中获取兜底)
+    # 1. 构建官方分类映射字典与板块中文名映射字典
     print("🏷️ 正在构建板块官方维度与中文名映射表...")
     type_map = {}
     sector_name_map = {}
@@ -69,7 +69,7 @@ def main():
                         "low": float(parts[4]),
                         "volume": float(parts[5]),
                         "amount": float(parts[6]),
-                        "amplitude": float(parts[7]),
+                        "amplitude": parts[7],  # 💥 核心修改：保持原始 String 类型，不转 float，完美兼容历史文件
                         "code": code,
                         "name": name,
                         "type": sector_type
@@ -80,7 +80,7 @@ def main():
     if not kline_rows:
         raise ValueError("❌ 转换失败: 未能解析出任何有效的 K 线数据行！")
 
-    # 转换为 Polars DataFrame，严格强制对齐 32位(Float32) 和 64位(Float64) 精度
+    # 转换为 Polars DataFrame，严格对齐 stockA 历史 Parquet Schema
     df_k = pl.DataFrame(kline_rows)
     df_k = df_k.with_columns([
         pl.col("date").cast(pl.Utf8),
@@ -90,7 +90,7 @@ def main():
         pl.col("low").cast(pl.Float32),
         pl.col("volume").cast(pl.Float64),
         pl.col("amount").cast(pl.Float64),
-        pl.col("amplitude").cast(pl.Float32),
+        pl.col("amplitude").cast(pl.Utf8),  # 💥 核心修改：强制映射为 Utf8(String)，避免 VStack 类型冲突崩溃
         pl.col("code").cast(pl.Utf8),
         pl.col("name").cast(pl.Utf8),
         pl.col("type").cast(pl.Utf8)
@@ -102,7 +102,7 @@ def main():
     # 写入 Parquet (采用 zstd 高性能无损压缩)
     kline_out_path = os.path.join(output_dir, "sector_kline_full.parquet")
     df_k.write_parquet(kline_out_path, compression="zstd")
-    print(f"✅ [K线转换完成] 共有 {len(df_k):,} 行数据成功落盘 (Float32精度对齐)。")
+    print(f"✅ [K线转换完成] 共有 {len(df_k):,} 行数据成功落盘 (Float32精度与历史String对齐)。")
 
     # 3. 转换成分股关系映射表
     comp_path = os.path.join(extract_dir, "metadata", "components.json")
@@ -136,11 +136,11 @@ def main():
                 
                 const_out_path = os.path.join(output_dir, "sector_constituents_latest.parquet")
                 df_c.write_parquet(const_out_path, compression="zstd")
-                print(f"✅ [成分股转换完成] 共有 {len(df_c):,} 条映射关系成功落盘。")
+                print(f"✅ [成分股转换完成] 共有 {len(df_c):,} 条关系映射成功落盘。")
         except Exception as e:
             print(f"⚠️ 转换成分股数据失败: {e}")
 
-    # 清理临时解压目录，保持 Actions 容器纯净
+    # 清理临时解压目录
     try:
         shutil.rmtree(extract_dir)
         print("🧹 临时解压目录清理完毕。")
