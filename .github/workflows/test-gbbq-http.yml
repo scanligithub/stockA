@@ -1,42 +1,56 @@
-name: Test GBBQ HTTP Speed
+name: Test Download gbbq.zip
 
 on:
-  workflow_dispatch: # 手动触发
+  workflow_dispatch:
 
 jobs:
-  http-test:
+  download-gbbq:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 🧹 彻底清除工作区所有 .go 文件，绝不留任何死角
+      - name: Download gbbq.zip
         run: |
-          find . -name "*.go" -type f -delete
-          rm -f go.mod go.sum
+          set -euxo pipefail
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+          URL="http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
+
+          echo "Downloading from: ${URL}"
+
+          curl -L \
+               --retry 3 \
+               --retry-delay 5 \
+               --connect-timeout 30 \
+               --max-time 300 \
+               -o gbbq.zip \
+               "${URL}"
+
+          echo "Download finished."
+
+      - name: Verify file
+        run: |
+          set -euxo pipefail
+
+          ls -lh gbbq.zip
+          file gbbq.zip || true
+          sha256sum gbbq.zip || true
+
+      - name: Unzip test
+        run: |
+          set -euxo pipefail
+
+          mkdir -p extracted
+          unzip -o gbbq.zip -d extracted
+
+          echo "Extracted files:"
+          find extracted -type f
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
         with:
-          go-version: '1.24'
-          
-      - name: Initialize Test Environment
-        run: |
-          go mod init discover_tdx || true
-          go get github.com/injoyai/tdx@v0.0.81
-          go mod tidy
-          
-      - name: 1. 探测该库所有的子包路径 (go list)
-        run: |
-          echo "=== [Discovery] Subpackages ==="
-          go list github.com/injoyai/tdx/...
-          
-      - name: 2. 探测主包导出的函数 (go doc main)
-        run: |
-          echo "=== [Discovery] Main Package Functions ==="
-          go doc github.com/injoyai/tdx
-          
-      - name: 3. 探测协议包导出的函数 (go doc protocol)
-        run: |
-          echo "=== [Discovery] Protocol Package Functions ==="
-          go doc github.com/injoyai/tdx/protocol
+          name: gbbq-download
+          path: |
+            gbbq.zip
+            extracted/**
