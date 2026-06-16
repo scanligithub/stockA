@@ -22,28 +22,40 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          
-      - name: Initialize Go & TDX Engine
+
+      - name: 🌐 Download Official GBBQ zip (HTTP Mode)
+        run: |
+          set -euxo pipefail
+          URL="http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
+          curl -L \
+               --retry 3 \
+               --retry-delay 5 \
+               --connect-timeout 30 \
+               -o gbbq.zip \
+               "${URL}"
+          unzip -o gbbq.zip
+          ls -lh gbbq.dat
+
+      - name: Initialize Go Module
         run: |
           go mod init stockA || true
           go get github.com/injoyai/tdx
           go mod tidy
           
       - id: set-matrix
-        name: Build Engine & Generate Matrix & Fetch GBBQ
+        name: Build Engine & Generate Matrix
         run: |
           go build -o tdx_fetcher scripts/tdx_fetcher.go
-          # 此处会生成 stock_list_master.json 和 gbbq_all.json
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
-      - name: Upload Master List & GBBQ Cache
+      - name: Upload Master Metadata (List & gbbq.dat)
         uses: actions/upload-artifact@v4
         with:
           name: master-metadata
           path: |
             stock_list_master.json
-            gbbq_all.json
+            gbbq.dat
           retention-days: 1
 
   fetch-full-history:
@@ -65,7 +77,7 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
-      - name: Download Master Metadata (List & GBBQ)
+      - name: Download Master Metadata
         uses: actions/download-artifact@v4
         with:
           name: master-metadata
@@ -81,7 +93,7 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Full History (Local GBBQ + Sina Flow)
+      - name: Fetch Full History (Local gbbq.dat + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
@@ -156,7 +168,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine with Local GBBQ Cache" || true
+          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & Local gbbq.dat Parser" || true
           gh release edit archive --draft=false --prerelease=false
           gh release upload archive output/*.parquet output/*.json output/*.md --clobber
 
