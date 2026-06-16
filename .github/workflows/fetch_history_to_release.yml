@@ -15,17 +15,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           
-      - name: Install Dependencies
-        run: pip install requests
-        
-      - id: set-matrix
-        name: Generate Matrix & Master List
+      - name: Initialize Go & TDX Engine
         run: |
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          
+      - id: set-matrix
+        name: Build Engine & Generate Matrix
+        run: |
+          # 1. 编译 Go 引擎
+          go build -o tdx_fetcher scripts/tdx_fetcher.go
+          
+          # 2. 运行切片脚本 (内部会调用 ./tdx_fetcher -mode=list)
           python scripts/prepare_matrix.py
+          
+          # 3. 输出给 GitHub Actions 矩阵
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
       - name: Upload Master List Artifact
@@ -70,7 +83,7 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Full History (TDX + Sina)
+      - name: Fetch Full History (TDX K-lines + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
@@ -98,13 +111,13 @@ jobs:
           pip install -r requirements.txt
           pip install polars
 
-      - name: Download Latest Healed Sectors (跨仓库拉取自愈数据)
+      - name: Download Latest Healed Sectors
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download --repo scanligithub/em-sector-auto-healer --pattern "Full_Sector_Klines.zip" --clobber
 
-      - name: Transform JSON to Clean Parquet (对齐精度并清洗)
+      - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
       - name: Upload Sector Parquet
