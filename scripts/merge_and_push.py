@@ -10,16 +10,11 @@ import argparse
 import shutil
 import json
 import pandas as pd
-import baostock as bs
 from utils.hf_manager import HFManager
 from utils.qc import QualityControl
 
-# 找到文件开头的 get_stock_list_with_names 函数，替换为以下代码：
-
 def get_stock_list_with_names():
-    print("📋 Loading stock metadata from JSON...")
-    import json
-    import os
+    print("📋 Loading stock list metadata from JSON...")
     if os.path.exists("stock_list_master.json"):
         try:
             with open("stock_list_master.json", "r", encoding="utf-8") as f:
@@ -31,8 +26,6 @@ def get_stock_list_with_names():
         except Exception as e:
             print(f"⚠️ Failed to parse stock JSON: {e}")
     return pd.DataFrame()
-
-# 余下代码（main 函数、DuckDB 合并、HF 推送）保持原样不变。
 
 def main():
     parser = argparse.ArgumentParser()
