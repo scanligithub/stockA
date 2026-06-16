@@ -50,7 +50,7 @@ func main() {
 }
 
 // ---------------------------------------------------------
-// 🛡️ 极速二进制解析器：直接解析本地 29 字节标准的 gbbq.dat 文件
+// 🛡  极速二进制解析器：直接解析本地 29 字节标准的 gbbq.dat 文件
 // ---------------------------------------------------------
 func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, error) {
 	file, err := os.Open(filePath)
@@ -225,12 +225,11 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 					dateIntStr := bar.Time.Format("20060102")
 					dateInt, _ := strconv.Atoi(dateIntStr)
 
-					// 🚀 核心修复：通过 .Float() 显式将 protocol.Price 转换为原生 float64 价格
-					pOpen := bar.Open.Float()
-					pHigh := bar.High.Float()
-					pLow := bar.Low.Float()
-					pClose := bar.Close.Float()
-					// 🚀 核心修复：通过 float64() 强转整型成交量，防止 %.0f 报错
+					// 🚀 核心修复：直接通过 float64 强制转换数值，并除以 1000.0 进行复原
+					pOpen := float64(bar.Open) / 1000.0
+					pHigh := float64(bar.High) / 1000.0
+					pLow := float64(bar.Low) / 1000.0
+					pClose := float64(bar.Close) / 1000.0
 					pVolume := float64(bar.Volume)
 					pAmount := bar.Amount
 
@@ -270,4 +269,20 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 	wg.Wait()
 	csvWriter.Flush()
 	fmt.Println("[Go Engine] Download completed.")
+}
+
+func getFloat(m map[string]interface{}, keys ...string) float64 {
+	for _, k := range keys {
+		if val, ok := m[k]; ok {
+			switch v := val.(type) {
+			case float64:
+				return v
+			case float32:
+				return float64(v)
+			case int:
+				return float64(v)
+			}
+		}
+	}
+	return 0.0
 }
