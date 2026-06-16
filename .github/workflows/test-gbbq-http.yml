@@ -9,7 +9,13 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-          
+
+      - name: 🧹 核心准备：强力清理残留的旧测试文件，防止 Go 编译期寻路死锁
+        run: |
+          rm -f scripts/test_gbbq_http.go
+          rm -f scripts/test_gbbq.go
+          rm -f go.mod go.sum
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
