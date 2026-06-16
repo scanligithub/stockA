@@ -34,6 +34,8 @@ jobs:
                -o gbbq.zip \
                "${URL}"
           unzip -o gbbq.zip
+          # 🚀 核心修复：将解压出来的无后缀二进制文件 'gbbq' 重命名为 'gbbq.dat'
+          mv gbbq gbbq.dat
           ls -lh gbbq.dat
 
       - name: Initialize Go Module
