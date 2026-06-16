@@ -85,7 +85,13 @@ def main():
         df_k_all = pd.read_csv(csv_out)
         if not df_k_all.empty:
             
-            # 🚀 核心修复：强制将从 CSV 读取的价格、数量和复权因子列转换为 float 数值类型，防止 pandas 误判为 str 导致计算崩溃
+            # 🚀 强力自愈清洗门禁：使用 errors='coerce' 强制进行 datetime 转换，自动识别并优雅剔除一切畸变脏日期行（如 200846-07-02）
+            df_k_all['date_dt'] = pd.to_datetime(df_k_all['date'], errors='coerce')
+            df_k_all = df_k_all.dropna(subset=['date_dt'])
+            df_k_all['date'] = df_k_all['date_dt'].dt.strftime('%Y-%m-%d')
+            df_k_all = df_k_all.drop(columns=['date_dt'])
+
+            # 强制将从 CSV 读取的价格、数量和复权因子列转换为 float 数值类型
             num_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'adjustFactor']
             for col in num_cols:
                 if col in df_k_all.columns:
