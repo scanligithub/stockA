@@ -2,11 +2,15 @@ import sys
 import os
 import argparse
 import json
-import pandas as pd
 import datetime
 import requests
 import time
 import subprocess
+
+# 💥 核心修复：向系统注册项目根目录，确保多层级目录下导入 utils 模块不报错
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import pandas as pd
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from utils.cleaner import DataCleaner
