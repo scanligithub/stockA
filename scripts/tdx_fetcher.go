@@ -14,45 +14,44 @@ import (
 	"github.com/injoyai/tdx/protocol"
 )
 
-// 导出给 Python 使用的结构体
 type StockMaster struct {
 	Code     string `json:"code"`
 	CodeName string `json:"code_name"`
 }
 
 func main() {
-	modeFlag := flag.String("mode", "fetch", "Mode: 'list' (fetch stock list) or 'fetch' (download klines)")
-	codesFlag := flag.String("codes", "", "Comma separated stock codes (e.g., sh.600000,sz.000001)")
-	outFlag := flag.String("out", "temp_kline.csv", "Output CSV file path")
+	modeFlag := flag.String("mode", "fetch", "Mode: 'list' (fetch list & gbbq) or 'fetch' (download klines)")
+	codesFlag := flag.String("codes", "", "Comma separated stock codes")
+	gbbqFlag := flag.String("gbbq", "gbbq_all.json", "Local GBBQ JSON path")
+	outFlag := flag.String("out", "temp_kline.csv", "Output CSV path")
 	flag.Parse()
 
 	if *modeFlag == "list" {
-		runFetchList()
+		runFetchListAndGbbq(*gbbqFlag)
 		return
 	}
 
 	if *modeFlag == "fetch" {
-		runFetchKlines(*codesFlag, *outFlag)
+		runFetchKlinesWithLocalGbbq(*codesFlag, *gbbqFlag, *outFlag)
 		return
 	}
 
-	fmt.Println("Unknown mode. Use --mode=list or --mode=fetch")
+	fmt.Println("Unknown mode.")
 }
 
 // ---------------------------------------------------------
-// 模式 1: 获取全量股票列表
+// 1. Prepare 阶段：单点下载全量列表 + 全量 GBBQ 数据并落盘
 // ---------------------------------------------------------
-func runFetchList() {
-	fmt.Println("[Go Engine] Mode: LIST - Fetching master stock list from TDX...")
+func runFetchListAndGbbq(gbbqPath string) {
+	fmt.Println("[Go Engine] Mode: LIST - Connecting to TDX...")
 	cli, err := tdx.DialDefault()
 	if err != nil {
-		panic(fmt.Sprintf("TDX Dial Failed: %v", err))
+		panic(err)
 	}
 	defer cli.Close()
 
+	// A. 下载股票代码
 	var masterList []StockMaster
-
-	// 遍历沪、深、北交易所 (1=SH, 0=SZ, 2=BJ 等)
 	exchanges := []protocol.Exchange{protocol.ExchangeSH, protocol.ExchangeSZ, protocol.ExchangeBJ}
 
 	for _, ex := range exchanges {
@@ -61,12 +60,10 @@ func runFetchList() {
 			continue
 		}
 		for _, item := range resp.List {
-			// 过滤 A 股: 沪市(60,68开头)，深市(00,30开头)，北交所(4,8开头)
 			if strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68") ||
 				strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30") ||
 				strings.HasPrefix(item.Code, "4") || strings.HasPrefix(item.Code, "8") {
 
-				// 构造 baostock 格式的代码 (sh.600000)
 				prefix := "sh"
 				if ex == protocol.ExchangeSZ {
 					prefix = "sz"
@@ -81,22 +78,30 @@ func runFetchList() {
 			}
 		}
 	}
-
-	fmt.Printf("[Go Engine] Successfully fetched %d A-shares.\n", len(masterList))
+	fmt.Printf("[Go Engine] Master stock list resolved: %d stocks.\n", len(masterList))
 
 	file, _ := os.Create("stock_list_master.json")
-	defer file.Close()
-	encoder := json.NewEncoder(file)
-	encoder.SetEscapeHTML(false)
-	encoder.Encode(masterList)
+	json.NewEncoder(file).Encode(masterList)
+	file.Close()
+
+	// B. 单点拉取全量 GBBQ 数据库
+	fmt.Println("[Go Engine] Downloading Global GBBQ Database...")
+	gbbqRaw, err := cli.GetGbbqAll()
+	if err != nil {
+		panic(err)
+	}
+
+	gbbqFile, _ := os.Create(gbbqPath)
+	defer gbbqFile.Close()
+	json.NewEncoder(gbbqFile).Encode(gbbqRaw)
+	fmt.Println("[Go Engine] Master list and GBBQ local cache created successfully.")
 }
 
 // ---------------------------------------------------------
-// 模式 2: 并发下载 K 线与复权
+// 2. Fetch 阶段：19 并发，完全基于本地缓存 GBBQ，零网络开销计算复权
 // ---------------------------------------------------------
-func runFetchKlines(codesStr, outPath string) {
+func runFetchKlinesWithLocalGbbq(codesStr, gbbqPath, outPath string) {
 	if codesStr == "" {
-		fmt.Println("No codes provided.")
 		return
 	}
 
@@ -114,19 +119,12 @@ func runFetchKlines(codesStr, outPath string) {
 		codeMap[tdxCode] = c
 	}
 
-	cli, err := tdx.DialDefault()
+	// 从本地磁盘加载 GBBQ (耗时只需 0.1s)
+	fmt.Printf("[Go Engine] Loading GBBQ from local cache: %s...\n", gbbqPath)
+	gbbqBytes, err := os.ReadFile(gbbqPath)
 	if err != nil {
-		panic(fmt.Sprintf("TDX Dial Failed: %v", err))
+		panic(fmt.Sprintf("Failed to read local GBBQ: %v", err))
 	}
-	defer cli.Close()
-
-	fmt.Println("[Go Engine] Mode: FETCH - Fetching Global GBBQ Database...")
-	gbbqRaw, err := cli.GetGbbqAll()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to fetch GBBQ: %v", err))
-	}
-
-	gbbqBytes, _ := json.Marshal(gbbqRaw)
 	var gbbqDyn map[string][]map[string]interface{}
 	json.Unmarshal(gbbqBytes, &gbbqDyn)
 
@@ -178,10 +176,7 @@ func runFetchKlines(codesStr, outPath string) {
 				var prevClose float64 = -1.0
 
 				for _, bar := range resp.List {
-					// 🚀 修复点：利用原生 time.Time 格式化
-					// 生成 CSV 用的格式 "2026-06-16"
 					dateStr := bar.Time.Format("2006-01-02")
-					// 生成字典匹配用的整型格式 20260616
 					dateIntStr := bar.Time.Format("20060102")
 					dateInt, _ := strconv.Atoi(dateIntStr)
 
@@ -222,7 +217,7 @@ func runFetchKlines(codesStr, outPath string) {
 
 	wg.Wait()
 	csvWriter.Flush()
-	fmt.Println("[Go Engine] All downloads and adjustments completed.")
+	fmt.Println("[Go Engine] Download completed.")
 }
 
 func getFloat(m map[string]interface{}, keys ...string) float64 {
