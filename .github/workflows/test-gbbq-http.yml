@@ -17,10 +17,21 @@ jobs:
           
       - name: Initialize Test Environment
         run: |
-          go mod init test_gbbq_http || true
-          go get github.com/injoyai/tdx
+          go mod init discover_tdx || true
+          go get github.com/injoyai/tdx@v0.0.81
           go mod tidy
           
-      - name: Run GBBQ HTTP Diagnostic
+      - name: 1. 探测该库所有的子包路径 (go list)
         run: |
-          go run scripts/test_gbbq_http.go
+          echo "=== [Discovery] Subpackages ==="
+          go list github.com/injoyai/tdx/...
+          
+      - name: 2. 探测主包导出的函数 (go doc main)
+        run: |
+          echo "=== [Discovery] Main Package Functions ==="
+          go doc github.com/injoyai/tdx
+          
+      - name: 3. 探测协议包导出的函数 (go doc protocol)
+        run: |
+          echo "=== [Discovery] Protocol Package Functions ==="
+          go doc github.com/injoyai/tdx/protocol
