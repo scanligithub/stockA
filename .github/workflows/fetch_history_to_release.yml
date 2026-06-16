@@ -30,22 +30,20 @@ jobs:
           go mod tidy
           
       - id: set-matrix
-        name: Build Engine & Generate Matrix
+        name: Build Engine & Generate Matrix & Fetch GBBQ
         run: |
-          # 1. 编译 Go 引擎
           go build -o tdx_fetcher scripts/tdx_fetcher.go
-          
-          # 2. 运行切片脚本 (内部会调用 ./tdx_fetcher -mode=list)
+          # 此处会生成 stock_list_master.json 和 gbbq_all.json
           python scripts/prepare_matrix.py
-          
-          # 3. 输出给 GitHub Actions 矩阵
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
-      - name: Upload Master List Artifact
+      - name: Upload Master List & GBBQ Cache
         uses: actions/upload-artifact@v4
         with:
-          name: master-list
-          path: stock_list_master.json
+          name: master-metadata
+          path: |
+            stock_list_master.json
+            gbbq_all.json
           retention-days: 1
 
   fetch-full-history:
@@ -67,10 +65,10 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
-      - name: Download Master List
+      - name: Download Master Metadata (List & GBBQ)
         uses: actions/download-artifact@v4
         with:
-          name: master-list
+          name: master-metadata
           path: .
           
       - name: Install Python & Go Dependencies
@@ -83,7 +81,7 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Full History (TDX K-lines + Sina Flow)
+      - name: Fetch Full History (Local GBBQ + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
@@ -96,7 +94,7 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
-  # ====== 🛡️ 保持原样：跨仓库拉取历史全量自愈板块 ======
+  # ====== 🛡️ 保持不变的板块 Job ======
   fetch-sectors:
     runs-on: ubuntu-latest
     steps:
@@ -140,13 +138,13 @@ jobs:
       - name: Download Master List (For DuckDB Metadata)
         uses: actions/download-artifact@v4
         with:
-          name: master-list
+          name: master-metadata
           path: .
 
       - name: Download All Data Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: '*-part*' # 匹配 history-part-x 和 sector-parts
+          pattern: '*-part*'
           merge-multiple: true
           path: all_artifacts
           
@@ -158,7 +156,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine" || true
+          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine with Local GBBQ Cache" || true
           gh release edit archive --draft=false --prerelease=false
           gh release upload archive output/*.parquet output/*.json output/*.md --clobber
 
