@@ -2,11 +2,11 @@ name: Daily Update to HF (Matrix)
 
 on:
   schedule:
-    - cron: '0 17 * * *' # 北京时间凌晨 01:00
+    - cron: '0 17 * * *'
   workflow_dispatch:
 
 permissions:
-  contents: write  # 提升权限，支持发布和克隆
+  contents: write
   actions: write
 
 jobs:
@@ -19,11 +19,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install baostock pandas aiohttp polars
+      - run: pip install requests
       - id: set-matrix
         run: |
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
+      - name: Upload Master List
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-list
+          path: stock_list_master.json
+          retention-days: 1
 
   fetch-stocks:
     needs: prepare
@@ -34,19 +40,38 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: 'pip'
-      - run: pip install -r requirements.txt
+      
+      - name: Download Master List
+        uses: actions/download-artifact@v4
+        with:
+          name: master-list
+          
+      - name: Install Python & Go Deps
+        run: |
+          pip install -r requirements.txt
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          go build -o tdx_fetcher scripts/tdx_fetcher.go
+          
       - name: Fetch Current Year Data
         run: |
           python scripts/fetch_worker.py --index ${{ matrix.task.index }} --codes '${{ toJson(matrix.task.codes) }}'
+          
       - uses: actions/upload-artifact@v4
         with:
           name: daily-parts-${{ matrix.task.index }}
           path: temp_parts/*.parquet
           retention-days: 1
+
+  # ... (下方的 fetch-sectors 和 finalize Job 完全保持原状，不再赘述)
 
   # ====== 🛡️ 核心改造：引入自愈库的高质量发布资产 ======
   fetch-sectors:
