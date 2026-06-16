@@ -52,9 +52,7 @@ func runFetchList() {
 
 	var masterList []StockMaster
 
-	// 遍历沪、深、北交易所 (1=SH, 0=SZ, 2=BJ 等，TDX内部自动处理)
-	// injoyai/tdx 提供的 GetStockCodeAll 返回的是如 "sh600000" 的字符串切片
-	// 但我们需要股票的中文名称，所以调用更底层的 GetCodeAll
+	// 遍历沪、深、北交易所 (1=SH, 0=SZ, 2=BJ 等)
 	exchanges := []protocol.Exchange{protocol.ExchangeSH, protocol.ExchangeSZ, protocol.ExchangeBJ}
 
 	for _, ex := range exchanges {
@@ -86,7 +84,6 @@ func runFetchList() {
 
 	fmt.Printf("[Go Engine] Successfully fetched %d A-shares.\n", len(masterList))
 
-	// 写入供 Python 使用的 JSON 文件
 	file, _ := os.Create("stock_list_master.json")
 	defer file.Close()
 	encoder := json.NewEncoder(file)
@@ -181,8 +178,12 @@ func runFetchKlines(codesStr, outPath string) {
 				var prevClose float64 = -1.0
 
 				for _, bar := range resp.List {
-					dateStr := strings.Split(bar.Time, " ")[0]
-					dateInt, _ := strconv.Atoi(strings.ReplaceAll(dateStr, "-", ""))
+					// 🚀 修复点：利用原生 time.Time 格式化
+					// 生成 CSV 用的格式 "2026-06-16"
+					dateStr := bar.Time.Format("2006-01-02")
+					// 生成字典匹配用的整型格式 20260616
+					dateIntStr := bar.Time.Format("20060102")
+					dateInt, _ := strconv.Atoi(dateIntStr)
 
 					if ev, ok := eventMap[dateInt]; ok && prevClose > 0 {
 						fh := getFloat(ev, "FenHong") / 10.0
