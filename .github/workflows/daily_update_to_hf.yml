@@ -156,7 +156,7 @@ jobs:
       - name: Download All Data Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: '*-parts-*'
+          pattern: '*-part*' # 🚀 核心修复：从 '*-parts-*' 修改为 '*-part*'，确保 sector-parts 能够被成功下载并合并
           merge-multiple: true
           path: all_artifacts
           
