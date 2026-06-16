@@ -175,7 +175,6 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 		codeMap[tdxCode] = c
 	}
 
-	// 0.05 秒极速加载本地二进制权息库
 	fmt.Printf("[Go Engine] Parsing local binary GBBQ: %s...\n", gbbqPath)
 	gbbqMap, err := LoadGbbqDat(gbbqPath)
 	if err != nil {
@@ -226,6 +225,15 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 					dateIntStr := bar.Time.Format("20060102")
 					dateInt, _ := strconv.Atoi(dateIntStr)
 
+					// 🚀 核心修复：通过 .Float() 显式将 protocol.Price 转换为原生 float64 价格
+					pOpen := bar.Open.Float()
+					pHigh := bar.High.Float()
+					pLow := bar.Low.Float()
+					pClose := bar.Close.Float()
+					// 🚀 核心修复：通过 float64() 强转整型成交量，防止 %.0f 报错
+					pVolume := float64(bar.Volume)
+					pAmount := bar.Amount
+
 					if ev, ok := events[dateInt]; ok && prevClose > 0 {
 						fh := ev.FenHong / 10.0
 						sg := ev.SongGu / 10.0
@@ -241,15 +249,15 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 					records = append(records, []string{
 						dateStr,
 						codeMap[tcode],
-						fmt.Sprintf("%.3f", bar.Open),
-						fmt.Sprintf("%.3f", bar.High),
-						fmt.Sprintf("%.3f", bar.Low),
-						fmt.Sprintf("%.3f", bar.Close),
-						fmt.Sprintf("%.0f", bar.Volume),
-						fmt.Sprintf("%.3f", bar.Amount),
+						fmt.Sprintf("%.3f", pOpen),
+						fmt.Sprintf("%.3f", pHigh),
+						fmt.Sprintf("%.3f", pLow),
+						fmt.Sprintf("%.3f", pClose),
+						fmt.Sprintf("%.0f", pVolume),
+						fmt.Sprintf("%.3f", pAmount),
 						fmt.Sprintf("%.6f", adjustFactor),
 					})
-					prevClose = float64(bar.Close)
+					prevClose = pClose
 				}
 
 				mu.Lock()
