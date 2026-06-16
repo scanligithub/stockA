@@ -2,11 +2,11 @@ name: Daily Update to HF (Matrix)
 
 on:
   schedule:
-    - cron: '0 17 * * *'
+    - cron: '0 17 * * *' # 北京时间凌晨 01:00 执行
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write  # 提升权限，支持发布和克隆
   actions: write
 
 jobs:
@@ -16,19 +16,49 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install requests
-      - id: set-matrix
+
+      - name: 🌐 Download Official GBBQ zip (HTTP Mode)
         run: |
+          set -euxo pipefail
+          URL="http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
+          curl -L \
+               --retry 3 \
+               --retry-delay 5 \
+               --connect-timeout 30 \
+               -o gbbq.zip \
+               "${URL}"
+          unzip -o gbbq.zip
+          mv gbbq gbbq.dat
+          ls -lh gbbq.dat
+
+      - name: Initialize Go Module
+        run: |
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          
+      - id: set-matrix
+        name: Build Engine & Generate Matrix
+        run: |
+          go build -o tdx_fetcher scripts/tdx_fetcher.go
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
-      - name: Upload Master List
+          
+      - name: Upload Master Metadata (List & gbbq.dat)
         uses: actions/upload-artifact@v4
         with:
-          name: master-list
-          path: stock_list_master.json
+          name: master-metadata
+          path: |
+            stock_list_master.json
+            gbbq.dat
           retention-days: 1
 
   fetch-stocks:
@@ -40,28 +70,33 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+      
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+          
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: 'pip'
-      
-      - name: Download Master List
+
+      - name: Download Master Metadata
         uses: actions/download-artifact@v4
         with:
-          name: master-list
+          name: master-metadata
+          path: .
           
-      - name: Install Python & Go Deps
+      - name: Install Python & Go Dependencies
         run: |
           pip install -r requirements.txt
           go mod init stockA || true
           go get github.com/injoyai/tdx
           go mod tidy
-          go build -o tdx_fetcher scripts/tdx_fetcher.go
           
-      - name: Fetch Current Year Data
+      - name: Build TDX Go Engine
+        run: go build -o tdx_fetcher scripts/tdx_fetcher.go
+      
+      - name: Fetch Current Year Data (Local gbbq.dat + Sina Flow)
         run: |
           python scripts/fetch_worker.py --index ${{ matrix.task.index }} --codes '${{ toJson(matrix.task.codes) }}'
           
@@ -71,9 +106,7 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
-  # ... (下方的 fetch-sectors 和 finalize Job 完全保持原状，不再赘述)
-
-  # ====== 🛡️ 核心改造：引入自愈库的高质量发布资产 ======
+  # ====== 🛡️ 保持不变的板块 Job ======
   fetch-sectors:
     runs-on: ubuntu-latest
     steps:
@@ -114,10 +147,16 @@ jobs:
           python-version: "3.10"
       - run: pip install -r requirements.txt
       
-      - name: Download All Artifacts
+      - name: Download Master List (For DuckDB Metadata)
         uses: actions/download-artifact@v4
         with:
-          pattern: '*'
+          name: master-metadata
+          path: .
+          
+      - name: Download All Data Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-parts-*'
           merge-multiple: true
           path: all_artifacts
           
