@@ -1,39 +1,47 @@
-import baostock as bs
-import pandas as pd
+import requests
 import json
 import math
 import random
-import datetime
 
 NUM_CHUNKS = 19
+# 东方财富轻量全量行情接口 (含个股代码与名称)
+EM_ALL_API = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=6000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&fields=f12,f14"
 
 def main():
-    bs.login()
-    data = []
-    for i in range(10):
-        d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
-        rs = bs.query_all_stock(day=d)
-        if rs.error_code == '0':
-            while rs.next():
-                row = rs.get_row_data()
-                # 过滤：code_name 不能为空
-                if row[2] and row[2].strip():
-                    data.append(row)
-            if data: break
-    bs.logout()
-    
-    if not data: return
+    print("🚀 Fetching Master Stock List from EastMoney...")
+    try:
+        resp = requests.get(EM_ALL_API, timeout=15)
+        data = resp.json()
+        items = data.get("data", {}).get("diff", [])
+    except Exception as e:
+        print(f"❌ Failed to fetch from EastMoney: {e}")
+        return
 
-    # 过滤：只留 A 股
-    valid_codes = [x[0] for x in data if x[0].startswith(('sh.', 'sz.', 'bj.'))]
-    random.shuffle(valid_codes)
+    valid_stocks = []
+    master_list = []
     
-    print(f"Total valid stocks: {len(valid_codes)}")
+    for item in items:
+        c = item.get("f12", "")
+        n = item.get("f14", "").strip()
+        if not c or not n: continue
+        
+        prefix = "sh" if c.startswith(("60", "68")) else "sz" if c.startswith(("00", "30")) else "bj"
+        full_code = f"{prefix}.{c}"
+        
+        valid_stocks.append(full_code)
+        master_list.append({"code": full_code, "code_name": n})
 
-    chunk_size = math.ceil(len(valid_codes) / NUM_CHUNKS)
+    # 保存 Master List 供后续合并与名称匹配使用
+    with open("stock_list_master.json", "w", encoding="utf-8") as f:
+        json.dump(master_list, f, ensure_ascii=False, indent=2)
+
+    random.shuffle(valid_stocks)
+    print(f"✅ Total valid A-shares: {len(valid_stocks)}")
+
+    chunk_size = math.ceil(len(valid_stocks) / NUM_CHUNKS)
     chunks = []
     for i in range(NUM_CHUNKS):
-        subset = valid_codes[i * chunk_size : (i + 1) * chunk_size]
+        subset = valid_stocks[i * chunk_size : (i + 1) * chunk_size]
         if subset:
             chunks.append({"index": i, "codes": subset})
 
