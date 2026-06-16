@@ -7,7 +7,7 @@ import requests
 import time
 import subprocess
 
-# 💥 核心修复：向系统注册项目根目录，确保多层级目录下导入 utils 模块不报错
+# 向系统注册项目根目录，确保多层级目录下导入 utils 模块不报错
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
@@ -84,6 +84,13 @@ def main():
     if os.path.exists(csv_out):
         df_k_all = pd.read_csv(csv_out)
         if not df_k_all.empty:
+            
+            # 🚀 核心修复：强制将从 CSV 读取的价格、数量和复权因子列转换为 float 数值类型，防止 pandas 误判为 str 导致计算崩溃
+            num_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'adjustFactor']
+            for col in num_cols:
+                if col in df_k_all.columns:
+                    df_k_all[col] = pd.to_numeric(df_k_all[col], errors='coerce')
+
             # 过滤年份
             df_k_all = df_k_all[(df_k_all['date'] >= start) & (df_k_all['date'] <= end)].copy()
             
