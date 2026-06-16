@@ -14,14 +14,26 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
+      
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install baostock pandas
+          
+      - name: Install Dependencies
+        run: pip install requests
+        
       - id: set-matrix
+        name: Generate Matrix & Master List
         run: |
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
+          
+      - name: Upload Master List Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: master-list
+          path: stock_list_master.json
+          retention-days: 1
 
   fetch-full-history:
     needs: prepare
@@ -32,13 +44,33 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+      
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: 'pip'
-      - run: pip install -r requirements.txt
+
+      - name: Download Master List
+        uses: actions/download-artifact@v4
+        with:
+          name: master-list
+          path: .
+          
+      - name: Install Python & Go Dependencies
+        run: |
+          pip install -r requirements.txt
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          
+      - name: Build TDX Go Engine
+        run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Full History
+      - name: Fetch Full History (TDX + Sina)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
@@ -51,7 +83,7 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
-  # ====== 🛡️ 核心改造：引入历史全量自愈板块 ======
+  # ====== 🛡️ 保持原样：跨仓库拉取历史全量自愈板块 ======
   fetch-sectors:
     runs-on: ubuntu-latest
     steps:
@@ -92,10 +124,16 @@ jobs:
           python-version: "3.10"
       - run: pip install -r requirements.txt
       
-      - name: Download Artifacts
+      - name: Download Master List (For DuckDB Metadata)
         uses: actions/download-artifact@v4
         with:
-          pattern: '*'
+          name: master-list
+          path: .
+
+      - name: Download All Data Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-part*' # 匹配 history-part-x 和 sector-parts
           merge-multiple: true
           path: all_artifacts
           
@@ -107,7 +145,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present)" || true
+          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine" || true
           gh release edit archive --draft=false --prerelease=false
           gh release upload archive output/*.parquet output/*.json output/*.md --clobber
 
