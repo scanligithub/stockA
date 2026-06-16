@@ -23,6 +23,14 @@ jobs:
         with:
           python-version: "3.10"
 
+      # 🔍 临时诊断步骤：在编译前，扫描并打印出所有含 gbbq 的文件和行号
+      - name: 🔍 动态扫描内鬼文件
+        run: |
+          echo "=== 1. 当前工作区所有的 Go 文件 ==="
+          find . -name "*.go"
+          echo "=== 2. 查找包含 gbbq 导入的文件和精确行号 ==="
+          grep -rn "protocol/gbbq" . || true
+
       - name: 🌐 Download Official GBBQ zip (HTTP Mode)
         run: |
           set -euxo pipefail
@@ -34,7 +42,6 @@ jobs:
                -o gbbq.zip \
                "${URL}"
           unzip -o gbbq.zip
-          # 🚀 核心修复：将解压出来的无后缀二进制文件 'gbbq' 重命名为 'gbbq.dat'
           mv gbbq gbbq.dat
           ls -lh gbbq.dat
 
@@ -59,7 +66,6 @@ jobs:
             stock_list_master.json
             gbbq.dat
           retention-days: 1
-
   fetch-full-history:
     needs: prepare
     runs-on: ubuntu-latest
