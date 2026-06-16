@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -19,20 +22,27 @@ type StockMaster struct {
 	CodeName string `json:"code_name"`
 }
 
+type GbbqEvent struct {
+	FenHong float64
+	PeiJia  float64
+	SongGu  float64
+	PeiGu   float64
+}
+
 func main() {
-	modeFlag := flag.String("mode", "fetch", "Mode: 'list' (fetch list & gbbq) or 'fetch' (download klines)")
+	modeFlag := flag.String("mode", "fetch", "Mode: 'list' (fetch master list) or 'fetch' (download klines)")
 	codesFlag := flag.String("codes", "", "Comma separated stock codes")
-	gbbqFlag := flag.String("gbbq", "gbbq_all.json", "Local GBBQ JSON path")
+	gbbqPath := flag.String("gbbq", "gbbq.dat", "Local binary gbbq.dat file path")
 	outFlag := flag.String("out", "temp_kline.csv", "Output CSV path")
 	flag.Parse()
 
 	if *modeFlag == "list" {
-		runFetchListAndGbbq(*gbbqFlag)
+		runFetchList()
 		return
 	}
 
 	if *modeFlag == "fetch" {
-		runFetchKlinesWithLocalGbbq(*codesFlag, *gbbqFlag, *outFlag)
+		runFetchKlinesWithLocalDat(*codesFlag, *gbbqPath, *outFlag)
 		return
 	}
 
@@ -40,17 +50,75 @@ func main() {
 }
 
 // ---------------------------------------------------------
-// 1. Prepare 阶段：单点下载全量列表 + 全量 GBBQ 数据并落盘
+// 🛡️ 极速二进制解析器：直接解析本地 29 字节标准的 gbbq.dat 文件
 // ---------------------------------------------------------
-func runFetchListAndGbbq(gbbqPath string) {
-	fmt.Println("[Go Engine] Mode: LIST - Connecting to TDX...")
+func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	gbbqMap := make(map[string]map[int]GbbqEvent)
+	buf := make([]byte, 29)
+
+	for {
+		_, err := io.ReadFull(file, buf)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		codeStr := strings.TrimSpace(string(buf[0:6]))
+		market := buf[6]
+		date := int(binary.LittleEndian.Uint32(buf[7:11]))
+		category := buf[11]
+
+		if category != 1 {
+			continue // 仅筛选 Category = 1 (除权除息)
+		}
+
+		fenHong := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[12:16])))
+		peiJia := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[16:20])))
+		songGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[20:24])))
+		peiGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[24:28])))
+
+		prefix := "sz"
+		if market == 1 {
+			prefix = "sh"
+		} else if market == 2 {
+			prefix = "bj"
+		}
+		tdxCode := prefix + codeStr
+
+		if _, ok := gbbqMap[tdxCode]; !ok {
+			gbbqMap[tdxCode] = make(map[int]GbbqEvent)
+		}
+
+		gbbqMap[tdxCode][date] = GbbqEvent{
+			FenHong: fenHong,
+			PeiJia:  peiJia,
+			SongGu:  songGu,
+			PeiGu:   peiGu,
+		}
+	}
+
+	return gbbqMap, nil
+}
+
+// ---------------------------------------------------------
+// 1. Prepare 阶段：仅下载全市场股票主列表
+// ---------------------------------------------------------
+func runFetchList() {
+	fmt.Println("[Go Engine] Mode: LIST - Fetching A-shares list...")
 	cli, err := tdx.DialDefault()
 	if err != nil {
 		panic(err)
 	}
 	defer cli.Close()
 
-	// A. 下载股票代码
 	var masterList []StockMaster
 	exchanges := []protocol.Exchange{protocol.ExchangeSH, protocol.ExchangeSZ, protocol.ExchangeBJ}
 
@@ -78,29 +146,17 @@ func runFetchListAndGbbq(gbbqPath string) {
 			}
 		}
 	}
-	fmt.Printf("[Go Engine] Master stock list resolved: %d stocks.\n", len(masterList))
 
 	file, _ := os.Create("stock_list_master.json")
 	json.NewEncoder(file).Encode(masterList)
 	file.Close()
-
-	// B. 单点拉取全量 GBBQ 数据库
-	fmt.Println("[Go Engine] Downloading Global GBBQ Database...")
-	gbbqRaw, err := cli.GetGbbqAll()
-	if err != nil {
-		panic(err)
-	}
-
-	gbbqFile, _ := os.Create(gbbqPath)
-	defer gbbqFile.Close()
-	json.NewEncoder(gbbqFile).Encode(gbbqRaw)
-	fmt.Println("[Go Engine] Master list and GBBQ local cache created successfully.")
+	fmt.Printf("[Go Engine] Master stock list resolved: %d stocks.\n", len(masterList))
 }
 
 // ---------------------------------------------------------
-// 2. Fetch 阶段：19 并发，完全基于本地缓存 GBBQ，零网络开销计算复权
+// 2. Fetch 阶段：多协程并行，无网环境下极速解析 gbbq.dat 算复权
 // ---------------------------------------------------------
-func runFetchKlinesWithLocalGbbq(codesStr, gbbqPath, outPath string) {
+func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 	if codesStr == "" {
 		return
 	}
@@ -119,14 +175,12 @@ func runFetchKlinesWithLocalGbbq(codesStr, gbbqPath, outPath string) {
 		codeMap[tdxCode] = c
 	}
 
-	// 从本地磁盘加载 GBBQ (耗时只需 0.1s)
-	fmt.Printf("[Go Engine] Loading GBBQ from local cache: %s...\n", gbbqPath)
-	gbbqBytes, err := os.ReadFile(gbbqPath)
+	// 0.05 秒极速加载本地二进制权息库
+	fmt.Printf("[Go Engine] Parsing local binary GBBQ: %s...\n", gbbqPath)
+	gbbqMap, err := LoadGbbqDat(gbbqPath)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to read local GBBQ: %v", err))
+		panic(fmt.Sprintf("Failed to parse local gbbq.dat: %v", err))
 	}
-	var gbbqDyn map[string][]map[string]interface{}
-	json.Unmarshal(gbbqBytes, &gbbqDyn)
 
 	outFile, err := os.Create(outPath)
 	if err != nil {
@@ -162,15 +216,7 @@ func runFetchKlinesWithLocalGbbq(codesStr, gbbqPath, outPath string) {
 					continue
 				}
 
-				events := gbbqDyn[tcode]
-				eventMap := make(map[int]map[string]interface{})
-				for _, ev := range events {
-					dateVal := getFloat(ev, "Date", "date", "Time", "time", "WeightDate")
-					if dateVal > 0 {
-						eventMap[int(dateVal)] = ev
-					}
-				}
-
+				events := gbbqMap[tcode]
 				var records [][]string
 				adjustFactor := 1.0
 				var prevClose float64 = -1.0
@@ -180,15 +226,13 @@ func runFetchKlinesWithLocalGbbq(codesStr, gbbqPath, outPath string) {
 					dateIntStr := bar.Time.Format("20060102")
 					dateInt, _ := strconv.Atoi(dateIntStr)
 
-					if ev, ok := eventMap[dateInt]; ok && prevClose > 0 {
-						fh := getFloat(ev, "FenHong") / 10.0
-						sg := getFloat(ev, "SongGu") / 10.0
-						zz := getFloat(ev, "ZhuanZeng") / 10.0
-						pg := getFloat(ev, "PeiGu") / 10.0
-						pj := getFloat(ev, "PeiGuJia", "PeiJia")
+					if ev, ok := events[dateInt]; ok && prevClose > 0 {
+						fh := ev.FenHong / 10.0
+						sg := ev.SongGu / 10.0
+						pg := ev.PeiGu / 10.0
+						pj := ev.PeiJia
 
-						bonus := sg + zz
-						pEx := (prevClose - fh + pg*pj) / (1.0 + bonus + pg)
+						pEx := (prevClose - fh + pg*pj) / (1.0 + sg + pg)
 						if pEx > 0 {
 							adjustFactor *= (prevClose / pEx)
 						}
@@ -218,20 +262,4 @@ func runFetchKlinesWithLocalGbbq(codesStr, gbbqPath, outPath string) {
 	wg.Wait()
 	csvWriter.Flush()
 	fmt.Println("[Go Engine] Download completed.")
-}
-
-func getFloat(m map[string]interface{}, keys ...string) float64 {
-	for _, k := range keys {
-		if val, ok := m[k]; ok {
-			switch v := val.(type) {
-			case float64:
-				return v
-			case float32:
-				return float64(v)
-			case int:
-				return float64(v)
-			}
-		}
-	}
-	return 0.0
 }
