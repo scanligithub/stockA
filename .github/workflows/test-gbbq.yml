@@ -1,0 +1,26 @@
+name: Test GBBQ Download Speed
+
+on:
+  workflow_dispatch: # 手动触发
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+          
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          
+      - name: Initialize Test Environment
+        run: |
+          go mod init test_gbbq || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          
+      - name: Run GBBQ Diagnostic Test
+        run: |
+          go run scripts/test_gbbq.go
