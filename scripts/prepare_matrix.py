@@ -1,52 +1,42 @@
-import requests
 import json
 import math
 import random
+import subprocess
+import os
 
 NUM_CHUNKS = 19
-# 东方财富轻量全量行情接口 (含个股代码与名称)
-EM_ALL_API = "https://push2.eastmoney.com/api/qt/clist/get?pn=1&pz=6000&po=1&np=1&ut=bd1d9ddb04089700cf9c27f6f7426281&fltt=2&invt=2&fid=f3&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048&fields=f12,f14"
 
 def main():
-    print("🚀 Fetching Master Stock List from EastMoney...")
-    try:
-        resp = requests.get(EM_ALL_API, timeout=15)
-        data = resp.json()
-        items = data.get("data", {}).get("diff", [])
-    except Exception as e:
-        print(f"❌ Failed to fetch from EastMoney: {e}")
-        return
-
-    valid_stocks = []
-    master_list = []
+    print("🚀 Invoking Go Engine to fetch Master Stock List via TDX...")
     
-    for item in items:
-        c = item.get("f12", "")
-        n = item.get("f14", "").strip()
-        if not c or not n: continue
-        
-        prefix = "sh" if c.startswith(("60", "68")) else "sz" if c.startswith(("00", "30")) else "bj"
-        full_code = f"{prefix}.{c}"
-        
-        valid_stocks.append(full_code)
-        master_list.append({"code": full_code, "code_name": n})
+    # 1. 调用 Go 引擎获取股票列表
+    subprocess.run(["./tdx_fetcher", "-mode=list"], check=True)
+    
+    if not os.path.exists("stock_list_master.json"):
+        print("❌ Go Engine failed to produce stock_list_master.json")
+        exit(1)
 
-    # 保存 Master List 供后续合并与名称匹配使用
-    with open("stock_list_master.json", "w", encoding="utf-8") as f:
-        json.dump(master_list, f, ensure_ascii=False, indent=2)
+    # 2. 读取 JSON
+    with open("stock_list_master.json", "r", encoding="utf-8") as f:
+        master_list = json.load(f)
 
+    # 提取 A 股代码
+    valid_stocks = [x['code'] for x in master_list]
+    print(f"✅ Total valid A-shares from TDX: {len(valid_stocks)}")
+
+    # 3. 随机打乱并均分 Chunk
     random.shuffle(valid_stocks)
-    print(f"✅ Total valid A-shares: {len(valid_stocks)}")
-
     chunk_size = math.ceil(len(valid_stocks) / NUM_CHUNKS)
     chunks = []
+    
     for i in range(NUM_CHUNKS):
         subset = valid_stocks[i * chunk_size : (i + 1) * chunk_size]
         if subset:
             chunks.append({"index": i, "codes": subset})
 
-    with open("stock_matrix.json", "w") as f:
-        json.dump(chunks, f)
+    # 输出供 GitHub Actions 矩阵调度的文件
+    with open("stock_matrix.json", "w", encoding="utf-8") as f:
+        json.dump(chunks, f, ensure_ascii=False)
 
 if __name__ == "__main__":
     main()
