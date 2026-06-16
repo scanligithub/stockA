@@ -14,28 +14,25 @@ import baostock as bs
 from utils.hf_manager import HFManager
 from utils.qc import QualityControl
 
+# 找到文件开头的 get_stock_list_with_names 函数，替换为以下代码：
+
 def get_stock_list_with_names():
-    print("📋 Fetching stock list metadata from Baostock...")
-    try:
-        bs.login()
-        data = []
-        for i in range(10):
-            d = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y-%m-%d")
-            rs = bs.query_all_stock(day=d)
-            if rs.error_code == '0' and len(rs.data) > 0:
-                while rs.next():
-                    data.append(rs.get_row_data())
-                break
-        bs.logout()
-        
-        if data:
-            df = pd.DataFrame(data, columns=["code", "tradeStatus", "code_name"])
-            df = df[df['code_name'].notna() & (df['code_name'].str.strip() != "")]
-            df = df[df['code'].str.startswith(('sh.', 'sz.', 'bj.'))]
-            return df
-    except Exception as e:
-        print(f"⚠️ Failed to fetch stock list: {e}")
+    print("📋 Loading stock metadata from JSON...")
+    import json
+    import os
+    if os.path.exists("stock_list_master.json"):
+        try:
+            with open("stock_list_master.json", "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data:
+                df = pd.DataFrame(data)
+                df['tradeStatus'] = '1' # 默认占位
+                return df
+        except Exception as e:
+            print(f"⚠️ Failed to parse stock JSON: {e}")
     return pd.DataFrame()
+
+# 余下代码（main 函数、DuckDB 合并、HF 推送）保持原样不变。
 
 def main():
     parser = argparse.ArgumentParser()
