@@ -10,10 +10,9 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🧹 核心准备：强力清理残留的旧测试文件，防止 Go 编译期寻路死锁
+      - name: 🧹 彻底清除工作区所有 .go 文件，绝不留任何死角
         run: |
-          rm -f scripts/test_gbbq_http.go
-          rm -f scripts/test_gbbq.go
+          find . -name "*.go" -type f -delete
           rm -f go.mod go.sum
 
       - name: Setup Go
