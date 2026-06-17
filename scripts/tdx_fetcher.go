@@ -322,11 +322,9 @@ func main() {
 			CodeName string `json:"code_name"`
 		}
 
-		// 🌟 核心修复点 1：强制初始化为空切片，防止 JSON 序列化出 null
 		list := make([]MasterStock, 0)
 		
 		for _, codeStr := range stocks {
-			// 🌟 核心修复点 2：智能截取后 6 位，兼容 "sh600000" 与 "600000"
 			pureCode := codeStr
 			if len(codeStr) > 6 {
 				pureCode = codeStr[len(codeStr)-6:]
@@ -501,3 +499,56 @@ func main() {
 				}
 
 				pbMRQ := 0.0
+				if netAssets > 0 && totalMV > 0 {
+					pbMRQ = totalMV / netAssets
+				}
+
+				localRows = append(localRows, CSVRow{
+					Date:         csvDateStr,
+					Code:         code,
+					Open:         openPrice,
+					High:         highPrice,
+					Low:          lowPrice,
+					Close:        closePrice,
+					Volume:       volume,
+					Amount:       amount,
+					AdjustFactor: adjustFactor,
+					Turn:         turn,
+					PeTTM:        peTTM,
+					PbMRQ:        pbMRQ,
+					TotalShares:  totalShares,
+					FloatShares:  floatShares,
+					TotalMV:      totalMV,
+					FloatMV:      floatMV,
+				})
+			}
+
+			mu.Lock()
+			allRows = append(allRows, localRows...)
+			mu.Unlock()
+
+		}(rawCode)
+	}
+
+	wg.Wait()
+
+	// 4. 数据高精度落盘
+	csvFile, err := os.Create(*outFlag)
+	if err != nil {
+		fmt.Printf("❌ 无法创建输出 CSV 文件: %v\n", err)
+		os.Exit(1)
+	}
+	defer csvFile.Close()
+
+	// 写入严格表头
+	_, _ = csvFile.WriteString("date,code,open,high,low,close,volume,amount,adjustFactor,turn,peTTM,pbMRQ,total_shares,float_shares,total_mv,float_mv\n")
+
+	for _, r := range allRows {
+		line := fmt.Sprintf("%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+			r.Date, r.Code, r.Open, r.High, r.Low, r.Close, r.Volume, r.Amount, r.AdjustFactor,
+			r.Turn, r.PeTTM, r.PbMRQ, r.TotalShares, r.FloatShares, r.TotalMV, r.FloatMV)
+		_, _ = csvFile.WriteString(line)
+	}
+
+	fmt.Printf("[✓] 全量数据抓取及复权/估值指标计算完成，成功写入: %s\n", *outFlag)
+}
