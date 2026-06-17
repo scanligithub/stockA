@@ -5,32 +5,13 @@ import requests
 import zipfile
 import concurrent.futures
 import time
+import re
 
-# 通达信官方专业财务数据包根地址
+# 通达信官方专业财务数据目录
 BASE_URL = "http://www.tdx.com.cn/products/data/data/dbf/"
 OUTPUT_DIR = "gpcw_zips"
 
-# 确保输出目录存在
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-def generate_quarter_dates():
-    """
-    生成从 START_YEAR 到当前年份的所有季度报告期
-    支持通过环境变量 START_YEAR 动态调整，默认 2005 年（兼容 stockA 历史起点）
-    """
-    start_year_env = os.getenv("START_YEAR", "2005")
-    try:
-        start_year = int(start_year_env)
-    except ValueError:
-        start_year = 2005
-        
-    current_year = datetime.datetime.now().year
-    quarters = ["0331", "0630", "0930", "1231"]
-    dates = []
-    for year in range(start_year, current_year + 1):
-        for q in quarters:
-            dates.append(f"{year}{q}")
-    return dates
 
 def verify_zip(file_path):
     """
@@ -42,30 +23,85 @@ def verify_zip(file_path):
         return False
     try:
         with zipfile.ZipFile(file_path, "r") as zip_ref:
-            # testzip 会检测损坏的块，返回 None 代表文件完好无损
             return zip_ref.testzip() is None
     except Exception:
         return False
 
-def download_single_gpcw(date_str):
+def discover_remote_gpcw_files():
     """
-    下载单个季度的 gpcw 压缩包，内置强力重试、增量跳过和自愈逻辑
+    🚀 核心自愈功能：实时请求通达信服务器目录，解析出服务器上物理存在的所有 gpcw 压缩包真实文件名
     """
-    filename = f"gpcw{date_str}.zip"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    try:
+        response = requests.get(BASE_URL, headers=headers, timeout=20)
+        if response.status_code != 200:
+            print(f"[!] 无法访问通达信数据源目录，状态码: {response.status_code}")
+            return []
+        
+        # 提取 HTML 页面中所有指向 gpcw*.zip 的超链接真实名称（忽略大小写）
+        html_text = response.text
+        links = re.findall(r'href=["\'](gpcw[^"\']+\.zip)["\']', html_text, re.IGNORECASE)
+        
+        # 去重并排序
+        discovered = sorted(list(set(links)))
+        return discovered
+    except Exception as e:
+        print(f"[!] 自动探测通达信服务器目录异常: {e}")
+        return []
+
+def filter_files_by_year(file_list):
+    """
+    根据设定的起始年份筛选出需要下载的财务包
+    支持 gpcw20240331.zip, gpcw2403.zip 等多种命名变体的智能识别
+    """
+    start_year_env = os.getenv("START_YEAR", "2005")
+    try:
+        start_year = int(start_year_env)
+    except ValueError:
+        start_year = 2005
+
+    filtered = []
+    for fname in file_list:
+        # 寻找文件名中的数字序列，例如从 gpcw20240331.zip 中提取 20240331
+        nums = re.findall(r'\d+', fname)
+        if not nums:
+            continue
+        
+        date_num_str = nums[0]
+        # 适配 4 位完整年份 (如 20240331) 
+        if len(date_num_str) >= 4:
+            file_year = int(date_num_str[:4])
+        # 适配 2 位简写年份 (如 2403)
+        elif len(date_num_str) == 2 or len(date_num_str) == 3:
+            file_year = 2000 + int(date_num_str[:2])
+        else:
+            file_year = start_year  # 无法识别时保守放过
+
+        if file_year >= start_year:
+            filtered.append(fname)
+            
+    return filtered
+
+def download_single_gpcw(filename):
+    """
+    下载单个特定的 gpcw 压缩包
+    """
     url = f"{BASE_URL}{filename}"
     local_path = os.path.join(OUTPUT_DIR, filename)
 
-    # 1. 增量机制：若本地已存在且校验通过，则跳过
+    # 1. 增量机制
     if os.path.exists(local_path):
         if verify_zip(local_path):
-            return date_str, "SKIP", None
+            return filename, "SKIP", None
         else:
             try:
                 os.remove(local_path)
             except Exception:
                 pass
 
-    # 2. 执行带重试的下载逻辑（应对 GitHub Actions 虚拟机偶尔的抖动）
+    # 2. 带重试下载
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
@@ -74,23 +110,17 @@ def download_single_gpcw(date_str):
     for attempt in range(max_retries):
         try:
             response = requests.get(url, headers=headers, timeout=30)
-            
-            # 404 代表通达信尚未发布该季度的财报数据（属于正常现象）
-            if response.status_code == 404:
-                return date_str, "NOT_FOUND", None
-            
             if response.status_code != 200:
                 if attempt < max_retries - 1:
                     time.sleep(2)
                     continue
-                return date_str, "FAIL", f"HTTP {response.status_code}"
+                return filename, "FAIL", f"HTTP {response.status_code}"
 
             with open(local_path, "wb") as f:
                 f.write(response.content)
 
-            # 校验完整性
             if verify_zip(local_path):
-                return date_str, "SUCCESS", None
+                return filename, "SUCCESS", None
             else:
                 try:
                     os.remove(local_path)
@@ -99,71 +129,81 @@ def download_single_gpcw(date_str):
                 if attempt < max_retries - 1:
                     time.sleep(2)
                     continue
-                return date_str, "CORRUPTED", "ZIP完整性校验失败"
+                return filename, "CORRUPTED", "ZIP完整性校验失败"
 
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(3)
                 continue
-            return date_str, "ERROR", str(e)
+            return filename, "ERROR", str(e)
 
 def main():
     start_time = datetime.datetime.now()
-    dates = generate_quarter_dates()
-    total_tasks = len(dates)
     
     print(f"\n{'='*70}")
-    print(f"[*] GitHub Actions 财务包下载引擎 | 启动时间: {start_time}")
-    print(f"[*] 目标年份起点: {os.getenv('START_YEAR', '2005')} | 需探测季度数: {total_tasks}")
+    print(f"[*] GitHub Actions 财务包探测下载引擎 | 启动时间: {start_time}")
+    print(f"[*] 目标年份起点: {os.getenv('START_YEAR', '2005')}")
     print(f"{'='*70}\n")
+
+    # 1. 第一步：向通达信官方服务器索取真实存在的物理清单
+    print("[*] 正在向通达信官方服务器探测实际发布的文件清单...")
+    remote_files = discover_remote_gpcw_files()
+    if not remote_files:
+        print("❌ 错误: 探测到通达信服务器上的财务包文件列表为空，或网络连接被阻断。")
+        sys.exit(1)
+        
+    print(f"[+] 探测成功！通达信服务器目前物理存有 {len(remote_files)} 个财务压缩包。")
+
+    # 2. 第二步：根据过滤条件精确定位我们需要的文件
+    target_files = filter_files_by_year(remote_files)
+    total_tasks = len(target_files)
+    print(f"[+] 经年份过滤后，锁定目标下载文件数: {total_tasks} 个\n")
+
+    if total_tasks == 0:
+        print("⚠️ 警告: 过滤后没有符合年份要求的下载目标，任务提前结束。")
+        sys.exit(0)
 
     success_count = 0
     skip_count = 0
-    not_found_count = 0
     fail_count = []
-    
     completed_tasks = 0
 
-    # 💥 针对 Actions 虚拟机优化的并发设置（12 线程能最大化带宽并兼顾 CPU）
+    # 3. 第三步：并发极速拉取
     MAX_WORKERS = 12
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {executor.submit(download_single_gpcw, d): d for d in dates}
+        futures = {executor.submit(download_single_gpcw, f): f for f in target_files}
         
         for future in concurrent.futures.as_completed(futures):
-            date_str = futures[future]
+            filename = futures[future]
             completed_tasks += 1
             
             try:
-                d_date, status, err_msg = future.result()
+                d_file, status, err_msg = future.result()
                 if status == "SUCCESS":
                     success_count += 1
                 elif status == "SKIP":
                     skip_count += 1
-                elif status == "NOT_FOUND":
-                    not_found_count += 1
                 else:
-                    fail_count.append((d_date, err_msg))
+                    fail_count.append((d_file, err_msg))
             except Exception as e:
-                fail_count.append((date_str, str(e)))
+                fail_count.append((filename, str(e)))
             
-            # 🚀 针对 Actions 优化的非阻塞日志输出机制（每完成 10% 打印一行，防止日志刷屏）
+            # 离散非阻塞式输出
             if completed_tasks % max(1, total_tasks // 10) == 0 or completed_tasks == total_tasks:
                 percentage = (completed_tasks / total_tasks) * 100
-                print(f"[#] 任务进度: {completed_tasks}/{total_tasks} ({percentage:.1f}%) | 当前新增: {success_count} | 当前跳过: {skip_count}")
+                print(f"[#] 任务进度: {completed_tasks}/{total_tasks} ({percentage:.1f}%) | 本地跳过: {skip_count} | 成功拉取: {success_count}")
 
-    # 打印最终统计总结
+    # 最终汇总
     print(f"\n{'='*70}")
     print("[+] Actions 同步任务运行结束。数据汇总如下：")
     print(f"    - 本地已存（跳过）: {skip_count} 个")
-    print(f"    - 新增成功下载  : {success_count} 个")
-    print(f"    - 官方未发布(404): {not_found_count} 个")
-    print(f"    - 下载失败(需重试): {len(fail_count)} 个")
+    print(f"    - 成功下载到本地  : {success_count} 个")
+    print(f"    - 预期下载失败    : {len(fail_count)} 个")
     
     if fail_count:
-        print("\n[!] 失败明细 (前 10 个)：")
-        for d, err in fail_count[:10]:
-            print(f"    - 报告期 {d} | 原因: {err}")
+        print("\n[!] 失败明细：")
+        for f, err in fail_count[:10]:
+            print(f"    - 文件 {f} | 原因: {err}")
             
     # 计算落盘包体积
     total_size = sum(
@@ -175,10 +215,8 @@ def main():
     print(f"[*] 本次总耗时: {datetime.datetime.now() - start_time}")
     print(f"{'='*70}\n")
 
-    # 如果有重要失败（非 404 导致），以非 0 状态码退出以让 Actions 报错提醒
-    # 若仅是未发布（NOT_FOUND），属于正常现象，允许安全通过
     if len(fail_count) > 0:
-        print("[!] 检测到未预期的数据下载失败，引发 Actions 报错中断。")
+        print("[!] 检测到部分文件未成功同步，任务报错中断。")
         sys.exit(1)
 
 if __name__ == "__main__":
