@@ -23,7 +23,6 @@ jobs:
         with:
           python-version: "3.10"
 
-      # 🔍 临时诊断步骤：在编译前，扫描并打印出所有含 gbbq 的文件和行号
       - name: 🔍 动态扫描内鬼文件
         run: |
           echo "=== 1. 当前工作区所有的 Go 文件 ==="
@@ -45,6 +44,14 @@ jobs:
           mv gbbq gbbq.dat
           ls -lh gbbq.dat
 
+      # 🌟 新增：全历史打包阶段，下载自 2005 年起至今的全部历史财务数据
+      - name: 📥 Download Full 20-Year History GPCW Zips
+        env:
+          START_YEAR: "2005"
+        run: |
+          pip install requests
+          python scripts/download_gpcw.py
+
       - name: Initialize Go Module
         run: |
           go mod init stockA || true
@@ -58,14 +65,17 @@ jobs:
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
-      - name: Upload Master Metadata (List & gbbq.dat)
+      # 🌟 修改：将 gpcw_zips 整个加入 Master 历史产物分发链中
+      - name: Upload Master Metadata (List, GBBQ & GPCW)
         uses: actions/upload-artifact@v4
         with:
           name: master-metadata
           path: |
             stock_list_master.json
             gbbq.dat
+            gpcw_zips/
           retention-days: 1
+
   fetch-full-history:
     needs: prepare
     runs-on: ubuntu-latest
@@ -85,6 +95,7 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
+      # 🌟 自动下载包含 gpcw_zips/ 文件夹的 Master Artifact
       - name: Download Master Metadata
         uses: actions/download-artifact@v4
         with:
@@ -101,7 +112,7 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Full History (Local gbbq.dat + Sina Flow)
+      - name: Fetch Full History (Local gbbq.dat + GPCW + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
@@ -114,7 +125,6 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
-  # ====== 🛡️ 保持不变的板块 Job ======
   fetch-sectors:
     runs-on: ubuntu-latest
     steps:
