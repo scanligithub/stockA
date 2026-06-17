@@ -1,10 +1,11 @@
 import pyarrow as pa
 
 class AShareDataSchema:
+    # === 字段常量 ===
     DATE = 'date'
     CODE = 'code'
     
-    # 1. 个股日线核心
+    # 1. 个股日线 (Stock Kline)
     OPEN = 'open'
     HIGH = 'high'
     LOW = 'low'
@@ -18,13 +19,7 @@ class AShareDataSchema:
     ADJ_FACTOR = 'adjustFactor'
     IS_ST = 'isST'
 
-    # 🚀 新增：四大数据巨头 (市值/股本)
-    TOTAL_SHARES = 'total_shares'
-    FLOAT_SHARES = 'float_shares'
-    TOTAL_MV = 'total_mv'
-    FLOAT_MV = 'float_mv'
-
-    # 2. 资金流
+    # 2. 资金流 (Money Flow)
     NET_FLOW = 'net_amount'
     MAIN_FLOW = 'main_net'
     SUPER_FLOW = 'super_net'
@@ -32,9 +27,9 @@ class AShareDataSchema:
     MEDIUM_FLOW = 'medium_net'
     SMALL_FLOW = 'small_net'
 
-    # 3. 板块行情
+    # 3. 板块行情 (Sector Kline)
     NAME = 'name'
-    TYPE = 'type' 
+    TYPE = 'type' # industry, concept, region
 
     @staticmethod
     def get_stock_kline_schema():
@@ -52,11 +47,7 @@ class AShareDataSchema:
             (AShareDataSchema.PE_TTM, pa.float32()),
             (AShareDataSchema.PB_MRQ, pa.float32()),
             (AShareDataSchema.ADJ_FACTOR, pa.float32()),
-            (AShareDataSchema.IS_ST, pa.int8()),
-            (AShareDataSchema.TOTAL_SHARES, pa.float64()), # 极易溢出，必须用 float64
-            (AShareDataSchema.FLOAT_SHARES, pa.float64()),
-            (AShareDataSchema.TOTAL_MV, pa.float64()),
-            (AShareDataSchema.FLOAT_MV, pa.float64())
+            (AShareDataSchema.IS_ST, pa.int8())
         ])
 
     @staticmethod
