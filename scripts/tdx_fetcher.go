@@ -153,7 +153,8 @@ func parseGpcwFiles(dirPath string) (map[string][]FinancialRecord, map[string]ma
 	announceMap := make(map[string][]FinancialRecord)
 	reportMap := make(map[string]map[uint32]FinancialRecord)
 
-	reNum := regexp.MustCompile('\d+')
+	// 🌟 修复点 1：使用反引号定义正则表达式，解决 unknown escape 报错
+	reNum := regexp.MustCompile(`\d+`)
 
 	for _, f := range files {
 		if !strings.HasSuffix(f.Name(), ".zip") || !strings.HasPrefix(f.Name(), "gpcw") {
@@ -182,7 +183,6 @@ func parseGpcwFiles(dirPath string) (map[string][]FinancialRecord, map[string]ma
 		}
 
 		for _, zf := range zipReader.File {
-			// 🌟 修复点 1：zf.Name 是成员属性而非方法
 			if !strings.HasSuffix(zf.Name, ".dat") {
 				continue
 			}
@@ -312,7 +312,6 @@ func main() {
 		}
 		defer cli.Close()
 
-		// 🌟 修复点 2：cli.GetStockCodeAll() 方法返回 []string，遍历后 s 即为代码字符串
 		stocks, err := cli.GetStockCodeAll()
 		if err != nil {
 			fmt.Printf("Get Stock List Error: %v\n", err)
@@ -338,7 +337,7 @@ func main() {
 				if prefix != "" {
 					list = append(list, MasterStock{
 						Code:     prefix + code,
-						CodeName: code, // 🌟 修复点 3：由于 []string 不含中文名，在此处以代码占位，ST等标记后续由 Python 载入板块映射表自愈
+						CodeName: code,
 					})
 				}
 			}
@@ -391,7 +390,7 @@ func main() {
 		fmt.Printf("[!] 提示: 载入财务数据失败(正常现象): %v\n", err)
 	}
 
-	// 3. 多线程极速抓取 K 线，限制最大 8 连接，防止节点瞬时大流量被限流
+	// 3. 多线程极速抓取 K 线，限制最大 8 连接
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var allRows []CSVRow
@@ -435,12 +434,10 @@ func main() {
 			adjustFactor := 1.0
 
 			for _, bar := range resp.List {
-				// 🌟 修复点 4：K线时间字段为 bar.Time；并增加日期格式自愈洗数器，防历史横杠干扰
-				cleanTime := strings.ReplaceAll(strings.ReplaceAll(bar.Time, "-", ""), "/", "")
-				dateVal, _ := strconv.Atoi(cleanTime)
-				dateInt := uint32(dateVal)
+				// 🌟 修复点 2：直接使用 time.Time 原生方法进行极致解析
+				dateInt := uint32(bar.Time.Year()*10000 + int(bar.Time.Month())*100 + bar.Time.Day())
+				csvDateStr := bar.Time.Format("2006-01-02")
 
-				// 🌟 修复点 5：对 tdx.Price (int64派生) 成员、Volume (int64) 进行显式 float64 强制类型转换
 				closePrice := float64(bar.Close)
 				openPrice := float64(bar.Open)
 				highPrice := float64(bar.High)
@@ -502,7 +499,7 @@ func main() {
 				}
 
 				localRows = append(localRows, CSVRow{
-					Date:         bar.Time,
+					Date:         csvDateStr, // 原生格式化输出，如 "2024-05-15"
 					Code:         code,
 					Open:         openPrice,
 					High:         highPrice,
