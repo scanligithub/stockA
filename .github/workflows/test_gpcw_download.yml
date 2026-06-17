@@ -1,0 +1,50 @@
+name: Test GPCW Download
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_year:
+        description: '财务包历史起点年份 (测试建议用默认值 2024 闪电通关，拉取全历史请输入 2005)'
+        required: true
+        default: '2024'
+
+permissions:
+  contents: read
+
+jobs:
+  test-download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Dependencies
+        run: |
+          pip install requests
+
+      - name: Run GPCW Downloader
+        run: python scripts/download_gpcw.py
+        env:
+          START_YEAR: ${{ github.event.inputs.start_year }}
+
+      - name: Verify Downloaded Assets (打印下载结果列表)
+        run: |
+          echo "=== [验证] 下载后的物理压缩包清单 ==="
+          if [ -d "gpcw_zips" ]; then
+            ls -lh gpcw_zips/
+          else
+            echo "❌ 错误: 未生成目标存储目录 gpcw_zips"
+            exit 1
+          fi
+
+      - name: Upload GPCW Artifacts (临时保存包作为构建物供下载核验)
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpcw-test-zips-${{ github.event.inputs.start_year }}
+          path: gpcw_zips/*.zip
+          retention-days: 1  # 仅保留1天，防止挤占您的 GitHub 存储空间
