@@ -7,282 +7,208 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
-	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/injoyai/tdx"
 	"github.com/injoyai/tdx/protocol"
 )
 
-type StockMaster struct {
-	Code     string `json:"code"`
-	CodeName string `json:"code_name"`
-}
-
+// GbbqEvent 记录通达信的权息和股本变动快照
 type GbbqEvent struct {
-	FenHong float64
-	PeiJia  float64
-	SongGu  float64
-	PeiGu   float64
+	Date     uint32
+	Category uint8
+	F1, F2, F3, F4 float32
 }
 
-func main() {
-	modeFlag := flag.String("mode", "fetch", "Mode: 'list' (fetch master list) or 'fetch' (download klines)")
-	codesFlag := flag.String("codes", "", "Comma separated stock codes")
-	gbbqPath := flag.String("gbbq", "gbbq.dat", "Local binary gbbq.dat file path")
-	outFlag := flag.String("out", "temp_kline.csv", "Output CSV path")
-	flag.Parse()
-
-	if *modeFlag == "list" {
-		runFetchList()
-		return
-	}
-
-	if *modeFlag == "fetch" {
-		runFetchKlinesWithLocalDat(*codesFlag, *gbbqPath, *outFlag)
-		return
-	}
-
-	fmt.Println("Unknown mode.")
-}
-
-// ---------------------------------------------------------
-// 🛡  极速二进制解析器：直接解析本地 29 字节标准的 gbbq.dat 文件
-// ---------------------------------------------------------
-func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, error) {
-	file, err := os.Open(filePath)
+// parseGbbqDat: 极速读取 gbbq.dat 二进制文件，无惧内存对齐问题
+func parseGbbqDat(path string) map[string][]GbbqEvent {
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		log.Fatalf("无法打开 gbbq.dat: %v", err)
 	}
-	defer file.Close()
+	defer f.Close()
 
-	gbbqMap := make(map[string]map[int]GbbqEvent)
+	gbbqMap := make(map[string][]GbbqEvent)
 	buf := make([]byte, 29)
 
 	for {
-		_, err := io.ReadFull(file, buf)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		_, err := io.ReadFull(f, buf)
+		if err != nil {
 			break
 		}
-		if err != nil {
-			return nil, err
-		}
 
-		codeStr := strings.TrimSpace(string(buf[0:6]))
-		market := buf[6]
-		date := int(binary.LittleEndian.Uint32(buf[7:11]))
-		category := buf[11]
-
-		if category != 1 {
-			continue // 仅筛选 Category = 1 (除权除息)
-		}
-
-		fenHong := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[12:16])))
-		peiJia := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[16:20])))
-		songGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[20:24])))
-		peiGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[24:28])))
+		marketByte := buf[0]
+		codeStr := strings.Trim(string(buf[1:8]), "\x00")
+		date := binary.LittleEndian.Uint32(buf[8:12])
+		category := buf[12]
+		f1 := math.Float32frombits(binary.LittleEndian.Uint32(buf[13:17]))
+		f2 := math.Float32frombits(binary.LittleEndian.Uint32(buf[17:21]))
+		f3 := math.Float32frombits(binary.LittleEndian.Uint32(buf[21:25]))
+		f4 := math.Float32frombits(binary.LittleEndian.Uint32(buf[25:29]))
 
 		prefix := "sz"
-		if market == 1 {
+		if marketByte == 1 {
 			prefix = "sh"
-		} else if market == 2 {
+		} else if marketByte == 2 {
 			prefix = "bj"
 		}
-		tdxCode := prefix + codeStr
+		fullCode := prefix + "." + codeStr
 
-		if _, ok := gbbqMap[tdxCode]; !ok {
-			gbbqMap[tdxCode] = make(map[int]GbbqEvent)
-		}
-
-		gbbqMap[tdxCode][date] = GbbqEvent{
-			FenHong: fenHong,
-			PeiJia:  peiJia,
-			SongGu:  songGu,
-			PeiGu:   peiGu,
-		}
+		gbbqMap[fullCode] = append(gbbqMap[fullCode], GbbqEvent{
+			Date:     date,
+			Category: category,
+			F1: f1, F2: f2, F3: f3, F4: f4,
+		})
 	}
-
-	return gbbqMap, nil
+	return gbbqMap
 }
 
-// ---------------------------------------------------------
-// 1. Prepare 阶段：仅下载全市场股票主列表
-// ---------------------------------------------------------
-func runFetchList() {
-	fmt.Println("[Go Engine] Mode: LIST - Fetching A-shares list...")
-	cli, err := tdx.DialDefault()
-	if err != nil {
-		panic(err)
-	}
-	defer cli.Close()
-
-	var masterList []StockMaster
-	exchanges := []protocol.Exchange{protocol.ExchangeSH, protocol.ExchangeSZ, protocol.ExchangeBJ}
-
-	for _, ex := range exchanges {
-		resp, err := cli.GetCodeAll(ex)
-		if err != nil || resp == nil {
-			continue
+func fetchKlines(client *tdx.Client, market uint8, code string) []protocol.KLine {
+	var all []protocol.KLine
+	start := uint16(0)
+	for {
+		kl, err := client.GetKLine(market, code, protocol.KLineDay, start, 800)
+		if err != nil || len(kl) == 0 {
+			break
 		}
-		for _, item := range resp.List {
-			if strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68") ||
-				strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30") ||
-				strings.HasPrefix(item.Code, "4") || strings.HasPrefix(item.Code, "8") {
+		all = append(all, kl...)
+		if len(kl) < 800 {
+			break
+		}
+		start += 800
+	}
+	// 将数据翻转为时间正序 (历史 -> 至今)
+	for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
+		all[i], all[j] = all[j], all[i]
+	}
+	return all
+}
 
-				prefix := "sh"
-				if ex == protocol.ExchangeSZ {
-					prefix = "sz"
-				} else if ex == protocol.ExchangeBJ {
-					prefix = "bj"
-				}
-
-				masterList = append(masterList, StockMaster{
-					Code:     fmt.Sprintf("%s.%s", prefix, item.Code),
-					CodeName: item.Name,
-				})
+func getStockList(client *tdx.Client) {
+	var list []map[string]interface{}
+	for m := uint8(0); m <= 1; m++ {
+		start := uint16(0)
+		for {
+			stocks, _ := client.GetSecurityList(m, start)
+			if len(stocks) == 0 {
+				break
 			}
+			for _, s := range stocks {
+				code := s.Code
+				if (m == 1 && strings.HasPrefix(code, "6")) || (m == 0 && (strings.HasPrefix(code, "0") || strings.HasPrefix(code, "3"))) {
+					prefix := "sz"
+					if m == 1 {
+						prefix = "sh"
+					}
+					list = append(list, map[string]interface{}{
+						"code":      prefix + "." + code,
+						"code_name": s.Name,
+					})
+				}
+			}
+			start += 1000
 		}
 	}
-
-	file, _ := os.Create("stock_list_master.json")
-	json.NewEncoder(file).Encode(masterList)
-	file.Close()
-	fmt.Printf("[Go Engine] Master stock list resolved: %d stocks.\n", len(masterList))
+	b, _ := json.Marshal(list)
+	os.WriteFile("stock_list_master.json", b, 0644)
+	fmt.Println("✅ 股票列表已生成.")
 }
 
-// ---------------------------------------------------------
-// 2. Fetch 阶段：多协程并行，无网环境下极速解析 gbbq.dat 算复权
-// ---------------------------------------------------------
-func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
-	if codesStr == "" {
+func main() {
+	mode := flag.String("mode", "fetch", "list or fetch")
+	codesParam := flag.String("codes", "", "comma separated codes")
+	outParam := flag.String("out", "out.csv", "output csv")
+	flag.Parse()
+
+	client, err := tdx.DialDefault()
+	if err != nil {
+		log.Fatalf("TDX 拨号失败: %v", err)
+	}
+	defer client.Close()
+
+	if *mode == "list" {
+		getStockList(client)
 		return
 	}
 
-	rawCodes := strings.Split(codesStr, ",")
-	var tdxCodes []string
-	codeMap := make(map[string]string)
+	codes := strings.Split(*codesParam, ",")
+	gbbqMap := parseGbbqDat("gbbq.dat")
 
-	for _, c := range rawCodes {
-		c = strings.TrimSpace(c)
-		if c == "" {
+	f, _ := os.Create(*outParam)
+	defer f.Close()
+	writer := csv.NewWriter(f)
+	// 写入新的 14 列表头
+	writer.Write([]string{"date", "code", "open", "high", "low", "close", "volume", "amount", "adjustFactor", "turn", "total_shares", "float_shares", "total_mv", "float_mv"})
+
+	for _, fullCode := range codes {
+		parts := strings.Split(fullCode, ".")
+		if len(parts) != 2 {
 			continue
 		}
-		tdxCode := strings.ReplaceAll(c, ".", "")
-		tdxCodes = append(tdxCodes, tdxCode)
-		codeMap[tdxCode] = c
-	}
+		market := uint8(0)
+		if parts[0] == "sh" {
+			market = 1
+		}
+		pureCode := parts[1]
 
-	fmt.Printf("[Go Engine] Parsing local binary GBBQ: %s...\n", gbbqPath)
-	gbbqMap, err := LoadGbbqDat(gbbqPath)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to parse local gbbq.dat: %v", err))
-	}
+		klines := fetchKlines(client, market, pureCode)
+		events := gbbqMap[fullCode]
 
-	outFile, err := os.Create(outPath)
-	if err != nil {
-		panic(err)
-	}
-	defer outFile.Close()
+		eventIdx := 0
+		var totalShares float64 = 0.0
+		var floatShares float64 = 0.0
+		var adjFactor float64 = 1.0
+		var prevClose float64 = 0.0
 
-	csvWriter := csv.NewWriter(outFile)
-	csvWriter.Write([]string{"date", "code", "open", "high", "low", "close", "volume", "amount", "adjustFactor"})
-	var mu sync.Mutex
-	var wg sync.WaitGroup
+		for _, kl := range klines {
+			y, m, d := kl.Date.Date()
+			dateInt := uint32(y*10000 + int(m)*100 + d)
+			dateStr := kl.Date.Format("2006-01-02")
 
-	jobChan := make(chan string, len(tdxCodes))
-	for _, c := range tdxCodes {
-		jobChan <- c
-	}
-	close(jobChan)
-
-	concurrency := 8
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			workerCli, err := tdx.DialDefault()
-			if err != nil {
-				return
-			}
-			defer workerCli.Close()
-
-			for tcode := range jobChan {
-				resp, err := workerCli.GetKlineDayAll(tcode)
-				if err != nil || resp == nil || len(resp.List) == 0 {
-					continue
-				}
-
-				events := gbbqMap[tcode]
-				var records [][]string
-				adjustFactor := 1.0
-				var prevClose float64 = -1.0
-
-				for _, bar := range resp.List {
-					dateStr := bar.Time.Format("2006-01-02")
-					dateIntStr := bar.Time.Format("20060102")
-					dateInt, _ := strconv.Atoi(dateIntStr)
-
-					// 🚀 核心修复：直接通过 float64 强制转换数值，并除以 1000.0 进行复原
-					pOpen := float64(bar.Open) / 1000.0
-					pHigh := float64(bar.High) / 1000.0
-					pLow := float64(bar.Low) / 1000.0
-					pClose := float64(bar.Close) / 1000.0
-					pVolume := float64(bar.Volume)
-					pAmount := bar.Amount
-
-					if ev, ok := events[dateInt]; ok && prevClose > 0 {
-						fh := ev.FenHong / 10.0
-						sg := ev.SongGu / 10.0
-						pg := ev.PeiGu / 10.0
-						pj := ev.PeiJia
-
-						pEx := (prevClose - fh + pg*pj) / (1.0 + sg + pg)
-						if pEx > 0 {
-							adjustFactor *= (prevClose / pEx)
-						}
+			// 使用 ASOF (As of) 逻辑步进匹配最新的股本与除权快照
+			for eventIdx < len(events) && events[eventIdx].Date <= dateInt {
+				ev := events[eventIdx]
+				if ev.Category == 1 {
+					// 1=除权除息: 计算后复权因子
+					pEx := (prevClose - float64(ev.F4)/10.0 + float64(ev.F2/10.0*ev.F3)) / (1.0 + float64(ev.F1)/10.0 + float64(ev.F2)/10.0)
+					if pEx > 0 && prevClose > 0 {
+						adjFactor *= (prevClose / pEx)
 					}
-
-					records = append(records, []string{
-						dateStr,
-						codeMap[tcode],
-						fmt.Sprintf("%.3f", pOpen),
-						fmt.Sprintf("%.3f", pHigh),
-						fmt.Sprintf("%.3f", pLow),
-						fmt.Sprintf("%.3f", pClose),
-						fmt.Sprintf("%.0f", pVolume),
-						fmt.Sprintf("%.3f", pAmount),
-						fmt.Sprintf("%.6f", adjustFactor),
-					})
-					prevClose = pClose
+				} else if ev.Category >= 2 && ev.Category <= 10 {
+					// 2~10=股本变动快照 (F3:流通盘, F4:总股本, 单位:万股)
+					if ev.F3 > 0 {
+						floatShares = float64(ev.F3) * 10000.0 // 转为实际股数
+					}
+					if ev.F4 > 0 {
+						totalShares = float64(ev.F4) * 10000.0 // 转为实际股数
+					}
 				}
-
-				mu.Lock()
-				csvWriter.WriteAll(records)
-				mu.Unlock()
+				eventIdx++
 			}
-		}()
-	}
 
-	wg.Wait()
-	csvWriter.Flush()
-	fmt.Println("[Go Engine] Download completed.")
-}
-
-func getFloat(m map[string]interface{}, keys ...string) float64 {
-	for _, k := range keys {
-		if val, ok := m[k]; ok {
-			switch v := val.(type) {
-			case float64:
-				return v
-			case float32:
-				return float64(v)
-			case int:
-				return float64(v)
+			// 衍生指标离线测算
+			turn := 0.0
+			if floatShares > 0 {
+				turn = (kl.Vol / floatShares) * 100.0
 			}
+			totalMV := kl.Close * totalShares
+			floatMV := kl.Close * floatShares
+
+			writer.Write([]string{
+				dateStr, fullCode,
+				fmt.Sprintf("%.2f", kl.Open), fmt.Sprintf("%.2f", kl.High),
+				fmt.Sprintf("%.2f", kl.Low), fmt.Sprintf("%.2f", kl.Close),
+				fmt.Sprintf("%.0f", kl.Vol), fmt.Sprintf("%.0f", kl.Amount),
+				fmt.Sprintf("%.6f", adjFactor),
+				fmt.Sprintf("%.4f", turn),
+				fmt.Sprintf("%.0f", totalShares), fmt.Sprintf("%.0f", floatShares),
+				fmt.Sprintf("%.2f", totalMV), fmt.Sprintf("%.2f", floatMV),
+			})
+			prevClose = kl.Close
 		}
 	}
-	return 0.0
+	writer.Flush()
 }
