@@ -15,7 +15,7 @@ from utils.cleaner import DataCleaner
 
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
-# [保留] 稳健的新浪资金流接口
+# 获取资金流 (纯新浪，零东财)
 def fetch_sina_flow(code, start, end):
     symbol = code.replace(".", "")
     url = f"https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_qsfx_lscjfb?page=1&num=10000&sort=opendate&asc=0&daima={symbol}"
@@ -61,7 +61,7 @@ def main():
 
     print(f"Job {args.index}: {len(codes)} stocks ({start}~{end})")
 
-    # 1. 启动 Go 引擎执行本地计算
+    # 1. 调用本地 Go 引擎
     csv_out = f"temp_kline_{args.index}.csv"
     subprocess.run(["./tdx_fetcher", f"-codes={','.join(codes)}", f"-out={csv_out}"], check=True)
 
@@ -88,11 +88,11 @@ def main():
                         st_map[x['code']] = 1 if "ST" in x['code_name'] else 0
             df_k_all['isST'] = df_k_all['code'].map(st_map).fillna(0).astype(int)
 
-            # 🛡️ 安全隔离：东财反爬严格，通达信不含历史财报。此处占位以保证 Schema 不崩
+            # 🛡️ 安全隔离占位符，保护 Schema 不崩
             df_k_all['peTTM'] = 0.0
             df_k_all['pbMRQ'] = 0.0
 
-    # 2. 并发拉取新浪资金流
+    # 2. 拉取资金流
     print("🚀 Fetching Sina Flow...")
     res_f = []
     with ProcessPoolExecutor(max_workers=min(10, os.cpu_count())) as executor:
@@ -101,7 +101,7 @@ def main():
             c, df_f = future.result()
             if not df_f.empty: res_f.append(df_f)
 
-    # 3. 清洗并压缩落盘 Parquet
+    # 3. 清洗并压缩落盘 (依赖 cleaner.py)
     os.makedirs("temp_parts", exist_ok=True)
     cleaner = DataCleaner()
     if not df_k_all.empty:
