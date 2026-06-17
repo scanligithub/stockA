@@ -153,7 +153,6 @@ func parseGpcwFiles(dirPath string) (map[string][]FinancialRecord, map[string]ma
 	announceMap := make(map[string][]FinancialRecord)
 	reportMap := make(map[string]map[uint32]FinancialRecord)
 
-	// 🌟 修复点 1：使用反引号定义正则表达式，解决 unknown escape 报错
 	reNum := regexp.MustCompile(`\d+`)
 
 	for _, f := range files {
@@ -323,21 +322,30 @@ func main() {
 			CodeName string `json:"code_name"`
 		}
 
-		var list []MasterStock
-		for _, code := range stocks {
-			if len(code) == 6 {
+		// 🌟 核心修复点 1：强制初始化为空切片，防止 JSON 序列化出 null
+		list := make([]MasterStock, 0)
+		
+		for _, codeStr := range stocks {
+			// 🌟 核心修复点 2：智能截取后 6 位，兼容 "sh600000" 与 "600000"
+			pureCode := codeStr
+			if len(codeStr) > 6 {
+				pureCode = codeStr[len(codeStr)-6:]
+			}
+
+			if len(pureCode) == 6 {
 				prefix := ""
-				if strings.HasPrefix(code, "6") {
+				if strings.HasPrefix(pureCode, "6") || strings.HasPrefix(pureCode, "9") {
 					prefix = "sh."
-				} else if strings.HasPrefix(code, "0") || strings.HasPrefix(code, "3") {
+				} else if strings.HasPrefix(pureCode, "0") || strings.HasPrefix(pureCode, "3") {
 					prefix = "sz."
-				} else if strings.HasPrefix(code, "4") || strings.HasPrefix(code, "8") {
+				} else if strings.HasPrefix(pureCode, "4") || strings.HasPrefix(pureCode, "8") {
 					prefix = "bj."
 				}
+				
 				if prefix != "" {
 					list = append(list, MasterStock{
-						Code:     prefix + code,
-						CodeName: code,
+						Code:     prefix + pureCode,
+						CodeName: codeStr,
 					})
 				}
 			}
@@ -434,7 +442,6 @@ func main() {
 			adjustFactor := 1.0
 
 			for _, bar := range resp.List {
-				// 🌟 修复点 2：直接使用 time.Time 原生方法进行极致解析
 				dateInt := uint32(bar.Time.Year()*10000 + int(bar.Time.Month())*100 + bar.Time.Day())
 				csvDateStr := bar.Time.Format("2006-01-02")
 
@@ -494,56 +501,3 @@ func main() {
 				}
 
 				pbMRQ := 0.0
-				if netAssets > 0 && totalMV > 0 {
-					pbMRQ = totalMV / netAssets
-				}
-
-				localRows = append(localRows, CSVRow{
-					Date:         csvDateStr, // 原生格式化输出，如 "2024-05-15"
-					Code:         code,
-					Open:         openPrice,
-					High:         highPrice,
-					Low:          lowPrice,
-					Close:        closePrice,
-					Volume:       volume,
-					Amount:       amount,
-					AdjustFactor: adjustFactor,
-					Turn:         turn,
-					PeTTM:        peTTM,
-					PbMRQ:        pbMRQ,
-					TotalShares:  totalShares,
-					FloatShares:  floatShares,
-					TotalMV:      totalMV,
-					FloatMV:      floatMV,
-				})
-			}
-
-			mu.Lock()
-			allRows = append(allRows, localRows...)
-			mu.Unlock()
-
-		}(rawCode)
-	}
-
-	wg.Wait()
-
-	// 4. 数据高精度落盘
-	csvFile, err := os.Create(*outFlag)
-	if err != nil {
-		fmt.Printf("❌ 无法创建输出 CSV 文件: %v\n", err)
-		os.Exit(1)
-	}
-	defer csvFile.Close()
-
-	// 写入严格表头
-	_, _ = csvFile.WriteString("date,code,open,high,low,close,volume,amount,adjustFactor,turn,peTTM,pbMRQ,total_shares,float_shares,total_mv,float_mv\n")
-
-	for _, r := range allRows {
-		line := fmt.Sprintf("%s,%s,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-			r.Date, r.Code, r.Open, r.High, r.Low, r.Close, r.Volume, r.Amount, r.AdjustFactor,
-			r.Turn, r.PeTTM, r.PbMRQ, r.TotalShares, r.FloatShares, r.TotalMV, r.FloatMV)
-		_, _ = csvFile.WriteString(line)
-	}
-
-	fmt.Printf("[✓] 全量数据抓取及复权/估值指标计算完成，成功写入: %s\n", *outFlag)
-}
