@@ -153,7 +153,7 @@ func parseGpcwFiles(dirPath string) (map[string][]FinancialRecord, map[string]ma
 	announceMap := make(map[string][]FinancialRecord)
 	reportMap := make(map[string]map[uint32]FinancialRecord)
 
-	reNum := regexp.MustCompile(`\d+`)
+	reNum := regexp.MustCompile('\d+')
 
 	for _, f := range files {
 		if !strings.HasSuffix(f.Name(), ".zip") || !strings.HasPrefix(f.Name(), "gpcw") {
@@ -182,7 +182,7 @@ func parseGpcwFiles(dirPath string) (map[string][]FinancialRecord, map[string]ma
 		}
 
 		for _, zf := range zipReader.File {
-			// 🌟 修复点 1：使用 zf.Name 成员字段而非 zf.Name() 函数调用
+			// 🌟 修复点 1：zf.Name 是成员属性而非方法
 			if !strings.HasSuffix(zf.Name, ".dat") {
 				continue
 			}
@@ -312,7 +312,7 @@ func main() {
 		}
 		defer cli.Close()
 
-		// 🌟 修复点 2：使用实例方法 cli.GetStockCodeAll() 代替包级别函数
+		// 🌟 修复点 2：cli.GetStockCodeAll() 方法返回 []string，遍历后 s 即为代码字符串
 		stocks, err := cli.GetStockCodeAll()
 		if err != nil {
 			fmt.Printf("Get Stock List Error: %v\n", err)
@@ -325,8 +325,7 @@ func main() {
 		}
 
 		var list []MasterStock
-		for _, s := range stocks {
-			code := s.Code
+		for _, code := range stocks {
 			if len(code) == 6 {
 				prefix := ""
 				if strings.HasPrefix(code, "6") {
@@ -339,7 +338,7 @@ func main() {
 				if prefix != "" {
 					list = append(list, MasterStock{
 						Code:     prefix + code,
-						CodeName: s.Name,
+						CodeName: code, // 🌟 修复点 3：由于 []string 不含中文名，在此处以代码占位，ST等标记后续由 Python 载入板块映射表自愈
 					})
 				}
 			}
@@ -423,7 +422,6 @@ func main() {
 			tdxPrefix := parts[0]
 			tdxCode := tdxPrefix + pureCode
 
-			// 🌟 修复点 3：使用实例方法 cli.GetKlineDayAll(tdxCode) 代替包级别函数
 			resp, err := cli.GetKlineDayAll(tdxCode)
 			if err != nil {
 				return
@@ -437,15 +435,25 @@ func main() {
 			adjustFactor := 1.0
 
 			for _, bar := range resp.List {
-				dateVal, _ := strconv.Atoi(bar.Date)
+				// 🌟 修复点 4：K线时间字段为 bar.Time；并增加日期格式自愈洗数器，防历史横杠干扰
+				cleanTime := strings.ReplaceAll(strings.ReplaceAll(bar.Time, "-", ""), "/", "")
+				dateVal, _ := strconv.Atoi(cleanTime)
 				dateInt := uint32(dateVal)
+
+				// 🌟 修复点 5：对 tdx.Price (int64派生) 成员、Volume (int64) 进行显式 float64 强制类型转换
+				closePrice := float64(bar.Close)
+				openPrice := float64(bar.Open)
+				highPrice := float64(bar.High)
+				lowPrice := float64(bar.Low)
+				volume := float64(bar.Volume)
+				amount := float64(bar.Amount)
 
 				// A. 复权因子变动检测
 				for _, ev := range events {
 					if ev.Date == dateInt {
-						pEx := (bar.Close - ev.Fh + ev.Pei*ev.PeiJia) / (1.0 + ev.Sg + ev.Pei)
-						if pEx > 0 && bar.Close > 0 {
-							adjustFactor *= (bar.Close / pEx)
+						pEx := (closePrice - ev.Fh + ev.Pei*ev.PeiJia) / (1.0 + ev.Sg + ev.Pei)
+						if pEx > 0 && closePrice > 0 {
+							adjustFactor *= (closePrice / pEx)
 						}
 					}
 				}
@@ -475,12 +483,12 @@ func main() {
 				}
 
 				// D. 派生指标复合计算
-				totalMV := bar.Close * totalShares
-				floatMV := bar.Close * floatShares
+				totalMV := closePrice * totalShares
+				floatMV := closePrice * floatShares
 
 				turn := 0.0
 				if floatShares > 0 {
-					turn = (bar.Volume / floatShares) * 100.0
+					turn = (volume / floatShares) * 100.0
 				}
 
 				peTTM := 0.0
@@ -494,14 +502,14 @@ func main() {
 				}
 
 				localRows = append(localRows, CSVRow{
-					Date:         bar.Date,
+					Date:         bar.Time,
 					Code:         code,
-					Open:         bar.Open,
-					High:         bar.High,
-					Low:          bar.Low,
-					Close:        bar.Close,
-					Volume:       bar.Volume,
-					Amount:       bar.Amount,
+					Open:         openPrice,
+					High:         highPrice,
+					Low:          lowPrice,
+					Close:        closePrice,
+					Volume:       volume,
+					Amount:       amount,
 					AdjustFactor: adjustFactor,
 					Turn:         turn,
 					PeTTM:        peTTM,
