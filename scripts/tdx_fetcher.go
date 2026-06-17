@@ -182,7 +182,8 @@ func parseGpcwFiles(dirPath string) (map[string][]FinancialRecord, map[string]ma
 		}
 
 		for _, zf := range zipReader.File {
-			if !strings.HasSuffix(zf.Name(), ".dat") {
+			// 🌟 修复点 1：使用 zf.Name 成员字段而非 zf.Name() 函数调用
+			if !strings.HasSuffix(zf.Name, ".dat") {
 				continue
 			}
 			rc, err := zf.Open()
@@ -311,7 +312,8 @@ func main() {
 		}
 		defer cli.Close()
 
-		stocks, err := tdx.GetStockCodeAll(cli)
+		// 🌟 修复点 2：使用实例方法 cli.GetStockCodeAll() 代替包级别函数
+		stocks, err := cli.GetStockCodeAll()
 		if err != nil {
 			fmt.Printf("Get Stock List Error: %v\n", err)
 			os.Exit(1)
@@ -421,7 +423,8 @@ func main() {
 			tdxPrefix := parts[0]
 			tdxCode := tdxPrefix + pureCode
 
-			resp, err := tdx.GetKlineDayAll(cli, tdxCode)
+			// 🌟 修复点 3：使用实例方法 cli.GetKlineDayAll(tdxCode) 代替包级别函数
+			resp, err := cli.GetKlineDayAll(tdxCode)
 			if err != nil {
 				return
 			}
