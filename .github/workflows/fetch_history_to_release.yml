@@ -23,13 +23,6 @@ jobs:
         with:
           python-version: "3.10"
 
-      - name: 🔍 动态扫描内鬼文件
-        run: |
-          echo "=== 1. 当前工作区所有的 Go 文件 ==="
-          find . -name "*.go"
-          echo "=== 2. 查找包含 gbbq 导入的文件和精确行号 ==="
-          grep -rn "protocol/gbbq" . || true
-
       - name: 🌐 Download Official GBBQ zip (HTTP Mode)
         run: |
           set -euxo pipefail
@@ -44,14 +37,6 @@ jobs:
           mv gbbq gbbq.dat
           ls -lh gbbq.dat
 
-      # 🌟 新增：全历史打包阶段，下载自 2005 年起至今的全部历史财务数据
-      - name: 📥 Download Full 20-Year History GPCW Zips
-        env:
-          START_YEAR: "2005"
-        run: |
-          pip install requests
-          python scripts/download_gpcw.py
-
       - name: Initialize Go Module
         run: |
           go mod init stockA || true
@@ -65,15 +50,13 @@ jobs:
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
-      # 🌟 修改：将 gpcw_zips 整个加入 Master 历史产物分发链中
-      - name: Upload Master Metadata (List, GBBQ & GPCW)
+      - name: Upload Master Metadata (List & GBBQ)
         uses: actions/upload-artifact@v4
         with:
           name: master-metadata
           path: |
             stock_list_master.json
             gbbq.dat
-            gpcw_zips/
           retention-days: 1
 
   fetch-full-history:
@@ -95,7 +78,6 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
-      # 🌟 自动下载包含 gpcw_zips/ 文件夹的 Master Artifact
       - name: Download Master Metadata
         uses: actions/download-artifact@v4
         with:
@@ -112,7 +94,7 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Full History (Local gbbq.dat + GPCW + Sina Flow)
+      - name: Fetch Full History (Local gbbq.dat + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
@@ -178,6 +160,13 @@ jobs:
           merge-multiple: true
           path: all_artifacts
           
+      # 🌟 新增：在单个 Finalize 节点极速拉取 37 字段全市场历史财报归档 (约 86 秒)
+      - name: 🌐 Download All Stocks 37-Column F10 Financial Data
+        run: |
+          pip install polars
+          python scripts/fetch_f10_all.py
+          ls -lh output/all_stocks_f10_raw.parquet
+
       - name: Merge & Split by Year
         run: |
           python scripts/merge_and_push.py --mode release --year 9999
@@ -186,23 +175,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & Local gbbq.dat Parser" || true
+          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" || true
           gh release edit archive --draft=false --prerelease=false
           gh release upload archive output/*.parquet output/*.json output/*.md --clobber
 
-      - name: Publish Summary
+      # 🌟 将 QC 报告和全市场 F10 财务数据审计报告双重注入到 Job 总结页
+      - name: Publish Consolidated Summaries
         if: always()
         run: |
+          if [ -f output/f10_audit_summary.md ]; then
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            cat output/f10_audit_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
           if [ -f output/qc_summary.md ]; then
+            echo "---" >> $GITHUB_STEP_SUMMARY
             cat output/qc_summary.md >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Upload QC Report to Artifacts
+      - name: Upload QC & Audit Reports to Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qc-report-full
+          name: qc-and-audit-reports
           path: |
             output/qc_report.json
             output/qc_summary.md
+            output/f10_audit_summary.md
           retention-days: 7
