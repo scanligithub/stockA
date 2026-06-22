@@ -1,230 +1,113 @@
-name: Test F10 Integration (TDX List to EM Finance)
+name: Test EastMoney Financial API
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-f10-from-tdx:
+  test:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
-      
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.24'
-          
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-          
-      - name: Install Python Dependencies
-        run: |
-          pip install requests pandas tqdm tabulate
-          
-      - name: Build TDX Go Engine
-        run: |
-          go mod init stockA || true
-          go get github.com/injoyai/tdx
-          go mod tidy
-          go build -o tdx_fetcher scripts/tdx_fetcher.go
-          
-      - name: Generate Master Stock List (via TDX)
-        run: |
-          echo "🚀 Running TDX Engine to get stock list..."
-          ./tdx_fetcher -mode=list
-          ls -lh stock_list_master.json
-          
-      - name: Create & Run DataCenter F10 Integration Script
-        run: |
-          cat << 'EOF' > test_f10_integration.py
-          import json
-          import random
-          import requests
-          import pandas as pd
-          from concurrent.futures import ThreadPoolExecutor, as_completed
-          from tqdm import tqdm
+          python-version: "3.11"
 
-          HEADERS = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-              "Referer": "https://quote.eastmoney.com/"
+      - name: Install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run test
+        run: |
+          python << 'PY'
+          import json
+          import requests
+
+          url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+
+          params = {
+              # 请替换为你已经验证成功的 reportName
+              "reportName": "RPT_LICO_FN_CPD",
+
+              # 建议先使用 ALL，如果失败可改为具体字段
+              "columns": "ALL",
+
+              # 请根据你的探针结果调整 filter
+              # 例如：
+              # '(SECURITY_CODE="300481")'
+              "filter": '(SECURITY_CODE="300481")',
+
+              "sortColumns": "REPORT_DATE",
+              "sortTypes": "-1",
+
+              # 测试时可先设小一点
+              "pageNumber": "1",
+              "pageSize": "5",
+
+              "source": "WEB",
+              "client": "WEB"
           }
 
-          REPORT_NAME = "RPT_LICO_FN_CPD" # 锁定有效物理表
-          WORKING_FILTER = None
+          headers = {
+              "User-Agent": (
+                  "Mozilla/5.0 "
+                  "(Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) "
+                  "Chrome/137.0 Safari/537.36"
+              ),
+              "Referer": "https://data.eastmoney.com/",
+              "Accept": "application/json"
+          }
 
-          def explore_sql_syntax(pure_code, tdx_code):
-              """🕵️ 在已确定的 CPD 表上，测试 4 种经典的东财 ANTLR 过滤语法"""
-              global WORKING_FILTER
-              
-              # 生成标准带后缀的 SECUCODE (e.g. 300481.SZ, 601600.SH)
-              suffix = "SH" if tdx_code.startswith("sh") else "SZ" if tdx_code.startswith("sz") else "BJ"
-              secucode = f"{pure_code}.{suffix}"
-              
-              # 构造四种 ANTLR 语法变体
-              filter_variants = [
-                  f'(SECURITY_CODE="{pure_code}")',    # 变体 A: 纯代码 + 双引号（最通用）
-                  f'(SECURITY_CODE={pure_code})',      # 变体 B: 纯代码 + 无引号（整型匹配）
-                  f'(SECUCODE="{secucode}")',          # 变体 C: 带后缀代码 + 双引号
-                  f'(SECUCODE={secucode})'             # 变体 D: 带后缀代码 + 无引号
-              ]
-              
-              url = "https://datacenter.eastmoney.com/api/data/v1/get"
-              print(f"\n🕵️ 针对物理表 {REPORT_NAME} 进行 SQL 语法对齐测试...")
-              
-              for flt in filter_variants:
-                  params = {
-                      "sortColumns": "REPORT_DATE",
-                      "sortTypes": "-1",
-                      "pageSize": "3",
-                      "pageNumber": "1",
-                      "reportName": REPORT_NAME,
-                      "columns": "ALL",
-                      "filter": flt,
-                      "client": "WEB"
-                  }
-                  try:
-                      res = requests.get(url, params=params, headers=HEADERS, timeout=8)
-                      data = res.json()
-                      code = data.get("code")
-                      message = data.get("message", "无")
-                      
-                      print(f"    - 测试语法: [{flt:<30}] ➔ 返回码: {code:<5} | 消息: {message}")
-                      
-                      # 只要返回 0，代表 SQL 引擎成功解析，我们拿到了正确语法！
-                      if code == 0 and data.get("result"):
-                          WORKING_FILTER = flt
-                          print(f"🎉【对齐成功】东财编译器认可的语法为: {flt}")
-                          return True
-                  except Exception as e:
-                      pass
-              return False
+          print("Request params:")
+          print(json.dumps(params, ensure_ascii=False, indent=2))
 
-          def fetch_f10_datacenter(tdx_item):
-              global WORKING_FILTER
-              tdx_code = tdx_item['code'].replace('.', '').lower()         
-              name = tdx_item.get('code_name', '')
-              pure_code = tdx_code[2:]
-              
-              # 动态生成契合当前股票的过滤器
-              suffix = "SH" if tdx_code.startswith("sh") else "SZ" if tdx_code.startswith("sz") else "BJ"
-              secucode = f"{pure_code}.{suffix}"
-              
-              # 将测试成功的模板应用到当前股票
-              actual_filter = WORKING_FILTER.replace("300481.SZ", secucode).replace("300481", pure_code)
-              
-              url = "https://datacenter.eastmoney.com/api/data/v1/get"
-              params = {
-                  "sortColumns": "REPORT_DATE",
-                  "sortTypes": "-1",
-                  "pageSize": "120",
-                  "pageNumber": "1",
-                  "reportName": REPORT_NAME,
-                  "columns": "ALL",
-                  "filter": actual_filter,
-                  "client": "WEB" 
-              }
-              
-              try:
-                  res = requests.get(url, params=params, headers=HEADERS, timeout=10)
-                  data = res.json()
-                  if data and data.get("result") and data["result"].get("data"):
-                      return pure_code, name, data["result"]["data"], None
-                  err_msg = f"状态码: {data.get('code', '无')}, 消息: {data.get('message', '未知')}"
-                  return pure_code, name, [], err_msg
-              except Exception as e:
-                  return pure_code, name, [], str(e)
+          r = requests.get(
+              url,
+              params=params,
+              headers=headers,
+              timeout=30,
+          )
 
-          def main():
-              print("🔍 读取 TDX 股票列表...")
-              try:
-                  with open('stock_list_master.json', 'r', encoding='utf-8') as f:
-                      master_list = json.load(f)
-              except Exception as e:
-                  print(f"❌ 读取 JSON 失败: {e}")
-                  return
+          print("HTTP Status:", r.status_code)
+          print()
 
-              valid_stocks = []
-              for s in master_list:
-                  code = s['code'].replace('.', '').lower()
-                  if code.startswith('sh') and code[2:4] in ['60', '68']:
-                      valid_stocks.append(s)
-                  elif code.startswith('sz') and code[2:4] in ['00', '30']:
-                      valid_stocks.append(s)
-                  elif code.startswith('bj') and code[2:4] in ['43', '83', '87', '92']:
-                      valid_stocks.append(s)
+          try:
+              obj = r.json()
+          except Exception:
+              print(r.text[:5000])
+              raise
 
-              print(f"✅ 有效 A股总数: {len(valid_stocks)}")
-              
-              # 随机抽样
-              sample_size = min(100, len(valid_stocks))
-              test_samples = random.sample(valid_stocks, sample_size)
-              
-              # 启动针对 300481.SZ (赛为智能) 的四维语法探测
-              sample_item = next(s for s in test_samples if s['code'].replace('.', '').lower().endswith("300481"))
-              sample_pure_code = "300481"
-              sample_tdx_code = sample_item['code']
-              
-              if not explore_sql_syntax(sample_pure_code, sample_tdx_code):
-                  print("\n❌ 语法对齐失败：四种变体均未通过。")
-                  return
-                  
-              print(f"\n🎯 锁定过滤器模板 [{WORKING_FILTER}] 开始拉取数据...")
-              
-              results = []
-              success_count, fail_count = 0, 0
-              
-              with ThreadPoolExecutor(max_workers=10) as executor:
-                  futures = {executor.submit(fetch_f10_datacenter, s): s for s in test_samples}
-                  for future in tqdm(as_completed(futures), total=len(test_samples), desc="拉取全量财报"):
-                      pure_code, name, data, err = future.result()
-                      if data:
-                          success_count += 1
-                          results.append({"code": pure_code, "name": name, "history_len": len(data), "raw_data": data})
-                      else:
-                          fail_count += 1
-                          print(f"⚠️ 失败: {name}({pure_code}) - {err}")
-                          
-              print("\n" + "="*60)
-              print(f"📊 数据中心接口统计：成功 {success_count} 只 | 失败 {fail_count} 只")
-              
-              if success_count > 0:
-                  longest = max(results, key=lambda x: x['history_len'])
-                  print(f"\n🏆 财报历史最长股票: {longest['name']} ({longest['code']})，共 {longest['history_len']} 个季度！")
-                  
-                  df = pd.DataFrame(longest['raw_data'])
-                  print("\n🔑 接口实际返回的全量字段列名 (大写字母形式)：")
-                  print(", ".join(df.columns))
-                  
-                  # 财报表标准映射
-                  mapping_candidates = {
-                      'REPORT_DATE': ['REPORT_DATE'],
-                      'UPDATE_DATE': ['NOTICE_DATE', 'UPDATE_DATE', 'ACTUAL_PUBLISH_DATE'],
-                      'PARENTNETPROFIT': ['PARENT_NETPROFIT', 'PARENTNETPROFIT', 'NETPROFIT'],
-                      'BPS': ['BPS_MRQ', 'BPS', 'B_BPS']
-                  }
-                  
-                  real_cols = {}
-                  for target, candidates in mapping_candidates.items():
-                      for cand in candidates:
-                          if cand in df.columns:
-                              real_cols[target] = cand
-                              break
-                              
-                  print(f"\n🎯 自动识别出来的对齐列名: {real_cols}")
-                  
-                  available_cols = list(real_cols.values())
-                  if available_cols:
-                      print("\n🌟 核心提取字段展示 (最新 5 个季度)：")
-                      print(df[available_cols].head(5).to_markdown(index=False))
-                      
-                      print("\n🌟 核心提取字段展示 (远古历史底牌)：")
-                      print(df[available_cols].tail(5).to_markdown(index=False))
+          print("Top-level keys:")
+          print(list(obj.keys()))
 
-          if __name__ == "__main__":
-              main()
-          EOF
-          
-          python test_f10_integration.py
+          result = obj.get("result")
+
+          if result:
+              print()
+              print("Result keys:")
+              print(list(result.keys()))
+
+              data = result.get("data") or []
+
+              print()
+              print("Rows returned:", len(data))
+
+              if data:
+                  print()
+                  print("Columns discovered:")
+                  print(sorted(data[0].keys()))
+
+                  print()
+                  print("First row:")
+                  print(json.dumps(data[0], ensure_ascii=False, indent=2))
+          else:
+              print()
+              print("No result field.")
+              print(json.dumps(obj, ensure_ascii=False, indent=2))
+          PY
