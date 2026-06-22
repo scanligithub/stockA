@@ -1,12 +1,12 @@
-name: Daily Update to HF (Matrix)
+name: Daily Update to Hugging Face
 
 on:
   schedule:
-    - cron: '0 17 * * *' # 北京时间凌晨 01:00 执行
+    - cron: '0 10 * * 1-5' # 北京时间周一至周五下午 18:00 自动运行
   workflow_dispatch:
 
 permissions:
-  contents: write  # 提升权限，支持发布和克隆
+  contents: write
   actions: write
 
 jobs:
@@ -39,14 +39,6 @@ jobs:
           mv gbbq gbbq.dat
           ls -lh gbbq.dat
 
-      # 🌟 新增：每日增量拉取高频财务包（仅限 2024 至今最新数据，确保极速通关）
-      - name: 📥 Download Recent GPCW Zips
-        env:
-          START_YEAR: "2024"
-        run: |
-          pip install requests
-          python scripts/download_gpcw.py
-
       - name: Initialize Go Module
         run: |
           go mod init stockA || true
@@ -60,18 +52,16 @@ jobs:
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
-      # 🌟 修改：将 gpcw_zips 整个加入 Master 产物分发链中
-      - name: Upload Master Metadata (List, GBBQ & GPCW)
+      - name: Upload Master Metadata (List & GBBQ)
         uses: actions/upload-artifact@v4
         with:
           name: master-metadata
           path: |
             stock_list_master.json
             gbbq.dat
-            gpcw_zips/
           retention-days: 1
 
-  fetch-stocks:
+  fetch-daily-data:
     needs: prepare
     runs-on: ubuntu-latest
     strategy:
@@ -90,7 +80,6 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
-      # 🌟 自动下载包含 gpcw_zips/ 文件夹的 Master Artifact
       - name: Download Master Metadata
         uses: actions/download-artifact@v4
         with:
@@ -107,13 +96,16 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Current Year Data (Local gbbq.dat + GPCW + Sina Flow)
+      - name: Fetch Current Year Daily Data (Local gbbq.dat + Sina Flow)
         run: |
-          python scripts/fetch_worker.py --index ${{ matrix.task.index }} --codes '${{ toJson(matrix.task.codes) }}'
-          
+          python scripts/fetch_worker.py \
+            --index ${{ matrix.task.index }} \
+            --codes '${{ toJson(matrix.task.codes) }}' \
+            --year 0 # 0 代表仅增量同步当前年份的数据
+            
       - uses: actions/upload-artifact@v4
         with:
-          name: daily-parts-${{ matrix.task.index }}
+          name: daily-part-${{ matrix.task.index }}
           path: temp_parts/*.parquet
           retention-days: 1
 
@@ -131,13 +123,13 @@ jobs:
           pip install -r requirements.txt
           pip install polars
 
-      - name: Download Latest Healed Sectors (跨仓库拉取自愈数据)
+      - name: Download Latest Healed Sectors
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release download --repo scanligithub/em-sector-auto-healer --pattern "Full_Sector_Klines.zip" --clobber
 
-      - name: Transform JSON to Clean Parquet (对齐精度并清洗)
+      - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
       - name: Upload Sector Parquet
@@ -148,7 +140,7 @@ jobs:
           retention-days: 1
 
   finalize:
-    needs: [fetch-stocks, fetch-sectors]
+    needs: [fetch-daily-data, fetch-sectors]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -162,47 +154,47 @@ jobs:
         with:
           name: master-metadata
           path: .
-          
+
       - name: Download All Data Artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: '*-part*' # 🚀 核心修复：从 '*-parts-*' 修改为 '*-part*'
+          pattern: '*-part*'
           merge-multiple: true
           path: all_artifacts
           
-      - name: Merge Data (Local Only)
+      # 🚀 增量同步核心：每日 Finalize 阶段同样拉取最新财报，秒级捕获昨日夜间可能新披露的业绩
+      - name: 🌐 Sync All Stocks 37-Column F10 Financial Data
         run: |
-          python scripts/merge_and_push.py --mode release
-          
-      - name: Force Push to HF (Clone & Merge Mode)
+          pip install polars
+          python scripts/fetch_f10_all.py
+          ls -lh output/all_stocks_f10_raw.parquet
+
+      - name: Merge & Split by Year (HF Mode)
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_REPO: ${{ secrets.HF_REPO }}
         run: |
-          git lfs install
-          git clone --depth 1 https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO hf_workspace
-          rm -rf hf_workspace/.git
-          cp -a output/. hf_workspace/
-          cp README.md hf_workspace/ 2>/dev/null || echo "README not found"
+          python scripts/merge_and_push.py --mode hf --year 0
           
-          cd hf_workspace
-          git init -b main
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          git lfs track "*.parquet"
-          git add .gitattributes
-          git add .
-          git commit -m "Daily Merge & Update (Zero History): $(date +'%Y-%m-%d %H:%M:%S')"
-          git push https://user:$HF_TOKEN@huggingface.co/datasets/$HF_REPO main --force
-          
-      - name: Upload QC Report
+      - name: Publish Consolidated Summaries to Workflow Page
+        if: always()
+        run: |
+          if [ -f output/f10_audit_summary.md ]; then
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            cat output/f10_audit_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
+          if [ -f output/qc_summary.md ]; then
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            cat output/qc_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload QC & Audit Reports to Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: daily-qc-report
-          path: output/qc_*
-          retention-days: 3
-          
-      - name: Publish QC
-        if: always()
-        run: cat output/qc_summary.md >> $GITHUB_STEP_SUMMARY
+          name: daily-qc-and-audit-reports
+          path: |
+            output/qc_report.json
+            output/qc_summary.md
+            output/f10_audit_summary.md
+          retention-days: 7
