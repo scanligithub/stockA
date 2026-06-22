@@ -81,10 +81,10 @@ func main() {
 	}
 	defer c.Close()
 
-	// 🌟 1. 列表模式：利用通达信极速、免风控拉取 A 股种子代码，无缝生成 stock_list_master.json
+	// 🌟 修复：使用 GetStockAll 获取含有 Code 与 Name 的结构体
 	if *mode == "list" {
-		fmt.Println("📡 Go Engine: 正在通过通达信 TCP 节点同步全量 A 股列表...")
-		stocks, err := c.GetStockCodeAll()
+		fmt.Println("📡 Go Engine: 正在通过通达信极速同步全量 A 股列表及中文简称...")
+		stocks, err := c.GetStockAll()
 		if err != nil {
 			panic(err)
 		}
@@ -92,7 +92,6 @@ func main() {
 		var masterList []StockInfo
 		for _, s := range stocks {
 			codeStr := strings.TrimSpace(s.Code)
-			// 过滤非 A 股垃圾数据
 			if len(codeStr) != 6 {
 				continue
 			}
@@ -123,7 +122,6 @@ func main() {
 		return
 	}
 
-	// 🌟 2. 抓取模式
 	gbbqMap := loadGbbq()
 	codes := strings.Split(*codesFlag, ",")
 
@@ -150,11 +148,14 @@ func main() {
 			
 			tdxCode := parts[0] + parts[1]
 
-			klines, err := c.GetKlineDayAll(tdxCode)
-			if err != nil || len(klines) == 0 {
+			// 获取包装结构体 KlineResp
+			resp, err := c.GetKlineDayAll(tdxCode)
+			if err != nil || resp == nil || len(resp.List) == 0 {
 				return
 			}
 
+			// 🌟 修复：提取真实的 K 线切片 List 进行后续处理
+			klines := resp.List
 			events := gbbqMap[code]
 			
 			var records [][]string
