@@ -11,14 +11,23 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/injoyai/tdx/client"
-	"github.com/injoyai/tdx/protocol"
+	"github.com/injoyai/tdx"
 )
 
 type GbbqEvent struct {
 	DateInt int
 	Cat     uint8
-	F1, F2, F3, F4 float32
+	F1      float64
+	F2      float64
+	F3      float64
+	F4      float64
+}
+
+func parseDate(d int) string {
+	y := d / 10000
+	m := (d % 10000) / 100
+	day := d % 100
+	return fmt.Sprintf("%04d-%02d-%02d", y, m, day)
 }
 
 func loadGbbq() map[string][]GbbqEvent {
@@ -44,12 +53,12 @@ func loadGbbq() map[string][]GbbqEvent {
 		prefix := "sz."
 		if market == 1 || strings.HasPrefix(codeStr, "6") {
 			prefix = "sh."
-		} else if strings.HasPrefix(codeStr, "4") || strings.HasPrefix(codeStr, "8") {
+		} else if strings.HasPrefix(codeStr, "4") || strings.HasPrefix(codeStr, "8") || strings.HasPrefix(codeStr, "9") || strings.HasPrefix(codeStr, "2") {
 			prefix = "bj."
 		}
 		
 		fullCode := prefix + codeStr
-		m[fullCode] = append(m[fullCode], GbbqEvent{DateInt: dateInt, Cat: cat, F1: float32(f1), F2: float32(f2), F3: float32(f3), F4: float32(f4)})
+		m[fullCode] = append(m[fullCode], GbbqEvent{DateInt: dateInt, Cat: cat, F1: f1, F2: f2, F3: f3, F4: f4})
 	}
 	return m
 }
@@ -60,14 +69,14 @@ func main() {
 	outFlag := flag.String("out", "out.csv", "output csv")
 	flag.Parse()
 
-	c, err := client.NewClient("119.147.212.81:7709")
+	// 🌟 修复：直接使用 tdx 根包导出的 DialDefault 建立最优连接
+	c, err := tdx.DialDefault()
 	if err != nil {
 		panic(err)
 	}
 	defer c.Close()
 
 	if *mode == "list" {
-		// 种子获取兜底，输出 stock_list_master.json
 		os.WriteFile("stock_list_master.json", []byte("[]"), 0644)
 		return
 	}
@@ -95,12 +104,12 @@ func main() {
 			if len(parts) != 2 {
 				return
 			}
-			market := protocol.MarketSz
-			if parts[0] == "sh" {
-				market = protocol.MarketSh
-			}
+			
+			// 转换代码格式 sh.600519 -> sh600519，契合通达信标准传参
+			tdxCode := parts[0] + parts[1]
 
-			klines, err := c.GetKlineDayAll(market, parts[1])
+			// 🌟 修复：直接调用根包客户端的 GetKlineDayAll
+			klines, err := c.GetKlineDayAll(tdxCode)
 			if err != nil || len(klines) == 0 {
 				return
 			}
@@ -116,20 +125,20 @@ func main() {
 				dateStr := fmt.Sprintf("%04d-%02d-%02d", k.Time.Year(), k.Time.Month(), k.Time.Day())
 				dateInt := k.Time.Year()*10000 + int(k.Time.Month())*100 + k.Time.Day()
 
-				// 正序状态机匹配当日 GBBQ 变更
+				// 股本时间轴正序对齐状态机
 				for _, e := range events {
 					if e.DateInt == dateInt {
 						if e.Cat == 1 {
-							// 除权除息：f1(送股), f2(配股), f3(配股价), f4(红利)
+							// 除权除息
 							pPrev := k.Close
-							pEx := (pPrev - float64(e.F4) + float64(e.F2)*float64(e.F3)) / (1.0 + float64(e.F1) + float64(e.F2))
+							pEx := (pPrev - e.F4 + e.F2*e.F3) / (1.0 + e.F1 + e.F2)
 							if pEx > 0 {
 								adjFactor *= (pPrev / pEx)
 							}
 						} else {
-							// 股本快照：f1(流通), f3(总股本)
-							floatShares = float64(e.F1)
-							totalShares = float64(e.F3)
+							// 股本快照
+							floatShares = e.F1
+							totalShares = e.F3
 						}
 					}
 				}
@@ -141,7 +150,7 @@ func main() {
 					strconv.FormatFloat(k.High, 'f', 4, 64),
 					strconv.FormatFloat(k.Low, 'f', 4, 64),
 					strconv.FormatFloat(k.Close, 'f', 4, 64),
-					strconv.FormatFloat(k.Vol, 'f', 0, 64),
+					strconv.FormatFloat(k.Volume, 'f', 0, 64),
 					strconv.FormatFloat(k.Amount, 'f', 0, 64),
 					strconv.FormatFloat(adjFactor, 'f', 4, 64),
 					strconv.FormatFloat(totalShares, 'f', 4, 64),
