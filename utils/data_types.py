@@ -17,7 +17,7 @@ class AShareDataSchema:
     ADJ_FACTOR = 'adjustFactor'
     IS_ST = 'isST'
     
-    # 💥 新增基本面核心指标
+    # 💥 全面并轨基本面核心列
     TOTAL_MV = 'total_mv'
     FLOAT_MV = 'float_mv'
     TOTAL_SHARES = 'totalShares'
