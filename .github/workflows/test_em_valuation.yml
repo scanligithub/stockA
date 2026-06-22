@@ -1,10 +1,10 @@
-name: Test Valuation Final
+name: Test F10 Finance 100 Stocks
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-valuation:
+  test-f10-finance:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,63 +15,104 @@ jobs:
           
       - name: Install Dependencies
         run: |
-          pip install akshare pandas requests tabulate
+          pip install requests pandas tqdm tabulate
           
-      - name: Create Test Script
+      - name: Create F10 Stress Test Script
         run: |
-          cat << 'EOF' > test_val.py
-          import akshare as ak
+          cat << 'EOF' > test_f10_100.py
           import requests
           import pandas as pd
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from tqdm import tqdm
 
-          def test_akshare_current(code):
-              print(f"\n[{code}] 尝试一：测试最新版 Akshare 官方估值接口...")
-              try:
-                  # 尝试当前最新版的函数名
-                  df = ak.stock_a_indicator(symbol=code)
-                  if not df.empty:
-                      print("✅ Akshare 获取成功！数据展示：")
-                      print(df.tail(5).to_markdown(index=False))
-                      return True
-              except Exception as e:
-                  print(f"❌ Akshare 函数不存在或失效: {e}")
-              return False
+          def get_100_test_stocks():
+              """从东财获取 100 只真实的 A 股代码作为测试样本"""
+              print("🔍 正在获取 100 只真实 A 股代码...")
+              url = "https://push2.eastmoney.com/api/qt/clist/get"
+              params = {
+                  "pn": 1, "pz": 100, "po": 1, "np": 1, 
+                  "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                  "fltt": 2, "invt": 2, "fid": "f3",
+                  "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+                  "fields": "f12,f13,f14" # f12=code, f13=market, f14=name
+              }
+              res = requests.get(url, timeout=10).json()
+              stocks = []
+              for item in res['data']['diff']:
+                  market = item['f13']
+                  code = item['f12']
+                  name = item['f14']
+                  if market == 0: prefix = "SZ"
+                  elif market == 1: prefix = "SH"
+                  else: prefix = "BJ"
+                  stocks.append((f"{prefix}{code}", name))
+              return stocks
 
-          def test_eastmoney_f10_finance(code):
-              print(f"\n[{code}] 尝试二：直捣黄龙！测试东方财富 PC 端 F10 财务底层接口...")
-              # 000001 -> SZ000001, 600519 -> SH600519
-              prefix = "SH" if code.startswith("6") else "SZ"
-              em_code = f"{prefix}{code}"
-              
-              # 东财 F10 财务分析主要指标接口 (按报告期)
+          def fetch_f10_history(stock_info):
+              """拉取单只股票全历史财报 (按报告期)"""
+              em_code, name = stock_info
               url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=1&code={em_code}"
               headers = {"User-Agent": "Mozilla/5.0"}
               
               try:
                   res = requests.get(url, headers=headers, timeout=10)
                   data = res.json()
-                  if data.get("data"):
-                      records = data["data"]
-                      df = pd.DataFrame(records)
-                      # 提取核心指标：REPORT_DATE(报告期), NETPROFIT(归母净利润), TOTALOPERATEREVE(总营收)
-                      if 'REPORT_DATE' in df.columns:
-                          print("✅ 东财 F10 财务数据获取成功！拿到历史真实财报：")
-                          cols = ['REPORT_DATE', 'NETPROFIT', 'BPS'] # 净利润 和 每股净资产
-                          available_cols = [c for c in cols if c in df.columns]
-                          print(df[available_cols].head(5).to_markdown(index=False))
-                          print("\n🎉 结论：我们可以直接拉取东财财报，自己算 PE TTM，不用受任何第三方气了！")
-                      else:
-                          print("⚠️ 获取到了 JSON，但字段不对。")
+                  if data and data.get("data"):
+                      return em_code, name, data["data"], None
+                  return em_code, name, [], "无数据返回"
               except Exception as e:
-                  print(f"❌ 东财 F10 接口请求失败: {e}")
+                  return em_code, name, [], str(e)
+
+          def main():
+              stocks = get_100_test_stocks()
+              print(f"✅ 成功拿到 {len(stocks)} 只股票种子，开始 10 线程并发压测 F10 接口...")
+              
+              results = []
+              success_count = 0
+              fail_count = 0
+              
+              # 开启 10 线程温和压测
+              with ThreadPoolExecutor(max_workers=10) as executor:
+                  futures = {executor.submit(fetch_f10_history, s): s for s in stocks}
+                  for future in tqdm(as_completed(futures), total=len(stocks), desc="拉取财报"):
+                      em_code, name, data, err = future.result()
+                      if data:
+                          success_count += 1
+                          results.append({"code": em_code, "name": name, "history_len": len(data), "raw_data": data})
+                      else:
+                          fail_count += 1
+                          print(f"❌ 失败: {em_code} - {err}")
+                          
+              print("\n" + "="*60)
+              print(f"📊 压测统计：总计 {len(stocks)}只 | 成功 {success_count}只 | 失败 {fail_count}只")
+              
+              if success_count > 0:
+                  # 找一只历史数据最长的股票看看底牌
+                  longest_stock = max(results, key=lambda x: x['history_len'])
+                  print(f"\n🏆 历史财报最长的股票是: {longest_stock['name']} ({longest_stock['code']})，共拿到 {longest_stock['history_len']} 个季度的财报！")
+                  
+                  # 打印它的字典 Keys，精准确认字段名
+                  sample_row = longest_stock['raw_data'][0]
+                  print("\n🔑 F10 API 底层全量字段 Keys 大起底：")
+                  print(", ".join(sample_row.keys()))
+                  
+                  # 转化为 DataFrame，提取我们关心的核心列
+                  df = pd.DataFrame(longest_stock['raw_data'])
+                  
+                  # 提取：REPORT_DATE(报告期), UPDATE_DATE(实际更新/披露日), PARENTNETPROFIT(归母净利润), BPS(每股净资产)
+                  target_cols = ['REPORT_DATE', 'UPDATE_DATE', 'PARENTNETPROFIT', 'BPS']
+                  available_cols = [c for c in target_cols if c in df.columns]
+                  
+                  print(f"\n🌟 核心提取字段展示 ({longest_stock['name']} 过去 5 个季度)：")
+                  print(df[available_cols].head(5).to_markdown(index=False))
+                  
+                  print(f"\n🌟 核心提取字段展示 ({longest_stock['name']} 最远古的 5 个季度)：")
+                  print(df[available_cols].tail(5).to_markdown(index=False))
+                  
+              print("\n🎉 结论推演：如果成功率 > 95%，且 PARENTNETPROFIT 有真实数值，本方案即为绝对最优解！")
 
           if __name__ == "__main__":
-              for code in ["000001", "600519"]:
-                  print("="*60)
-                  # 优先测 akshare
-                  if not test_akshare_current(code):
-                      # 失败了直接上东财 F10
-                      test_eastmoney_f10_finance(code)
+              main()
           EOF
           
-          python test_val.py
+          python test_f10_100.py
