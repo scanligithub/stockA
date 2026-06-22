@@ -65,14 +65,14 @@ jobs:
               
               # 构造四种 ANTLR 语法变体
               filter_variants = [
-                  f'(SECURITY_CODE="{pure_code}")',    # 变体 A: 纯代码 + 双引号（最通用）
-                  f'(SECURITY_CODE={pure_code})',      # 变体 B: 纯代码 + 无引号（整型匹配）
+                  f'(SECURITY_CODE="{pure_code}")',    # 变体 A: 纯代码 + 双引号
+                  f'(SECURITY_CODE={pure_code})',      # 变体 B: 纯代码 + 无引号
                   f'(SECUCODE="{secucode}")',          # 变体 C: 带后缀代码 + 双引号
                   f'(SECUCODE={secucode})'             # 变体 D: 带后缀代码 + 无引号
               ]
               
               url = "https://datacenter.eastmoney.com/api/data/v1/get"
-              print(f"\n🕵️ 针对物理表 {REPORT_NAME} 进行 SQL 语法对齐测试...")
+              print(f"\n🕵️ 针对物理表 {REPORT_NAME} 进行 SQL 语法对齐测试 (使用样本: {tdx_code})...")
               
               for flt in filter_variants:
                   params = {
@@ -93,8 +93,8 @@ jobs:
                       
                       print(f"    - 测试语法: [{flt:<30}] ➔ 返回码: {code:<5} | 消息: {message}")
                       
-                      # 只要返回 0，代表 SQL 引擎成功解析，我们拿到了正确语法！
-                      if code == 0 and data.get("result"):
+                      # 只要返回 0 且存在数据，代表语法匹配完全成功
+                      if code == 0 and data.get("result") and data["result"].get("data"):
                           WORKING_FILTER = flt
                           print(f"🎉【对齐成功】东财编译器认可的语法为: {flt}")
                           return True
@@ -112,8 +112,9 @@ jobs:
               suffix = "SH" if tdx_code.startswith("sh") else "SZ" if tdx_code.startswith("sz") else "BJ"
               secucode = f"{pure_code}.{suffix}"
               
-              # 将测试成功的模板应用到当前股票
-              actual_filter = WORKING_FILTER.replace("300481.SZ", secucode).replace("300481", pure_code)
+              # 使用模板进行字符串替换
+              # 统一使用第一个样本的纯代码和带后缀代码作为“特征对齐标记”进行自适应替换
+              actual_filter = WORKING_FILTER.replace("PROBE_SECU", secucode).replace("PROBE_CODE", pure_code)
               
               url = "https://datacenter.eastmoney.com/api/data/v1/get"
               params = {
@@ -138,6 +139,7 @@ jobs:
                   return pure_code, name, [], str(e)
 
           def main():
+              global WORKING_FILTER
               print("🔍 读取 TDX 股票列表...")
               try:
                   with open('stock_list_master.json', 'r', encoding='utf-8') as f:
@@ -158,20 +160,26 @@ jobs:
 
               print(f"✅ 有效 A股总数: {len(valid_stocks)}")
               
-              # 随机抽样
               sample_size = min(100, len(valid_stocks))
               test_samples = random.sample(valid_stocks, sample_size)
               
-              # 启动针对 300481.SZ (赛为智能) 的四维语法探测
-              sample_item = next(s for s in test_samples if s['code'].replace('.', '').lower().endswith("300481"))
-              sample_pure_code = "300481"
-              sample_tdx_code = sample_item['code']
+              # 🛡️ 修复：直接使用随机抽取的第 1 个样本作为语法对齐探针，100% 避免 StopIteration 崩溃！
+              sample_item = test_samples[0]
+              sample_tdx_code = sample_item['code'].replace('.', '').lower()
+              sample_pure_code = sample_tdx_code[2:]
               
               if not explore_sql_syntax(sample_pure_code, sample_tdx_code):
                   print("\n❌ 语法对齐失败：四种变体均未通过。")
                   return
                   
-              print(f"\n🎯 锁定过滤器模板 [{WORKING_FILTER}] 开始拉取数据...")
+              # 建立通用替换模板
+              suffix = "SH" if sample_tdx_code.startswith("sh") else "SZ" if sample_tdx_code.startswith("sz") else "BJ"
+              secucode = f"{sample_pure_code}.{suffix}"
+              
+              # 将识别通过的 filter 转化为可替换模板
+              WORKING_FILTER = WORKING_FILTER.replace(secucode, "PROBE_SECU").replace(sample_pure_code, "PROBE_CODE")
+              print(f"🎯 建立可复用过滤器模板: {WORKING_FILTER}")
+              print(f"🚀 开始并发拉取 {sample_size} 只股票的全量财报...\n")
               
               results = []
               success_count, fail_count = 0, 0
