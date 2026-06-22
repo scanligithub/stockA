@@ -1,0 +1,115 @@
+name: Test EastMoney Valuation (Turn/PE/PB)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-valuation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          
+      - name: Install Dependencies
+        run: |
+          pip install requests pandas numpy tabulate
+          
+      - name: Create Test Script
+        run: |
+          cat << 'EOF' > test_em.py
+          import requests
+          import pandas as pd
+          import os
+
+          # 这里直接复用您在 cf_proxy.py 中配置好的 Cloudflare Worker 地址
+          # 如果没有配置环境变量，会优雅降级为直连测试
+          CF_URL = os.getenv("CF_WORKER_URL", "https://push2his.eastmoney.com")
+          if CF_URL and not CF_URL.startswith("http"):
+              CF_URL = f"https://{CF_URL}"
+              
+          def test_fetch_valuation(secid):
+              print(f"🚀 开始测试获取东财多因子数据... 目标股票: {secid}")
+              print(f"📡 代理网关: {CF_URL}")
+              
+              # API 核心秘密武器：fields2
+              # f51=date, f52=open, f53=close, f54=high, f55=low, f56=volume, f57=amount,
+              # f58=amplitude, f59=pctChg, f114=peTTM, f115=pbMRQ, 
+              # f116=total_market_value, f117=circulating_market_value, f8=turnover_rate
+              
+              url = f"{CF_URL}/api/qt/stock/kline/get"
+              
+              params = {
+                  "secid": secid,
+                  "ut": "fa5fd1943c09a822273714f23b58f2d0",
+                  "fields1": "f1,f2,f3,f4,f5,f6",
+                  "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f114,f115,f116,f117,f8",
+                  "klt": "101", # 日线
+                  "fqt": "1",   # 前复权
+                  "end": "20500101",
+                  "lmt": "10",  # 测试只取最近 10 天
+              }
+
+              # 如果是 Cloudflare 代理，需要包装一层 target_func
+              if "push2his" not in CF_URL:
+                  params["target_func"] = "kline"
+
+              headers = {
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+              }
+
+              try:
+                  res = requests.get(url, params=params, headers=headers, timeout=10)
+                  res.raise_for_status()
+                  data = res.json()
+                  
+                  if data.get('data') and data['data'].get('klines'):
+                      klines = data['data']['klines']
+                      records = []
+                      for row in klines:
+                          parts = row.split(',')
+                          # 防止某些列缺失导致的报错
+                          while len(parts) < 14: parts.append("0.0")
+                          
+                          records.append({
+                              "date": parts[0],
+                              "close": float(parts[2]),
+                              "pctChg": float(parts[8]),
+                              "peTTM": float(parts[9]),
+                              "pbMRQ": float(parts[10]),
+                              "total_mv": float(parts[11]),
+                              "float_mv": float(parts[12]),
+                              "turn": float(parts[13])
+                          })
+                          
+                      df = pd.DataFrame(records)
+                      print("\n✅ 数据解析成功！完美获取估值指标：")
+                      print(df.to_markdown(index=False))
+                      
+                      # 数据校验断言
+                      if df['peTTM'].sum() > 0 and df['total_mv'].sum() > 0:
+                          print("\n🎉 结论：东财接口 100% 支持 PE/PB 和市值输出，方案一完全可行！")
+                      else:
+                          print("\n⚠️ 结论：获取到了格式，但估值字段为空，需排查参数。")
+                          
+                  else:
+                      print(f"\n❌ 获取失败，返回体异常: {data}")
+                      
+              except Exception as e:
+                  print(f"\n❌ 网络请求或解析崩溃: {e}")
+
+          if __name__ == "__main__":
+              # 测试平安银行 (0代表深交所, 1代表上交所)
+              test_fetch_valuation("0.000001")
+              
+              print("\n" + "="*50)
+              
+              # 测试贵州茅台
+              test_fetch_valuation("1.600519")
+          EOF
+          
+          python test_em.py
+        env:
+          CF_WORKER_URL: ${{ secrets.CF_WORKER_URL }}
