@@ -240,7 +240,6 @@ def main():
     
     if all_flat_rows:
         print("💾 正在调用 Polars 引擎对 37 个字段执行极致压缩落盘...")
-        df = pl.DataFrame(all_flat_rows)
         
         # 强制约束 Polars 的物理 Schema 列类型，保证对齐一致性
         type_constraints = {
@@ -255,8 +254,8 @@ def main():
             "secucode": pl.Utf8, "board_name": pl.Utf8, "ori_board_code": pl.Utf8, "board_code": pl.Utf8
         }
         
-        # 应用严格约束并按 code、时间轴正序升向重组
-        df = df.with_columns([pl.col(col).cast(dtype) for col, dtype in type_constraints.items()]).sort(["code", "report_date"])
+        # 🚀 极致防崩溃：在初始化 DataFrame 的一瞬间，强制传入预定义 Schema！拒绝一切推断冲突。
+        df = pl.DataFrame(all_flat_rows, schema=type_constraints).sort(["code", "report_date"])
         
         os.makedirs("output", exist_ok=True)
         out_path = "output/all_stocks_f10_raw.parquet"
