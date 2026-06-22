@@ -35,7 +35,14 @@ jobs:
         run: |
           echo "🚀 Running TDX Engine to get stock list..."
           ./tdx_fetcher -mode=list
-          ls -lh stock_list_master.json
+          if [ -f stock_list_master.json ]; then
+            echo "✅ stock_list_master.json 生成成功，文件大小："
+            ls -lh stock_list_master.json
+            head -n 20 stock_list_master.json || true
+          else
+            echo "❌ 严重错误: Go 引擎未能生成 stock_list_master.json 文件！"
+            exit 1
+          fi
           
       - name: Create & Run F10 Integration Script
         run: |
@@ -54,11 +61,11 @@ jobs:
           }
 
           def fetch_f10_history(tdx_item):
-              # 🛡️ 修复一：去除小数点，将 "sh.600000" 转换为 "sh600000"
+              # 🛡️ 自动剔除小数点
               tdx_code = tdx_item['code'].replace('.', '').lower()         
               name = tdx_item.get('code_name', '')
               
-              # 🔄 将 TDX 格式转换为东财 F10 格式 (e.g. SH600000)
+              # 🔄 转换为大写 (e.g. SH600000)
               em_code = tdx_code.upper()
               
               url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=1&code={em_code}"
@@ -81,10 +88,18 @@ jobs:
                   print(f"❌ 读取 JSON 失败: {e}")
                   return
 
+              # 🛡️ 强力防空校验：如果 Go 引擎因为网络问题返回了空或 null，优雅拦截
+              if not master_list:
+                  print("❌ 严重错误: stock_list_master.json 内容为空或 null！这说明 Go 引擎在云端连接 TDX 服务器时超时失败。")
+                  return
+
               valid_stocks = []
               for s in master_list:
-                  # 🛡️ 修复二：严格 A股分类过滤器，只允许真正的上市公司进入列表
-                  # 自动剥离板块概念指数（88xxxx）、可转债（11xxxx）、基金（51xxxx）和大盘指数
+                  # 安全卫检：防止 s 或者是 s['code'] 为空
+                  if not s or 'code' not in s or not s['code']:
+                      continue
+                      
+                  # 严格 A股分类过滤器
                   code = s['code'].replace('.', '').lower()
                   if code.startswith('sh') and code[2:4] in ['60', '68']:
                       valid_stocks.append(s)
@@ -95,6 +110,10 @@ jobs:
 
               print(f"✅ 经过严格清洗，有效纯 A股股票总数: {len(valid_stocks)}")
               
+              if not valid_stocks:
+                  print("❌ 错误：清洗后没有发现有效的 A股股票，请检查数据源。")
+                  return
+
               # 随机抽样 100 只作为测试集
               sample_size = min(100, len(valid_stocks))
               test_samples = random.sample(valid_stocks, sample_size)
