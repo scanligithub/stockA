@@ -1,10 +1,10 @@
-name: Test F10 Full Market Stress Test
+name: Test F10 Integration (TDX List to EM Finance)
 
 on:
   workflow_dispatch:
 
 jobs:
-  f10-all-stress-test:
+  test-f10-from-tdx:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -37,63 +37,51 @@ jobs:
           ./tdx_fetcher -mode=list
           ls -lh stock_list_master.json
           
-      - name: Create & Run Full Market F10 Stress Test
+      - name: Create & Run DataCenter F10 Integration Script
         run: |
-          cat << 'EOF' > test_f10_all.py
+          cat << 'EOF' > test_f10_integration.py
           import json
-          import time
+          import random
           import requests
           import pandas as pd
           from concurrent.futures import ThreadPoolExecutor, as_completed
           from tqdm import tqdm
-          from requests.adapters import HTTPAdapter
 
           HEADERS = {
               "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
               "Referer": "https://quote.eastmoney.com/"
           }
 
-          # 🌟 核心优化：构建长连接复用池，避免高并发握手触发 WAF
-          CONCURRENT_WORKERS = 30
-          session = requests.Session()
-          adapter = HTTPAdapter(pool_connections=CONCURRENT_WORKERS, pool_maxsize=CONCURRENT_WORKERS, max_retries=1)
-          session.mount("https://", adapter)
-          session.mount("http://", adapter)
-
-          def fetch_f10_history(tdx_item):
+          def fetch_f10_datacenter(tdx_item):
               tdx_code = tdx_item['code'].replace('.', '').lower()         
               name = tdx_item.get('code_name', '')
-              em_code = tdx_code.upper()
               
-              # 🌟 进阶修改：使用 type=0 拉取全量历史季度财报（不仅仅是年报），测算真实负载
-              url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=0&code={em_code}"
+              # 提取 6 位纯数字代码
+              pure_code = tdx_code[2:]
               
-              max_retries = 2
-              for attempt in range(max_retries):
-                  try:
-                      res = session.get(url, headers=HEADERS, timeout=8)
-                      if res.status_code == 200:
-                          data = res.json()
-                          if data and data.get("data"):
-                              return em_code, name, len(data["data"]), "SUCCESS"
-                          return em_code, name, 0, "EMPTY_DATA"
-                      elif res.status_code == 403:
-                          return em_code, name, 0, "403_FORBIDDEN"
-                      else:
-                          return em_code, name, 0, f"HTTP_{res.status_code}"
-                  except requests.exceptions.Timeout:
-                      if attempt < max_retries - 1:
-                          time.sleep(1) # 超时稍微等待重试
-                          continue
-                      return em_code, name, 0, "TIMEOUT"
-                  except Exception as e:
-                      return em_code, name, 0, f"ERROR_{str(e)[:15]}"
-              return em_code, name, 0, "FAIL"
+              # 🌟 切换为官方数据中心列式接口，设置 pageSize=120 确保拉满 20 年全历史！
+              url = "https://datacenter.eastmoney.com/api/data/v1/get"
+              params = {
+                  "sortColumns": "REPORT_DATE",
+                  "sortTypes": "-1",
+                  "pageSize": "120",
+                  "pageNumber": "1",
+                  "reportName": "RPT_F10_FN_MAINOPINDEX",
+                  "columns": "ALL",
+                  "filter": f'(SECURITY_CODE="{pure_code}")'
+              }
+              
+              try:
+                  res = requests.get(url, params=params, headers=HEADERS, timeout=10)
+                  data = res.json()
+                  if data and data.get("result") and data["result"].get("data"):
+                      return pure_code, name, data["result"]["data"], None
+                  return pure_code, name, [], "接口返回无数据"
+              except Exception as e:
+                  return pure_code, name, [], str(e)
 
           def main():
-              start_time = time.time()
-              
-              print("🔍 读取 TDX 股票大盘表...")
+              print("🔍 读取 TDX 股票列表...")
               try:
                   with open('stock_list_master.json', 'r', encoding='utf-8') as f:
                       master_list = json.load(f)
@@ -103,10 +91,8 @@ jobs:
 
               valid_stocks = []
               for s in master_list:
-                  if not s or 'code' not in s or not s['code']:
-                      continue
                   code = s['code'].replace('.', '').lower()
-                  # A 股精确过滤
+                  # 严格 A 股过滤
                   if code.startswith('sh') and code[2:4] in ['60', '68']:
                       valid_stocks.append(s)
                   elif code.startswith('sz') and code[2:4] in ['00', '30']:
@@ -114,54 +100,49 @@ jobs:
                   elif code.startswith('bj') and code[2:4] in ['43', '83', '87', '92']:
                       valid_stocks.append(s)
 
-              total_stocks = len(valid_stocks)
-              print(f"✅ 清洗完成，本期全量压测 A股目标数: {total_stocks} 只")
-              print(f"🚀 启动连接池（并发数: {CONCURRENT_WORKERS}），开始极限压测...\n")
-
+              print(f"✅ 有效 A股总数: {len(valid_stocks)}")
+              
+              sample_size = min(100, len(valid_stocks))
+              test_samples = random.sample(valid_stocks, sample_size)
+              print(f"🎯 随机抽取了 {sample_size} 只股票测试数据中心接口历史深度...\n")
+              
               results = []
-              status_counter = {}
+              success_count, fail_count = 0, 0
               
-              with ThreadPoolExecutor(max_workers=CONCURRENT_WORKERS) as executor:
-                  futures = {executor.submit(fetch_f10_history, s): s for s in valid_stocks}
-                  
-                  for future in tqdm(as_completed(futures), total=total_stocks, desc="全量压测进行中"):
-                      em_code, name, history_len, status = future.result()
-                      status_counter[status] = status_counter.get(status, 0) + 1
-                      
-                      if status == "SUCCESS":
-                          results.append({"code": em_code, "name": name, "len": history_len})
-                      elif status == "403_FORBIDDEN" or "ERROR" in status:
-                          # 打印偶发的严重异常
-                          tqdm.write(f"⚠️ 触发异常: {name}({em_code}) | 状态: {status}")
-
-              duration = time.time() - start_time
-              speed = total_stocks / duration if duration > 0 else 0
-              success_count = status_counter.get("SUCCESS", 0)
-              success_rate = (success_count / total_stocks) * 100 if total_stocks > 0 else 0
-
-              print("\n" + "="*70)
-              print(f"📊 极限压测总结报告")
-              print(f"    - 总计压测股票数 : {total_stocks} 只")
-              print(f"    - 整体运行总耗时 : {duration:.2f} 秒 ({duration/60:.2f} 分钟)")
-              print(f"    - 平均吞吐速度   : {speed:.2f} 只 / 秒")
-              print(f"    - 综合下载成功率 : {success_rate:.2f} %")
-              print("="*70)
+              with ThreadPoolExecutor(max_workers=10) as executor:
+                  futures = {executor.submit(fetch_f10_datacenter, s): s for s in test_samples}
+                  for future in tqdm(as_completed(futures), total=len(test_samples), desc="拉取全量财报"):
+                      pure_code, name, data, err = future.result()
+                      if data:
+                          success_count += 1
+                          results.append({"code": pure_code, "name": name, "history_len": len(data), "raw_data": data})
+                      else:
+                          fail_count += 1
+                          print(f"⚠️ 失败: {name}({pure_code}) - {err}")
+                          
+              print("\n" + "="*60)
+              print(f"📊 数据中心接口统计：成功 {success_count} 只 | 失败 {fail_count} 只")
               
-              print("\n📈 状态分布统计：")
-              for status, count in status_counter.items():
-                  percentage = (count / total_stocks) * 100
-                  print(f"    - {status:<15} : {count:<5} 只 ({percentage:.2f}%)")
-              print("="*70)
-
               if success_count > 0:
-                  df_res = pd.DataFrame(results)
-                  print(f"\n🏆 财报历史最深股票: {df_res.iloc[df_res['len'].idxmax()]['name']} ({df_res.iloc[df_res['len'].idxmax()]['code']})，历史跨度达 {df_res['len'].max()} 个季度！")
-                  print(f"📊 历史财报平均跨度: {df_res['len'].mean():.1f} 个季度/股")
-              
-              session.close()
+                  longest = max(results, key=lambda x: x['history_len'])
+                  print(f"\n🏆 财报历史最长股票: {longest['name']} ({longest['code']})，共 {longest['history_len']} 个季度！")
+                  
+                  df = pd.DataFrame(longest['raw_data'])
+                  
+                  # 数据中心返回的标准大写英文字段
+                  target_cols = ['REPORT_DATE', 'NOTICE_DATE', 'PARENT_NETPROFIT', 'BPS']
+                  available_cols = [c for c in target_cols if c in df.columns]
+                  
+                  # 打印最新 5 个季度
+                  print("\n🌟 核心提取字段展示 (近 5 个季度)：")
+                  print(df[available_cols].head(5).to_markdown(index=False))
+                  
+                  # 打印最远古的 5 个季度
+                  print("\n🌟 核心提取字段展示 (远古历史底牌)：")
+                  print(df[available_cols].tail(5).to_markdown(index=False))
 
           if __name__ == "__main__":
               main()
           EOF
           
-          python test_f10_all.py
+          python test_f10_integration.py
