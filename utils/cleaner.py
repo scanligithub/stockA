@@ -6,13 +6,13 @@ class DataCleaner:
     def clean_stock_kline(df: pd.DataFrame) -> pd.DataFrame:
         if df.empty: return df
         
-        # 价格与比率类
+        # 价格、比率、估值列 -> float32 降维提速
         f32_cols = ['open', 'high', 'low', 'close', 'turn', 'pctChg', 'peTTM', 'pbMRQ', 'adjustFactor']
         for c in f32_cols:
             if c in df.columns: 
                 df[c] = pd.to_numeric(df[c], errors='coerce').astype('float32')
             
-        # 绝对值类：由于市值和股本巨大，统一采用 float64 保障精度
+        # 绝对股本、市值、量额列 -> float64 防止溢出
         f64_cols = ['volume', 'amount', 'total_mv', 'float_mv', 'totalShares', 'floatShares']
         for c in f64_cols:
             if c in df.columns: 
@@ -40,7 +40,7 @@ class DataCleaner:
         value_cols = ['net_amount', 'main_net', 'super_net', 'large_net', 'medium_net', 'small_net']
         for col in value_cols:
             s = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-            s = s / 10000.0
+            s = s / 10000.0 # 元 -> 万元
             df[col] = s.astype('float32')
             
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
