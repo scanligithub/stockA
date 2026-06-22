@@ -3,286 +3,169 @@ package main
 import (
 	"encoding/binary"
 	"encoding/csv"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/injoyai/tdx"
+	"github.com/injoyai/tdx/client"
 	"github.com/injoyai/tdx/protocol"
 )
 
-type StockMaster struct {
-	Code     string `json:"code"`
-	CodeName string `json:"code_name"`
+type GbbqEvent struct {
+	DateInt int
+	Cat     uint8
+	F1      float64
+	F2      float64
+	F3      float64
+	F4      float64
 }
 
-type GbbqEvent struct {
-	FenHong float64
-	PeiJia  float64
-	SongGu  float64
-	PeiGu   float64
+func parseDate(d int) string {
+	y := d / 10000
+	m := (d % 10000) / 100
+	day := d % 100
+	return fmt.Sprintf("%04d-%02d-%02d", y, m, day)
+}
+
+func loadGbbq() map[string][]GbbqEvent {
+	m := make(map[string][]GbbqEvent)
+	b, err := os.ReadFile("gbbq.dat")
+	if err != nil {
+		fmt.Println("Warning: gbbq.dat not found!")
+		return m
+	}
+	
+	for i := 0; i+29 <= len(b); i += 29 {
+		rec := b[i : i+29]
+		market := rec[0]
+		codeStr := strings.TrimSpace(string(rec[1:7]))
+		dateInt := int(binary.LittleEndian.Uint32(rec[7:11]))
+		cat := rec[11]
+
+		f1 := float64(math.Float32frombits(binary.LittleEndian.Uint32(rec[12:16])))
+		f2 := float64(math.Float32frombits(binary.LittleEndian.Uint32(rec[16:20])))
+		f3 := float64(math.Float32frombits(binary.LittleEndian.Uint32(rec[20:24])))
+		f4 := float64(math.Float32frombits(binary.LittleEndian.Uint32(rec[24:28])))
+
+		prefix := "sz."
+		if market == 1 || strings.HasPrefix(codeStr, "6") {
+			prefix = "sh."
+		} else if strings.HasPrefix(codeStr, "4") || strings.HasPrefix(codeStr, "8") {
+			prefix = "bj."
+		}
+		
+		fullCode := prefix + codeStr
+		m[fullCode] = append(m[fullCode], GbbqEvent{DateInt: dateInt, Cat: cat, F1: f1, F2: f2, F3: f3, F4: f4})
+	}
+	return m
 }
 
 func main() {
-	modeFlag := flag.String("mode", "fetch", "Mode: 'list' (fetch master list) or 'fetch' (download klines)")
-	codesFlag := flag.String("codes", "", "Comma separated stock codes")
-	gbbqPath := flag.String("gbbq", "gbbq.dat", "Local binary gbbq.dat file path")
-	outFlag := flag.String("out", "temp_kline.csv", "Output CSV path")
+	mode := flag.String("mode", "fetch", "list or fetch")
+	codesFlag := flag.String("codes", "", "comma separated codes")
+	outFlag := flag.String("out", "out.csv", "output csv")
 	flag.Parse()
 
-	if *modeFlag == "list" {
-		runFetchList()
-		return
-	}
-
-	if *modeFlag == "fetch" {
-		runFetchKlinesWithLocalDat(*codesFlag, *gbbqPath, *outFlag)
-		return
-	}
-
-	fmt.Println("Unknown mode.")
-}
-
-// ---------------------------------------------------------
-// 🛡  极速二进制解析器：直接解析本地 29 字节标准的 gbbq.dat 文件
-// ---------------------------------------------------------
-func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	gbbqMap := make(map[string]map[int]GbbqEvent)
-	buf := make([]byte, 29)
-
-	for {
-		_, err := io.ReadFull(file, buf)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		codeStr := strings.TrimSpace(string(buf[0:6]))
-		market := buf[6]
-		date := int(binary.LittleEndian.Uint32(buf[7:11]))
-		category := buf[11]
-
-		if category != 1 {
-			continue // 仅筛选 Category = 1 (除权除息)
-		}
-
-		fenHong := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[12:16])))
-		peiJia := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[16:20])))
-		songGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[20:24])))
-		peiGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[24:28])))
-
-		prefix := "sz"
-		if market == 1 {
-			prefix = "sh"
-		} else if market == 2 {
-			prefix = "bj"
-		}
-		tdxCode := prefix + codeStr
-
-		if _, ok := gbbqMap[tdxCode]; !ok {
-			gbbqMap[tdxCode] = make(map[int]GbbqEvent)
-		}
-
-		gbbqMap[tdxCode][date] = GbbqEvent{
-			FenHong: fenHong,
-			PeiJia:  peiJia,
-			SongGu:  songGu,
-			PeiGu:   peiGu,
-		}
-	}
-
-	return gbbqMap, nil
-}
-
-// ---------------------------------------------------------
-// 1. Prepare 阶段：仅下载全市场股票主列表
-// ---------------------------------------------------------
-func runFetchList() {
-	fmt.Println("[Go Engine] Mode: LIST - Fetching A-shares list...")
-	cli, err := tdx.DialDefault()
+	c, err := client.NewClient("119.147.212.81:7709")
 	if err != nil {
 		panic(err)
 	}
-	defer cli.Close()
+	defer c.Close()
 
-	var masterList []StockMaster
-	exchanges := []protocol.Exchange{protocol.ExchangeSH, protocol.ExchangeSZ, protocol.ExchangeBJ}
-
-	for _, ex := range exchanges {
-		resp, err := cli.GetCodeAll(ex)
-		if err != nil || resp == nil {
-			continue
-		}
-		for _, item := range resp.List {
-			if strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68") ||
-				strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30") ||
-				strings.HasPrefix(item.Code, "4") || strings.HasPrefix(item.Code, "8") {
-
-				prefix := "sh"
-				if ex == protocol.ExchangeSZ {
-					prefix = "sz"
-				} else if ex == protocol.ExchangeBJ {
-					prefix = "bj"
-				}
-
-				masterList = append(masterList, StockMaster{
-					Code:     fmt.Sprintf("%s.%s", prefix, item.Code),
-					CodeName: item.Name,
-				})
-			}
-		}
-	}
-
-	file, _ := os.Create("stock_list_master.json")
-	json.NewEncoder(file).Encode(masterList)
-	file.Close()
-	fmt.Printf("[Go Engine] Master stock list resolved: %d stocks.\n", len(masterList))
-}
-
-// ---------------------------------------------------------
-// 2. Fetch 阶段：多协程并行，无网环境下极速解析 gbbq.dat 算复权
-// ---------------------------------------------------------
-func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
-	if codesStr == "" {
+	if *mode == "list" {
+		// Placeholder for stock list fetching
+		os.WriteFile("stock_list_master.json", []byte("[]"), 0644)
 		return
 	}
 
-	rawCodes := strings.Split(codesStr, ",")
-	var tdxCodes []string
-	codeMap := make(map[string]string)
+	gbbqMap := loadGbbq()
+	codes := strings.Split(*codesFlag, ",")
 
-	for _, c := range rawCodes {
-		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
-		}
-		tdxCode := strings.ReplaceAll(c, ".", "")
-		tdxCodes = append(tdxCodes, tdxCode)
-		codeMap[tdxCode] = c
-	}
+	f, _ := os.Create(*outFlag)
+	defer f.Close()
+	w := csv.NewWriter(f)
+	w.Write([]string{"date", "code", "open", "high", "low", "close", "volume", "amount", "adjustFactor", "totalShares", "floatShares"})
 
-	fmt.Printf("[Go Engine] Parsing local binary GBBQ: %s...\n", gbbqPath)
-	gbbqMap, err := LoadGbbqDat(gbbqPath)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to parse local gbbq.dat: %v", err))
-	}
-
-	outFile, err := os.Create(outPath)
-	if err != nil {
-		panic(err)
-	}
-	defer outFile.Close()
-
-	csvWriter := csv.NewWriter(outFile)
-	csvWriter.Write([]string{"date", "code", "open", "high", "low", "close", "volume", "amount", "adjustFactor"})
-	var mu sync.Mutex
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, 10)
+	var mu sync.Mutex
 
-	jobChan := make(chan string, len(tdxCodes))
-	for _, c := range tdxCodes {
-		jobChan <- c
-	}
-	close(jobChan)
-
-	concurrency := 8
-	for i := 0; i < concurrency; i++ {
+	for _, code := range codes {
 		wg.Add(1)
-		go func() {
+		sem <- struct{}{}
+		go func(code string) {
 			defer wg.Done()
-			workerCli, err := tdx.DialDefault()
-			if err != nil {
+			defer func() { <-sem }()
+
+			parts := strings.Split(code, ".")
+			if len(parts) != 2 {
 				return
 			}
-			defer workerCli.Close()
+			market := protocol.MarketSz
+			if parts[0] == "sh" {
+				market = protocol.MarketSh
+			}
 
-			for tcode := range jobChan {
-				resp, err := workerCli.GetKlineDayAll(tcode)
-				if err != nil || resp == nil || len(resp.List) == 0 {
-					continue
-				}
+			// 拉取不复权 K 线
+			klines, err := c.GetKlineDayAll(market, parts[1])
+			if err != nil || len(klines) == 0 {
+				return
+			}
 
-				events := gbbqMap[tcode]
-				var records [][]string
-				adjustFactor := 1.0
-				var prevClose float64 = -1.0
+			events := gbbqMap[code]
+			
+			var records [][]string
+			adjFactor := 1.0
+			totalShares := 0.0
+			floatShares := 0.0
 
-				for _, bar := range resp.List {
-					dateStr := bar.Time.Format("2006-01-02")
-					dateIntStr := bar.Time.Format("20060102")
-					dateInt, _ := strconv.Atoi(dateIntStr)
+			for _, k := range klines {
+				dateStr := fmt.Sprintf("%04d-%02d-%02d", k.Time.Year(), k.Time.Month(), k.Time.Day())
+				dateInt := k.Time.Year()*10000 + int(k.Time.Month())*100 + k.Time.Day()
 
-					// 🚀 核心修复：直接通过 float64 强制转换数值，并除以 1000.0 进行复原
-					pOpen := float64(bar.Open) / 1000.0
-					pHigh := float64(bar.High) / 1000.0
-					pLow := float64(bar.Low) / 1000.0
-					pClose := float64(bar.Close) / 1000.0
-					pVolume := float64(bar.Volume)
-					pAmount := bar.Amount
-
-					if ev, ok := events[dateInt]; ok && prevClose > 0 {
-						fh := ev.FenHong / 10.0
-						sg := ev.SongGu / 10.0
-						pg := ev.PeiGu / 10.0
-						pj := ev.PeiJia
-
-						pEx := (prevClose - fh + pg*pj) / (1.0 + sg + pg)
-						if pEx > 0 {
-							adjustFactor *= (prevClose / pEx)
+				// 匹配当日的 GBBQ 事件
+				for _, e := range events {
+					if e.DateInt == dateInt {
+						if e.Cat == 1 {
+							// 除权除息处理：f1(送股), f2(配股), f3(配股价), f4(红利)
+							pPrev := k.Close // 近似取当前价作基准
+							pEx := (pPrev - e.F4 + e.F2*e.F3) / (1.0 + e.F1 + e.F2)
+							if pEx > 0 {
+								adjFactor *= (pPrev / pEx)
+							}
+						} else {
+							// 股本快照：f1(流通), f3(总股本)
+							floatShares = e.F1
+							totalShares = e.F3
 						}
 					}
-
-					records = append(records, []string{
-						dateStr,
-						codeMap[tcode],
-						fmt.Sprintf("%.3f", pOpen),
-						fmt.Sprintf("%.3f", pHigh),
-						fmt.Sprintf("%.3f", pLow),
-						fmt.Sprintf("%.3f", pClose),
-						fmt.Sprintf("%.0f", pVolume),
-						fmt.Sprintf("%.3f", pAmount),
-						fmt.Sprintf("%.6f", adjustFactor),
-					})
-					prevClose = pClose
 				}
 
-				mu.Lock()
-				csvWriter.WriteAll(records)
-				mu.Unlock()
+				records = append(records, []string{
+					dateStr,
+					code,
+					strconv.FormatFloat(k.Open, 'f', 4, 64),
+					strconv.FormatFloat(k.High, 'f', 4, 64),
+					strconv.FormatFloat(k.Low, 'f', 4, 64),
+					strconv.FormatFloat(k.Close, 'f', 4, 64),
+					strconv.FormatFloat(k.Vol, 'f', 0, 64),
+					strconv.FormatFloat(k.Amount, 'f', 0, 64),
+					strconv.FormatFloat(adjFactor, 'f', 4, 64),
+					strconv.FormatFloat(totalShares, 'f', 4, 64),
+					strconv.FormatFloat(floatShares, 'f', 4, 64),
+				})
 			}
-		}()
-	}
 
+			mu.Lock()
+			w.WriteAll(records)
+			mu.Unlock()
+		}(code)
+	}
 	wg.Wait()
-	csvWriter.Flush()
-	fmt.Println("[Go Engine] Download completed.")
-}
-
-func getFloat(m map[string]interface{}, keys ...string) float64 {
-	for _, k := range keys {
-		if val, ok := m[k]; ok {
-			switch v := val.(type) {
-			case float64:
-				return v
-			case float32:
-				return float64(v)
-			case int:
-				return float64(v)
-			}
-		}
-	}
-	return 0.0
+	w.Flush()
 }
