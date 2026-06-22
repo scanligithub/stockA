@@ -37,7 +37,7 @@ jobs:
           ./tdx_fetcher -mode=list
           ls -lh stock_list_master.json
           
-      - name: Create & Run F10 Integration Script
+      - name: Create & Run DataCenter F10 Integration Script
         run: |
           cat << 'EOF' > test_f10_integration.py
           import json
@@ -47,34 +47,98 @@ jobs:
           from concurrent.futures import ThreadPoolExecutor, as_completed
           from tqdm import tqdm
 
-          # 标准浏览器伪装，防云节点风控
           HEADERS = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
               "Referer": "https://quote.eastmoney.com/"
           }
 
-          def fetch_f10_history(tdx_item):
-              """拉取单只股票全历史财报"""
-              tdx_code = tdx_item['code']         # e.g., "sh600000"
+          REPORT_NAME = "RPT_LICO_FN_CPD" # 锁定有效物理表
+          WORKING_FILTER = None
+
+          def explore_sql_syntax(pure_code, tdx_code):
+              """🕵️ 在已确定的 CPD 表上，测试 4 种经典的东财 ANTLR 过滤语法"""
+              global WORKING_FILTER
+              
+              # 生成标准带后缀的 SECUCODE (e.g. 300481.SZ, 601600.SH)
+              suffix = "SH" if tdx_code.startswith("sh") else "SZ" if tdx_code.startswith("sz") else "BJ"
+              secucode = f"{pure_code}.{suffix}"
+              
+              # 构造四种 ANTLR 语法变体
+              filter_variants = [
+                  f'(SECURITY_CODE="{pure_code}")',    # 变体 A: 纯代码 + 双引号（最通用）
+                  f'(SECURITY_CODE={pure_code})',      # 变体 B: 纯代码 + 无引号（整型匹配）
+                  f'(SECUCODE="{secucode}")',          # 变体 C: 带后缀代码 + 双引号
+                  f'(SECUCODE={secucode})'             # 变体 D: 带后缀代码 + 无引号
+              ]
+              
+              url = "https://datacenter.eastmoney.com/api/data/v1/get"
+              print(f"\n🕵️ 针对物理表 {REPORT_NAME} 进行 SQL 语法对齐测试...")
+              
+              for flt in filter_variants:
+                  params = {
+                      "sortColumns": "REPORT_DATE",
+                      "sortTypes": "-1",
+                      "pageSize": "3",
+                      "pageNumber": "1",
+                      "reportName": REPORT_NAME,
+                      "columns": "ALL",
+                      "filter": flt,
+                      "client": "WEB"
+                  }
+                  try:
+                      res = requests.get(url, params=params, headers=HEADERS, timeout=8)
+                      data = res.json()
+                      code = data.get("code")
+                      message = data.get("message", "无")
+                      
+                      print(f"    - 测试语法: [{flt:<30}] ➔ 返回码: {code:<5} | 消息: {message}")
+                      
+                      # 只要返回 0，代表 SQL 引擎成功解析，我们拿到了正确语法！
+                      if code == 0 and data.get("result"):
+                          WORKING_FILTER = flt
+                          print(f"🎉【对齐成功】东财编译器认可的语法为: {flt}")
+                          return True
+                  except Exception as e:
+                      pass
+              return False
+
+          def fetch_f10_datacenter(tdx_item):
+              global WORKING_FILTER
+              tdx_code = tdx_item['code'].replace('.', '').lower()         
               name = tdx_item.get('code_name', '')
+              pure_code = tdx_code[2:]
               
-              # 🔄 【核心桥接】将 TDX 格式转换为东财 F10 格式
-              # sh600000 -> SH600000, sz000001 -> SZ000001, bj830839 -> BJ830839
-              em_code = tdx_code[:2].upper() + tdx_code[2:]
+              # 动态生成契合当前股票的过滤器
+              suffix = "SH" if tdx_code.startswith("sh") else "SZ" if tdx_code.startswith("sz") else "BJ"
+              secucode = f"{pure_code}.{suffix}"
               
-              url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=1&code={em_code}"
+              # 将测试成功的模板应用到当前股票
+              actual_filter = WORKING_FILTER.replace("300481.SZ", secucode).replace("300481", pure_code)
+              
+              url = "https://datacenter.eastmoney.com/api/data/v1/get"
+              params = {
+                  "sortColumns": "REPORT_DATE",
+                  "sortTypes": "-1",
+                  "pageSize": "120",
+                  "pageNumber": "1",
+                  "reportName": REPORT_NAME,
+                  "columns": "ALL",
+                  "filter": actual_filter,
+                  "client": "WEB" 
+              }
               
               try:
-                  res = requests.get(url, headers=HEADERS, timeout=10)
+                  res = requests.get(url, params=params, headers=HEADERS, timeout=10)
                   data = res.json()
-                  if data and data.get("data"):
-                      return em_code, name, data["data"], None
-                  return em_code, name, [], "接口返回无数据(可能停牌或退市)"
+                  if data and data.get("result") and data["result"].get("data"):
+                      return pure_code, name, data["result"]["data"], None
+                  err_msg = f"状态码: {data.get('code', '无')}, 消息: {data.get('message', '未知')}"
+                  return pure_code, name, [], err_msg
               except Exception as e:
-                  return em_code, name, [], str(e)
+                  return pure_code, name, [], str(e)
 
           def main():
-              print("🔍 读取 TDX 引擎生成的 stock_list_master.json...")
+              print("🔍 读取 TDX 股票列表...")
               try:
                   with open('stock_list_master.json', 'r', encoding='utf-8') as f:
                       master_list = json.load(f)
@@ -82,50 +146,82 @@ jobs:
                   print(f"❌ 读取 JSON 失败: {e}")
                   return
 
-              valid_stocks = [s for s in master_list if s['code'].startswith(('sh', 'sz', 'bj'))]
-              print(f"✅ 从 TDX 获取到 A股总数: {len(valid_stocks)}")
+              valid_stocks = []
+              for s in master_list:
+                  code = s['code'].replace('.', '').lower()
+                  if code.startswith('sh') and code[2:4] in ['60', '68']:
+                      valid_stocks.append(s)
+                  elif code.startswith('sz') and code[2:4] in ['00', '30']:
+                      valid_stocks.append(s)
+                  elif code.startswith('bj') and code[2:4] in ['43', '83', '87', '92']:
+                      valid_stocks.append(s)
+
+              print(f"✅ 有效 A股总数: {len(valid_stocks)}")
               
-              # 随机抽样 100 只作为测试集
+              # 随机抽样
               sample_size = min(100, len(valid_stocks))
               test_samples = random.sample(valid_stocks, sample_size)
-              print(f"🎯 随机抽取了 {sample_size} 只股票进行 F10 压测...\n")
+              
+              # 启动针对 300481.SZ (赛为智能) 的四维语法探测
+              sample_item = next(s for s in test_samples if s['code'].replace('.', '').lower().endswith("300481"))
+              sample_pure_code = "300481"
+              sample_tdx_code = sample_item['code']
+              
+              if not explore_sql_syntax(sample_pure_code, sample_tdx_code):
+                  print("\n❌ 语法对齐失败：四种变体均未通过。")
+                  return
+                  
+              print(f"\n🎯 锁定过滤器模板 [{WORKING_FILTER}] 开始拉取数据...")
               
               results = []
               success_count, fail_count = 0, 0
               
-              # 并发拉取
               with ThreadPoolExecutor(max_workers=10) as executor:
-                  futures = {executor.submit(fetch_f10_history, s): s for s in test_samples}
-                  for future in tqdm(as_completed(futures), total=len(test_samples), desc="拉取财报"):
-                      em_code, name, data, err = future.result()
+                  futures = {executor.submit(fetch_f10_datacenter, s): s for s in test_samples}
+                  for future in tqdm(as_completed(futures), total=len(test_samples), desc="拉取全量财报"):
+                      pure_code, name, data, err = future.result()
                       if data:
                           success_count += 1
-                          results.append({"code": em_code, "name": name, "history_len": len(data), "raw_data": data})
+                          results.append({"code": pure_code, "name": name, "history_len": len(data), "raw_data": data})
                       else:
                           fail_count += 1
-                          print(f"⚠️ 失败/跳过: {name}({em_code}) - {err}")
+                          print(f"⚠️ 失败: {name}({pure_code}) - {err}")
                           
               print("\n" + "="*60)
-              print(f"📊 F10 财报获取统计：成功 {success_count} 只 | 失败 {fail_count} 只")
+              print(f"📊 数据中心接口统计：成功 {success_count} 只 | 失败 {fail_count} 只")
               
               if success_count > 0:
-                  # 挑选出拿到财报季数最多的一只股票进行展示
                   longest = max(results, key=lambda x: x['history_len'])
                   print(f"\n🏆 财报历史最长股票: {longest['name']} ({longest['code']})，共 {longest['history_len']} 个季度！")
                   
                   df = pd.DataFrame(longest['raw_data'])
+                  print("\n🔑 接口实际返回的全量字段列名 (大写字母形式)：")
+                  print(", ".join(df.columns))
                   
-                  # 我们为了算 peTTM 和 pbMRQ，只需要这 4 个核弹级字段
-                  target_cols = ['REPORT_DATE', 'UPDATE_DATE', 'PARENTNETPROFIT', 'BPS']
-                  available_cols = [c for c in target_cols if c in df.columns]
+                  # 财报表标准映射
+                  mapping_candidates = {
+                      'REPORT_DATE': ['REPORT_DATE'],
+                      'UPDATE_DATE': ['NOTICE_DATE', 'UPDATE_DATE', 'ACTUAL_PUBLISH_DATE'],
+                      'PARENTNETPROFIT': ['PARENT_NETPROFIT', 'PARENTNETPROFIT', 'NETPROFIT'],
+                      'BPS': ['BPS_MRQ', 'BPS', 'B_BPS']
+                  }
                   
-                  print("\n🌟 核心提取字段展示 (近 5 个季度)：")
-                  print(df[available_cols].head(5).to_markdown(index=False))
+                  real_cols = {}
+                  for target, candidates in mapping_candidates.items():
+                      for cand in candidates:
+                          if cand in df.columns:
+                              real_cols[target] = cand
+                              break
+                              
+                  print(f"\n🎯 自动识别出来的对齐列名: {real_cols}")
                   
-                  print("\n💡 架构验证结论：")
-                  print("1. TDX 的股票代码已成功映射至东财 F10 接口。")
-                  print("2. 具备了 REPORT_DATE 和 UPDATE_DATE，可以完美实现 Pandas asof_merge 规避未来函数。")
-                  print("3. PARENTNETPROFIT (归母净利润) 用于算 peTTM，BPS (每股净资产) 用于算 pbMRQ。")
+                  available_cols = list(real_cols.values())
+                  if available_cols:
+                      print("\n🌟 核心提取字段展示 (最新 5 个季度)：")
+                      print(df[available_cols].head(5).to_markdown(index=False))
+                      
+                      print("\n🌟 核心提取字段展示 (远古历史底牌)：")
+                      print(df[available_cols].tail(5).to_markdown(index=False))
 
           if __name__ == "__main__":
               main()
