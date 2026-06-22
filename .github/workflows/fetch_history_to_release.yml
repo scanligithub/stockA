@@ -32,26 +32,33 @@ jobs:
           unzip -o gbbq.zip
           mv gbbq gbbq.dat
 
-      # 🌟 关键重构：删除原来难解析且不稳定的 GPCW zip 文件，改为直连 F10
+      - name: Initialize Go Module & Install Packages
+        run: |
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+
+      # 🌟 关键修改：第一步先编译 Go 引擎并运行 -mode=list，通过 TCP 建立 100% 正确的 A 股本地名单
+      - id: build-and-list
+        name: Build TDX Go Engine & Fetch Master List
+        run: |
+          go build -o tdx_fetcher scripts/tdx_fetcher.go
+          ./tdx_fetcher -mode=list
+
+      # 🌟 关键修改：第二步直接让 Python 读取本地 stock_list_master.json 并发拉取 F10 (0 网络种子开销)
       - name: 🧠 Pre-Calculate Finance Matrix via EastMoney F10 API
         run: |
           pip install requests pandas pyarrow numpy tqdm
           python scripts/build_finance_master.py
 
-      - name: Initialize Go Module
-        run: |
-          go mod init stockA || true
-          go get github.com/injoyai/tdx
-          go mod tidy
-          
+      # 🌟 第三步切割矩阵分片
       - id: set-matrix
-        name: Build Engine & Generate Matrix
+        name: Generate Parallel Chunks Matrix
         run: |
-          go build -o tdx_fetcher scripts/tdx_fetcher.go
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
-      # 🌟 将烘焙好的 finance_master.parquet 随元数据一同上链，减免 Worker 端的网络开销
+      # 🌟 将烘焙好的 finance_master.parquet 与 metadata 一同上链分发
       - name: Upload Master Metadata (List, GBBQ & Finance Master)
         uses: actions/upload-artifact@v4
         with:
