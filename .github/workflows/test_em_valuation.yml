@@ -1,4 +1,4 @@
-name: Test Akshare Valuation
+name: Test Valuation Final
 
 on:
   workflow_dispatch:
@@ -15,46 +15,63 @@ jobs:
           
       - name: Install Dependencies
         run: |
-          pip install akshare pandas numpy tabulate
+          pip install akshare pandas requests tabulate
           
       - name: Create Test Script
         run: |
-          cat << 'EOF' > test_ak.py
+          cat << 'EOF' > test_val.py
           import akshare as ak
+          import requests
           import pandas as pd
 
-          def test_fetch_valuation(code):
-              print(f"\n🚀 开始测试 akshare 个股历史估值... 目标股票: {code}")
+          def test_akshare_current(code):
+              print(f"\n[{code}] 尝试一：测试最新版 Akshare 官方估值接口...")
               try:
-                  # stock_a_indicator_lg 接口：返回该股票上市以来的全部 PE/PB 序列
-                  df = ak.stock_a_indicator_lg(symbol=code)
-                  
-                  if df.empty:
-                      print("❌ 接口返回空 DataFrame")
-                      return
-                      
-                  # 查看最后 10 天的数据
-                  recent_df = df.tail(10)
-                  print("✅ 成功获取！过去 10 天的历史估值数据：")
-                  print(recent_df.to_markdown(index=False))
-                  
-                  # 校验是否有值
-                  if recent_df['pe'].sum() > 0 and recent_df['pb'].sum() > 0:
-                      print("\n🎉 结论：Akshare 估值接口稳定可行！")
-                  else:
-                      print("\n⚠️ 结论：虽然拿到了数据，但全是 0 或空值。")
-                      
+                  # 尝试当前最新版的函数名
+                  df = ak.stock_a_indicator(symbol=code)
+                  if not df.empty:
+                      print("✅ Akshare 获取成功！数据展示：")
+                      print(df.tail(5).to_markdown(index=False))
+                      return True
               except Exception as e:
-                  print(f"❌ 请求崩溃: {e}")
+                  print(f"❌ Akshare 函数不存在或失效: {e}")
+              return False
+
+          def test_eastmoney_f10_finance(code):
+              print(f"\n[{code}] 尝试二：直捣黄龙！测试东方财富 PC 端 F10 财务底层接口...")
+              # 000001 -> SZ000001, 600519 -> SH600519
+              prefix = "SH" if code.startswith("6") else "SZ"
+              em_code = f"{prefix}{code}"
+              
+              # 东财 F10 财务分析主要指标接口 (按报告期)
+              url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=1&code={em_code}"
+              headers = {"User-Agent": "Mozilla/5.0"}
+              
+              try:
+                  res = requests.get(url, headers=headers, timeout=10)
+                  data = res.json()
+                  if data.get("data"):
+                      records = data["data"]
+                      df = pd.DataFrame(records)
+                      # 提取核心指标：REPORT_DATE(报告期), NETPROFIT(归母净利润), TOTALOPERATEREVE(总营收)
+                      if 'REPORT_DATE' in df.columns:
+                          print("✅ 东财 F10 财务数据获取成功！拿到历史真实财报：")
+                          cols = ['REPORT_DATE', 'NETPROFIT', 'BPS'] # 净利润 和 每股净资产
+                          available_cols = [c for c in cols if c in df.columns]
+                          print(df[available_cols].head(5).to_markdown(index=False))
+                          print("\n🎉 结论：我们可以直接拉取东财财报，自己算 PE TTM，不用受任何第三方气了！")
+                      else:
+                          print("⚠️ 获取到了 JSON，但字段不对。")
+              except Exception as e:
+                  print(f"❌ 东财 F10 接口请求失败: {e}")
 
           if __name__ == "__main__":
-              # 测试平安银行 (此处代码格式需符合接口要求，通常是 6 位数字如 000001)
-              test_fetch_valuation("000001")
-              
-              print("\n" + "="*50)
-              
-              # 测试贵州茅台
-              test_fetch_valuation("600519")
+              for code in ["000001", "600519"]:
+                  print("="*60)
+                  # 优先测 akshare
+                  if not test_akshare_current(code):
+                      # 失败了直接上东财 F10
+                      test_eastmoney_f10_finance(code)
           EOF
           
-          python test_ak.py
+          python test_val.py
