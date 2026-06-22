@@ -14,71 +14,43 @@ HEADERS = {
     "Referer": "https://quote.eastmoney.com/"
 }
 
-def get_all_a_shares():
-    """采用安全的分页拉取算法 (每页 1000 条)，100% 绕过大包风控拦截"""
-    print("📋 [Finance Master] 正在同步最新全量 A 股代码清单 (分页模式)...")
-    url = "https://push2.eastmoney.com/api/qt/clist/get"
+def load_stocks_from_local_json():
+    """
+    🌟 核心安全提升：0 网络请求。直接读取由 Go 引擎通过通达信极速拉取生成的本地 stock_list_master.json
+    """
+    print("📋 [Finance Master] 正在从本地 stock_list_master.json 读取 A 股种子清单...")
+    master_path = "stock_list_master.json"
     
-    stocks = []
-    page = 1
-    page_size = 1000
-    
-    while True:
-        params = {
-            "pn": page, 
-            "pz": page_size, 
-            "po": 1, 
-            "np": 1, 
-            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-            "fltt": 2, 
-            "invt": 2, 
-            "fid": "f3",
-            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
-            "fields": "f12,f13" # f12=code, f13=market
-        }
-        
-        try:
-            response = requests.get(url, params=params, headers=HEADERS, timeout=15)
-            if response.status_code != 200:
-                print(f"⚠️ 第 {page} 页拉取失败，HTTP 状态码: {response.status_code}")
-                break
-                
-            res = response.json()
-            if not res or 'data' not in res or 'diff' not in res['data']:
-                # 没有更多数据，分页结束
-                break
-                
-            diff = res['data']['diff']
-            if not diff or len(diff) == 0:
-                break
-                
-            for item in diff:
-                code = str(item['f12']).zfill(6)
-                # 完美的防错前缀算法：100% 解决北交所和创业板前缀归属问题
-                if code.startswith('6'): prefix = "SH"
-                elif code.startswith(('4', '8', '9', '2')): prefix = "BJ"
-                else: prefix = "SZ"
-                stocks.append(f"{prefix}{code}")
-                
-            # Actions 进度友好型输出
-            print(f"    [#] 已拉取第 {page} 页 | 累计标的: {len(stocks)}")
-            
-            # 如果返回的数据量小于请求页长，说明已到最后一页
-            if len(diff) < page_size:
-                break
-                
-            page += 1
-            
-        except Exception as e:
-            print(f"❌ 同步第 {page} 页异常: {e}")
-            break
-            
-    if not stocks:
-        print("❌ 严重错误: 无法获取任何个股种子，任务终止。")
+    if not os.path.exists(master_path):
+        print(f"❌ 严重错误: 本地未检测到 {master_path}。请确保工作流先运行了 Go 引擎的 -mode=list。")
         sys.exit(1)
         
-    print(f"[+] 种子库同步成功！本期共捕获 A 股有效标的: {len(stocks)} 只。")
-    return stocks
+    try:
+        with open(master_path, "r", encoding="utf-8") as f:
+            master_list = json.load(f)
+            
+        stocks = []
+        for item in master_list:
+            code = item.get("code", "") # 格式如 "sh.600519"
+            if not code or "." not in code:
+                continue
+                
+            prefix, num_code = code.split(".")
+            # 完美的防错前缀算法：100% 解决东财 F10 接口的北交所、科创板归属前缀
+            if num_code.startswith('6'): 
+                em_prefix = "SH"
+            elif num_code.startswith(('4', '8', '9', '2')): 
+                em_prefix = "BJ"
+            else: 
+                em_prefix = "SZ"
+                
+            stocks.append(f"{em_prefix}{num_code}")
+            
+        print(f"[✓] 成功载入本地 A 股种子 {len(stocks)} 只。")
+        return stocks
+    except Exception as e:
+        print(f"❌ 严重错误: 解析本地股票列表 JSON 失败: {e}")
+        sys.exit(1)
 
 def fetch_single_f10(em_code):
     """拉取单只股票全历史财报 (type=0: 包含全部季度报告期)"""
@@ -94,7 +66,9 @@ def fetch_single_f10(em_code):
 
 def main():
     start_time = datetime.datetime.now()
-    stocks = get_all_a_shares()
+    
+    # 0 网络请求，读取本地 Go 引擎下载好的股票列表
+    stocks = load_stocks_from_local_json()
     
     all_records = []
     success_count = 0
@@ -106,7 +80,6 @@ def main():
         for future in tqdm(as_completed(futures), total=len(stocks), desc="拉取F10财务"):
             em_code, data, err = future.result()
             if data:
-                # 给数据打上股票代码标记
                 for row in data:
                     row['code_raw'] = em_code
                 all_records.extend(data)
@@ -119,19 +92,14 @@ def main():
         print("❌ 严重错误: 未能抓取到任何有效的财务数据！")
         sys.exit(1)
 
-    # 转化为 DataFrame 整理
     df = pd.DataFrame(all_records)
-    
-    # 格式化代码 SH600519 -> sh.600519
     df['code'] = df['code_raw'].apply(lambda x: f"{x[:2].lower()}.{x[2:]}")
     
-    # 格式化日期与数值
     df['report_date'] = pd.to_datetime(df['REPORT_DATE'], errors='coerce')
     df['publish_date'] = pd.to_datetime(df['UPDATE_DATE'], errors='coerce')
     df['jlr'] = pd.to_numeric(df['PARENTNETPROFIT'], errors='coerce').fillna(0.0) # 归母净利润 (元)
     df['bps'] = pd.to_numeric(df['BPS'], errors='coerce').fillna(0.0)             # 每股净资产 (元)
 
-    # 剔除无效行
     df = df.dropna(subset=['report_date', 'publish_date'])
     df = df.sort_values(['code', 'report_date'])
 
@@ -141,7 +109,6 @@ def main():
     ttm_list = []
     for (code, rdate), row in df.iterrows():
         current_ytd = row['jlr']
-        # 年报 (12-31) 的 TTM 本身就是年报累计值
         if rdate.month == 12:
             ttm_list.append(current_ytd)
             continue
@@ -155,20 +122,16 @@ def main():
             if isinstance(ly_q4, pd.Series): ly_q4 = ly_q4.iloc[0]
             if isinstance(ly_sq, pd.Series): ly_sq = ly_sq.iloc[0]
             
-            # TTM = 本期累计 + (去年全年 - 去年同期累计)
             ttm = current_ytd + (ly_q4 - ly_sq)
             ttm_list.append(ttm)
         except KeyError:
-            # 缺失时填充为 0
             ttm_list.append(0.0)
             
     df['net_profit_ttm'] = ttm_list
     df = df.reset_index()
 
-    # 转换单位：东财财务数据的净利润是“元”，我们将其转换为“万元”以完美匹配市值的单位
     df['net_profit_ttm_wan'] = df['net_profit_ttm'] / 10000.0
 
-    # 整理出最纯净的估值匹配表
     final_df = df[['code', 'publish_date', 'net_profit_ttm_wan', 'bps']].copy()
     final_df = final_df.sort_values(['code', 'publish_date']).dropna(subset=['publish_date'])
 
