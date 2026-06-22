@@ -18,6 +18,12 @@ class AShareDataSchema:
     PB_MRQ = 'pbMRQ'
     ADJ_FACTOR = 'adjustFactor'
     IS_ST = 'isST'
+    
+    # 🚀 新增：股本与市值衍生指标 (单位：股 / 元)
+    TOTAL_SHARES = 'total_shares'
+    FLOAT_SHARES = 'float_shares'
+    TOTAL_MV = 'total_mv'
+    FLOAT_MV = 'float_mv'
 
     # 2. 资金流 (Money Flow)
     NET_FLOW = 'net_amount'
@@ -47,7 +53,12 @@ class AShareDataSchema:
             (AShareDataSchema.PE_TTM, pa.float32()),
             (AShareDataSchema.PB_MRQ, pa.float32()),
             (AShareDataSchema.ADJ_FACTOR, pa.float32()),
-            (AShareDataSchema.IS_ST, pa.int8())
+            (AShareDataSchema.IS_ST, pa.int8()),
+            # 🚀 严格类型约束：大型股本与万亿级市值必须使用双精度 Float64
+            (AShareDataSchema.TOTAL_SHARES, pa.float64()),
+            (AShareDataSchema.FLOAT_SHARES, pa.float64()),
+            (AShareDataSchema.TOTAL_MV, pa.float64()),
+            (AShareDataSchema.FLOAT_MV, pa.float64())
         ])
 
     @staticmethod
