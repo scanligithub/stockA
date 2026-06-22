@@ -49,18 +49,17 @@ jobs:
 
           # 标准浏览器伪装，防云节点风控
           HEADERS = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
               "Referer": "https://quote.eastmoney.com/"
           }
 
           def fetch_f10_history(tdx_item):
-              """拉取单只股票全历史财报"""
-              tdx_code = tdx_item['code']         # e.g., "sh600000"
+              # 🛡️ 修复一：去除小数点，将 "sh.600000" 转换为 "sh600000"
+              tdx_code = tdx_item['code'].replace('.', '').lower()         
               name = tdx_item.get('code_name', '')
               
-              # 🔄 【核心桥接】将 TDX 格式转换为东财 F10 格式
-              # sh600000 -> SH600000, sz000001 -> SZ000001, bj830839 -> BJ830839
-              em_code = tdx_code[:2].upper() + tdx_code[2:]
+              # 🔄 将 TDX 格式转换为东财 F10 格式 (e.g. SH600000)
+              em_code = tdx_code.upper()
               
               url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=1&code={em_code}"
               
@@ -69,7 +68,7 @@ jobs:
                   data = res.json()
                   if data and data.get("data"):
                       return em_code, name, data["data"], None
-                  return em_code, name, [], "接口返回无数据(可能停牌或退市)"
+                  return em_code, name, [], "接口返回无数据"
               except Exception as e:
                   return em_code, name, [], str(e)
 
@@ -82,13 +81,24 @@ jobs:
                   print(f"❌ 读取 JSON 失败: {e}")
                   return
 
-              valid_stocks = [s for s in master_list if s['code'].startswith(('sh', 'sz', 'bj'))]
-              print(f"✅ 从 TDX 获取到 A股总数: {len(valid_stocks)}")
+              valid_stocks = []
+              for s in master_list:
+                  # 🛡️ 修复二：严格 A股分类过滤器，只允许真正的上市公司进入列表
+                  # 自动剥离板块概念指数（88xxxx）、可转债（11xxxx）、基金（51xxxx）和大盘指数
+                  code = s['code'].replace('.', '').lower()
+                  if code.startswith('sh') and code[2:4] in ['60', '68']:
+                      valid_stocks.append(s)
+                  elif code.startswith('sz') and code[2:4] in ['00', '30']:
+                      valid_stocks.append(s)
+                  elif code.startswith('bj') and code[2:4] in ['43', '83', '87', '92']:
+                      valid_stocks.append(s)
+
+              print(f"✅ 经过严格清洗，有效纯 A股股票总数: {len(valid_stocks)}")
               
               # 随机抽样 100 只作为测试集
               sample_size = min(100, len(valid_stocks))
               test_samples = random.sample(valid_stocks, sample_size)
-              print(f"🎯 随机抽取了 {sample_size} 只股票进行 F10 压测...\n")
+              print(f"🎯 随机抽取了 {sample_size} 只【真实股票】进行 F10 压测...\n")
               
               results = []
               success_count, fail_count = 0, 0
@@ -103,7 +113,7 @@ jobs:
                           results.append({"code": em_code, "name": name, "history_len": len(data), "raw_data": data})
                       else:
                           fail_count += 1
-                          print(f"⚠️ 失败/跳过: {name}({em_code}) - {err}")
+                          print(f"⚠️ 失败: {name}({em_code}) - {err}")
                           
               print("\n" + "="*60)
               print(f"📊 F10 财报获取统计：成功 {success_count} 只 | 失败 {fail_count} 只")
@@ -115,17 +125,12 @@ jobs:
                   
                   df = pd.DataFrame(longest['raw_data'])
                   
-                  # 我们为了算 peTTM 和 pbMRQ，只需要这 4 个核弹级字段
+                  # 提取 peTTM 和 pbMRQ 所需的 4 个核心基本面字段
                   target_cols = ['REPORT_DATE', 'UPDATE_DATE', 'PARENTNETPROFIT', 'BPS']
                   available_cols = [c for c in target_cols if c in df.columns]
                   
                   print("\n🌟 核心提取字段展示 (近 5 个季度)：")
                   print(df[available_cols].head(5).to_markdown(index=False))
-                  
-                  print("\n💡 架构验证结论：")
-                  print("1. TDX 的股票代码已成功映射至东财 F10 接口。")
-                  print("2. 具备了 REPORT_DATE 和 UPDATE_DATE，可以完美实现 Pandas asof_merge 规避未来函数。")
-                  print("3. PARENTNETPROFIT (归母净利润) 用于算 peTTM，BPS (每股净资产) 用于算 pbMRQ。")
 
           if __name__ == "__main__":
               main()
