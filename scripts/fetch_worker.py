@@ -91,8 +91,11 @@ def main():
             df_k_all['date'] = df_k_all['date_dt'].dt.strftime('%Y-%m-%d')
             df_k_all = df_k_all.drop(columns=['date_dt'])
 
-            # 强制将从 CSV 读取的价格、数量和复权因子列转换为 float 数值类型
-            num_cols = ['open', 'high', 'low', 'close', 'volume', 'amount', 'adjustFactor']
+            # 🚀 扩容：强转所有新引入的股本市值数值列为 numeric 浮点数，确保没有字符串混入
+            num_cols = [
+                'open', 'high', 'low', 'close', 'volume', 'amount', 'adjustFactor',
+                'turn', 'total_shares', 'float_shares', 'total_mv', 'float_mv'
+            ]
             for col in num_cols:
                 if col in df_k_all.columns:
                     df_k_all[col] = pd.to_numeric(df_k_all[col], errors='coerce')
@@ -105,8 +108,7 @@ def main():
             df_k_all['pctChg'] = df_k_all.groupby('code')['close'].pct_change() * 100
             df_k_all['pctChg'] = df_k_all['pctChg'].fillna(0.0)
             
-            # 填充缺失指标
-            df_k_all['turn'] = 0.0
+            # 🚀 降维占位：peTTM 与 pbMRQ 属于基本面，留在 finalize 阶段通过 DuckDB 结合东财财报全量 ASOF 注入
             df_k_all['peTTM'] = 0.0
             df_k_all['pbMRQ'] = 0.0
             
