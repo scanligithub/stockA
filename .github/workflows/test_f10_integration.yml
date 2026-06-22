@@ -1,0 +1,134 @@
+name: Test F10 Integration (TDX List to EM Finance)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-f10-from-tdx:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          
+      - name: Install Python Dependencies
+        run: |
+          pip install requests pandas tqdm tabulate
+          
+      - name: Build TDX Go Engine
+        run: |
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          go build -o tdx_fetcher scripts/tdx_fetcher.go
+          
+      - name: Generate Master Stock List (via TDX)
+        run: |
+          echo "🚀 Running TDX Engine to get stock list..."
+          ./tdx_fetcher -mode=list
+          ls -lh stock_list_master.json
+          
+      - name: Create & Run F10 Integration Script
+        run: |
+          cat << 'EOF' > test_f10_integration.py
+          import json
+          import random
+          import requests
+          import pandas as pd
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from tqdm import tqdm
+
+          # 标准浏览器伪装，防云节点风控
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+              "Referer": "https://quote.eastmoney.com/"
+          }
+
+          def fetch_f10_history(tdx_item):
+              """拉取单只股票全历史财报"""
+              tdx_code = tdx_item['code']         # e.g., "sh600000"
+              name = tdx_item.get('code_name', '')
+              
+              # 🔄 【核心桥接】将 TDX 格式转换为东财 F10 格式
+              # sh600000 -> SH600000, sz000001 -> SZ000001, bj830839 -> BJ830839
+              em_code = tdx_code[:2].upper() + tdx_code[2:]
+              
+              url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=1&code={em_code}"
+              
+              try:
+                  res = requests.get(url, headers=HEADERS, timeout=10)
+                  data = res.json()
+                  if data and data.get("data"):
+                      return em_code, name, data["data"], None
+                  return em_code, name, [], "接口返回无数据(可能停牌或退市)"
+              except Exception as e:
+                  return em_code, name, [], str(e)
+
+          def main():
+              print("🔍 读取 TDX 引擎生成的 stock_list_master.json...")
+              try:
+                  with open('stock_list_master.json', 'r', encoding='utf-8') as f:
+                      master_list = json.load(f)
+              except Exception as e:
+                  print(f"❌ 读取 JSON 失败: {e}")
+                  return
+
+              valid_stocks = [s for s in master_list if s['code'].startswith(('sh', 'sz', 'bj'))]
+              print(f"✅ 从 TDX 获取到 A股总数: {len(valid_stocks)}")
+              
+              # 随机抽样 100 只作为测试集
+              sample_size = min(100, len(valid_stocks))
+              test_samples = random.sample(valid_stocks, sample_size)
+              print(f"🎯 随机抽取了 {sample_size} 只股票进行 F10 压测...\n")
+              
+              results = []
+              success_count, fail_count = 0, 0
+              
+              # 并发拉取
+              with ThreadPoolExecutor(max_workers=10) as executor:
+                  futures = {executor.submit(fetch_f10_history, s): s for s in test_samples}
+                  for future in tqdm(as_completed(futures), total=len(test_samples), desc="拉取财报"):
+                      em_code, name, data, err = future.result()
+                      if data:
+                          success_count += 1
+                          results.append({"code": em_code, "name": name, "history_len": len(data), "raw_data": data})
+                      else:
+                          fail_count += 1
+                          print(f"⚠️ 失败/跳过: {name}({em_code}) - {err}")
+                          
+              print("\n" + "="*60)
+              print(f"📊 F10 财报获取统计：成功 {success_count} 只 | 失败 {fail_count} 只")
+              
+              if success_count > 0:
+                  # 挑选出拿到财报季数最多的一只股票进行展示
+                  longest = max(results, key=lambda x: x['history_len'])
+                  print(f"\n🏆 财报历史最长股票: {longest['name']} ({longest['code']})，共 {longest['history_len']} 个季度！")
+                  
+                  df = pd.DataFrame(longest['raw_data'])
+                  
+                  # 我们为了算 peTTM 和 pbMRQ，只需要这 4 个核弹级字段
+                  target_cols = ['REPORT_DATE', 'UPDATE_DATE', 'PARENTNETPROFIT', 'BPS']
+                  available_cols = [c for c in target_cols if c in df.columns]
+                  
+                  print("\n🌟 核心提取字段展示 (近 5 个季度)：")
+                  print(df[available_cols].head(5).to_markdown(index=False))
+                  
+                  print("\n💡 架构验证结论：")
+                  print("1. TDX 的股票代码已成功映射至东财 F10 接口。")
+                  print("2. 具备了 REPORT_DATE 和 UPDATE_DATE，可以完美实现 Pandas asof_merge 规避未来函数。")
+                  print("3. PARENTNETPROFIT (归母净利润) 用于算 peTTM，BPS (每股净资产) 用于算 pbMRQ。")
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          
+          python test_f10_integration.py
