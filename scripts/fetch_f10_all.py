@@ -112,12 +112,12 @@ def fetch_f10_datacenter_with_retry(tdx_item):
     actual_filter = WORKING_FILTER.replace("PROBE_CODE", pure_code)
     url = "https://datacenter.eastmoney.com/api/data/v1/get"
     params = {
-        "sortColumns": "REPORTDATE", // 🛡️ 使用紧凑的 REPORTDATE 字段进行严格的时间正序排列
-        "sortTypes": "1",           // 1代表升序（从小到大，1995-2026）
-        "pageSize": "150",          // 支持单股 37 年全历史季度
+        "sortColumns": "REPORTDATE", # 🛡️ 使用紧凑的 REPORTDATE 字段进行严格的时间正序排列
+        "sortTypes": "1",           # 1代表升序（从小到大，1995-2026）
+        "pageSize": "150",          # 支持单股 37 年全历史季度
         "pageNumber": "1",
         "reportName": REPORT_NAME,
-        "columns": "ALL",           // 🌟 核心：拉取 37 个全量物理列，绝不遗漏
+        "columns": "ALL",           # 🌟 核心：拉取 37 个全量物理列，绝不遗漏
         "filter": actual_filter,
         "client": "WEB" 
     }
