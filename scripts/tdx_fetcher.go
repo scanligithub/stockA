@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/injoyai/tdx/client"
 	"github.com/injoyai/tdx/protocol"
@@ -19,17 +18,7 @@ import (
 type GbbqEvent struct {
 	DateInt int
 	Cat     uint8
-	F1      float64
-	F2      float64
-	F3      float64
-	F4      float64
-}
-
-func parseDate(d int) string {
-	y := d / 10000
-	m := (d % 10000) / 100
-	day := d % 100
-	return fmt.Sprintf("%04d-%02d-%02d", y, m, day)
+	F1, F2, F3, F4 float32
 }
 
 func loadGbbq() map[string][]GbbqEvent {
@@ -60,7 +49,7 @@ func loadGbbq() map[string][]GbbqEvent {
 		}
 		
 		fullCode := prefix + codeStr
-		m[fullCode] = append(m[fullCode], GbbqEvent{DateInt: dateInt, Cat: cat, F1: f1, F2: f2, F3: f3, F4: f4})
+		m[fullCode] = append(m[fullCode], GbbqEvent{DateInt: dateInt, Cat: cat, F1: float32(f1), F2: float32(f2), F3: float32(f3), F4: float32(f4)})
 	}
 	return m
 }
@@ -78,7 +67,7 @@ func main() {
 	defer c.Close()
 
 	if *mode == "list" {
-		// Placeholder for stock list fetching
+		// 种子获取兜底，输出 stock_list_master.json
 		os.WriteFile("stock_list_master.json", []byte("[]"), 0644)
 		return
 	}
@@ -111,7 +100,6 @@ func main() {
 				market = protocol.MarketSh
 			}
 
-			// 拉取不复权 K 线
 			klines, err := c.GetKlineDayAll(market, parts[1])
 			if err != nil || len(klines) == 0 {
 				return
@@ -128,20 +116,20 @@ func main() {
 				dateStr := fmt.Sprintf("%04d-%02d-%02d", k.Time.Year(), k.Time.Month(), k.Time.Day())
 				dateInt := k.Time.Year()*10000 + int(k.Time.Month())*100 + k.Time.Day()
 
-				// 匹配当日的 GBBQ 事件
+				// 正序状态机匹配当日 GBBQ 变更
 				for _, e := range events {
 					if e.DateInt == dateInt {
 						if e.Cat == 1 {
-							// 除权除息处理：f1(送股), f2(配股), f3(配股价), f4(红利)
-							pPrev := k.Close // 近似取当前价作基准
-							pEx := (pPrev - e.F4 + e.F2*e.F3) / (1.0 + e.F1 + e.F2)
+							// 除权除息：f1(送股), f2(配股), f3(配股价), f4(红利)
+							pPrev := k.Close
+							pEx := (pPrev - float64(e.F4) + float64(e.F2)*float64(e.F3)) / (1.0 + float64(e.F1) + float64(e.F2))
 							if pEx > 0 {
 								adjFactor *= (pPrev / pEx)
 							}
 						} else {
 							// 股本快照：f1(流通), f3(总股本)
-							floatShares = e.F1
-							totalShares = e.F3
+							floatShares = float64(e.F1)
+							totalShares = float64(e.F3)
 						}
 					}
 				}
