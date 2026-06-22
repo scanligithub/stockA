@@ -81,17 +81,17 @@ func main() {
 	}
 	defer c.Close()
 
-	// 🌟 修复：使用 GetStockAll 获取含有 Code 与 Name 的结构体
+	// 🌟 1. 列表模式：使用 GetStockCodeAll 并安全转型
 	if *mode == "list" {
-		fmt.Println("📡 Go Engine: 正在通过通达信极速同步全量 A 股列表及中文简称...")
-		stocks, err := c.GetStockAll()
+		fmt.Println("📡 Go Engine: 正在通过通达信极速同步全量 A 股种子列表...")
+		stocks, err := c.GetStockCodeAll()
 		if err != nil {
 			panic(err)
 		}
 
 		var masterList []StockInfo
 		for _, s := range stocks {
-			codeStr := strings.TrimSpace(s.Code)
+			codeStr := strings.TrimSpace(s)
 			if len(codeStr) != 6 {
 				continue
 			}
@@ -105,7 +105,7 @@ func main() {
 			
 			masterList = append(masterList, StockInfo{
 				Code:     prefix + codeStr,
-				CodeName: s.Name,
+				CodeName: "", // 极简降维种子，ST 识别交由 Python 稳健处理
 			})
 		}
 
@@ -148,13 +148,11 @@ func main() {
 			
 			tdxCode := parts[0] + parts[1]
 
-			// 获取包装结构体 KlineResp
 			resp, err := c.GetKlineDayAll(tdxCode)
 			if err != nil || resp == nil || len(resp.List) == 0 {
 				return
 			}
 
-			// 🌟 修复：提取真实的 K 线切片 List 进行后续处理
 			klines := resp.List
 			events := gbbqMap[code]
 			
@@ -167,10 +165,12 @@ func main() {
 				dateStr := fmt.Sprintf("%04d-%02d-%02d", k.Time.Year(), k.Time.Month(), k.Time.Day())
 				dateInt := k.Time.Year()*10000 + int(k.Time.Month())*100 + k.Time.Day()
 
+				// 🌟 修复：通过 k.Close.Float() 将 protocol.Price 转换为 float64 进行后续除权运算
+				pPrev := k.Close.Float()
+
 				for _, e := range events {
 					if e.DateInt == dateInt {
 						if e.Cat == 1 {
-							pPrev := k.Close
 							pEx := (pPrev - e.F4 + e.F2*e.F3) / (1.0 + e.F1 + e.F2)
 							if pEx > 0 {
 								adjFactor *= (pPrev / pEx)
@@ -182,15 +182,16 @@ func main() {
 					}
 				}
 
+				// 🌟 修复：对所有 Price 类型字段显式调用 .Float() 转换，对 Volume 执行原生类型强转
 				records = append(records, []string{
 					dateStr,
 					code,
-					strconv.FormatFloat(k.Open, 'f', 4, 64),
-					strconv.FormatFloat(k.High, 'f', 4, 64),
-					strconv.FormatFloat(k.Low, 'f', 4, 64),
-					strconv.FormatFloat(k.Close, 'f', 4, 64),
-					strconv.FormatFloat(k.Volume, 'f', 0, 64),
-					strconv.FormatFloat(k.Amount, 'f', 0, 64),
+					strconv.FormatFloat(k.Open.Float(), 'f', 4, 64),
+					strconv.FormatFloat(k.High.Float(), 'f', 4, 64),
+					strconv.FormatFloat(k.Low.Float(), 'f', 4, 64),
+					strconv.FormatFloat(k.Close.Float(), 'f', 4, 64),
+					strconv.FormatFloat(float64(k.Volume), 'f', 0, 64),
+					strconv.FormatFloat(k.Amount.Float(), 'f', 0, 64),
 					strconv.FormatFloat(adjFactor, 'f', 4, 64),
 					strconv.FormatFloat(totalShares, 'f', 4, 64),
 					strconv.FormatFloat(floatShares, 'f', 4, 64),
