@@ -1,0 +1,113 @@
+name: Test EastMoney Financial API
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run test
+        run: |
+          python << 'PY'
+          import json
+          import requests
+
+          url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+
+          params = {
+              # 请替换为你已经验证成功的 reportName
+              "reportName": "RPT_LICO_FN_CPD",
+
+              # 建议先使用 ALL，如果失败可改为具体字段
+              "columns": "ALL",
+
+              # 请根据你的探针结果调整 filter
+              # 例如：
+              # '(SECURITY_CODE="300481")'
+              "filter": '(SECURITY_CODE="300481")',
+
+              "sortColumns": "REPORT_DATE",
+              "sortTypes": "-1",
+
+              # 测试时可先设小一点
+              "pageNumber": "1",
+              "pageSize": "5",
+
+              "source": "WEB",
+              "client": "WEB"
+          }
+
+          headers = {
+              "User-Agent": (
+                  "Mozilla/5.0 "
+                  "(Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) "
+                  "Chrome/137.0 Safari/537.36"
+              ),
+              "Referer": "https://data.eastmoney.com/",
+              "Accept": "application/json"
+          }
+
+          print("Request params:")
+          print(json.dumps(params, ensure_ascii=False, indent=2))
+
+          r = requests.get(
+              url,
+              params=params,
+              headers=headers,
+              timeout=30,
+          )
+
+          print("HTTP Status:", r.status_code)
+          print()
+
+          try:
+              obj = r.json()
+          except Exception:
+              print(r.text[:5000])
+              raise
+
+          print("Top-level keys:")
+          print(list(obj.keys()))
+
+          result = obj.get("result")
+
+          if result:
+              print()
+              print("Result keys:")
+              print(list(result.keys()))
+
+              data = result.get("data") or []
+
+              print()
+              print("Rows returned:", len(data))
+
+              if data:
+                  print()
+                  print("Columns discovered:")
+                  print(sorted(data[0].keys()))
+
+                  print()
+                  print("First row:")
+                  print(json.dumps(data[0], ensure_ascii=False, indent=2))
+          else:
+              print()
+              print("No result field.")
+              print(json.dumps(obj, ensure_ascii=False, indent=2))
+          PY
