@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"encoding/csv"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"math"
@@ -13,6 +14,11 @@ import (
 
 	"github.com/injoyai/tdx"
 )
+
+type StockInfo struct {
+	Code     string `json:"code"`
+	CodeName string `json:"code_name"`
+}
 
 type GbbqEvent struct {
 	DateInt int
@@ -69,18 +75,55 @@ func main() {
 	outFlag := flag.String("out", "out.csv", "output csv")
 	flag.Parse()
 
-	// 🌟 修复：直接使用 tdx 根包导出的 DialDefault 建立最优连接
 	c, err := tdx.DialDefault()
 	if err != nil {
 		panic(err)
 	}
 	defer c.Close()
 
+	// 🌟 1. 列表模式：利用通达信极速、免风控拉取 A 股种子代码，无缝生成 stock_list_master.json
 	if *mode == "list" {
-		os.WriteFile("stock_list_master.json", []byte("[]"), 0644)
+		fmt.Println("📡 Go Engine: 正在通过通达信 TCP 节点同步全量 A 股列表...")
+		stocks, err := c.GetStockCodeAll()
+		if err != nil {
+			panic(err)
+		}
+
+		var masterList []StockInfo
+		for _, s := range stocks {
+			codeStr := strings.TrimSpace(s.Code)
+			// 过滤非 A 股垃圾数据
+			if len(codeStr) != 6 {
+				continue
+			}
+
+			prefix := "sz."
+			if strings.HasPrefix(codeStr, "6") {
+				prefix = "sh."
+			} else if strings.HasPrefix(codeStr, "4") || strings.HasPrefix(codeStr, "8") || strings.HasPrefix(codeStr, "9") || strings.HasPrefix(codeStr, "2") {
+				prefix = "bj."
+			}
+			
+			masterList = append(masterList, StockInfo{
+				Code:     prefix + codeStr,
+				CodeName: s.Name,
+			})
+		}
+
+		jsonBytes, err := json.MarshalIndent(masterList, "", "  ")
+		if err != nil {
+			panic(err)
+		}
+
+		err = os.WriteFile("stock_list_master.json", jsonBytes, 0644)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Printf("✅ Go Engine: 股票列表同步成功！共保存 %d 只 A 股到 stock_list_master.json\n", len(masterList))
 		return
 	}
 
+	// 🌟 2. 抓取模式
 	gbbqMap := loadGbbq()
 	codes := strings.Split(*codesFlag, ",")
 
@@ -105,10 +148,8 @@ func main() {
 				return
 			}
 			
-			// 转换代码格式 sh.600519 -> sh600519，契合通达信标准传参
 			tdxCode := parts[0] + parts[1]
 
-			// 🌟 修复：直接调用根包客户端的 GetKlineDayAll
 			klines, err := c.GetKlineDayAll(tdxCode)
 			if err != nil || len(klines) == 0 {
 				return
@@ -125,18 +166,15 @@ func main() {
 				dateStr := fmt.Sprintf("%04d-%02d-%02d", k.Time.Year(), k.Time.Month(), k.Time.Day())
 				dateInt := k.Time.Year()*10000 + int(k.Time.Month())*100 + k.Time.Day()
 
-				// 股本时间轴正序对齐状态机
 				for _, e := range events {
 					if e.DateInt == dateInt {
 						if e.Cat == 1 {
-							// 除权除息
 							pPrev := k.Close
 							pEx := (pPrev - e.F4 + e.F2*e.F3) / (1.0 + e.F1 + e.F2)
 							if pEx > 0 {
 								adjFactor *= (pPrev / pEx)
 							}
 						} else {
-							// 股本快照
 							floatShares = e.F1
 							totalShares = e.F3
 						}
