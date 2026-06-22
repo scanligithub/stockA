@@ -24,7 +24,7 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
-      - name: 🌐 Download Official GBBQ zip
+      - name: 🌐 Download Official GBBQ zip (HTTP Mode)
         run: |
           set -euxo pipefail
           URL="http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
@@ -32,18 +32,11 @@ jobs:
           unzip -o gbbq.zip
           mv gbbq gbbq.dat
 
-      - name: 📥 Download Full History GPCW Zips
-        env:
-          START_YEAR: "2005"
+      # 🌟 关键重构：删除原来难解析且不稳定的 GPCW zip 文件，改为直连 F10
+      - name: 🧠 Pre-Calculate Finance Matrix via EastMoney F10 API
         run: |
-          pip install requests
-          python scripts/download_gpcw.py
-
-      # 🌟 关键修改：在这里增加 Python 环境依赖并执行预处理
-      - name: 🧠 Pre-Calculate Finance Matrix (TTM & AsOf Prep)
-        run: |
-          pip install pytdx pandas pyarrow numpy
-          python scripts/parse_gpcw.py
+          pip install requests pandas pyarrow numpy tqdm
+          python scripts/build_finance_master.py
 
       - name: Initialize Go Module
         run: |
@@ -58,8 +51,8 @@ jobs:
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
-      # 🌟 关键修改：将提取出的高密度 finance_master 塞入发给 Worker 的资源包中
-      - name: Upload Master Metadata
+      # 🌟 将烘焙好的 finance_master.parquet 随元数据一同上链，减免 Worker 端的网络开销
+      - name: Upload Master Metadata (List, GBBQ & Finance Master)
         uses: actions/upload-artifact@v4
         with:
           name: master-metadata
