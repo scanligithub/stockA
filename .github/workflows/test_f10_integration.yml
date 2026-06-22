@@ -55,11 +55,8 @@ jobs:
           def fetch_f10_datacenter(tdx_item):
               tdx_code = tdx_item['code'].replace('.', '').lower()         
               name = tdx_item.get('code_name', '')
-              
-              # 提取 6 位纯数字代码
               pure_code = tdx_code[2:]
               
-              # 🌟 切换为官方数据中心列式接口，设置 pageSize=120 确保拉满 20 年全历史！
               url = "https://datacenter.eastmoney.com/api/data/v1/get"
               params = {
                   "sortColumns": "REPORT_DATE",
@@ -68,7 +65,10 @@ jobs:
                   "pageNumber": "1",
                   "reportName": "RPT_F10_FN_MAINOPINDEX",
                   "columns": "ALL",
-                  "filter": f'(SECURITY_CODE="{pure_code}")'
+                  # 🛡️ 修复：改用单引号保证 URL 编码兼容性
+                  "filter": f"(SECURITY_CODE='{pure_code}')",
+                  # 🛡️ 修复：增加官方数据中心必填的终端标识别（client）
+                  "client": "WEB" 
               }
               
               try:
@@ -76,7 +76,12 @@ jobs:
                   data = res.json()
                   if data and data.get("result") and data["result"].get("data"):
                       return pure_code, name, data["result"]["data"], None
-                  return pure_code, name, [], "接口返回无数据"
+                  
+                  # 📊 诊断曝光：如果接口报错，把错误信息往上传
+                  err_msg = f"状态码: {data.get('code', '无')}, 消息: {data.get('message', '未知')}"
+                  if not data.get("result"):
+                      err_msg += " (result字段为空)"
+                  return pure_code, name, [], err_msg
               except Exception as e:
                   return pure_code, name, [], str(e)
 
@@ -92,7 +97,6 @@ jobs:
               valid_stocks = []
               for s in master_list:
                   code = s['code'].replace('.', '').lower()
-                  # 严格 A 股过滤
                   if code.startswith('sh') and code[2:4] in ['60', '68']:
                       valid_stocks.append(s)
                   elif code.startswith('sz') and code[2:4] in ['00', '30']:
@@ -118,6 +122,7 @@ jobs:
                           results.append({"code": pure_code, "name": name, "history_len": len(data), "raw_data": data})
                       else:
                           fail_count += 1
+                          # 打印最真实的排查日志
                           print(f"⚠️ 失败: {name}({pure_code}) - {err}")
                           
               print("\n" + "="*60)
@@ -128,16 +133,12 @@ jobs:
                   print(f"\n🏆 财报历史最长股票: {longest['name']} ({longest['code']})，共 {longest['history_len']} 个季度！")
                   
                   df = pd.DataFrame(longest['raw_data'])
-                  
-                  # 数据中心返回的标准大写英文字段
                   target_cols = ['REPORT_DATE', 'NOTICE_DATE', 'PARENT_NETPROFIT', 'BPS']
                   available_cols = [c for c in target_cols if c in df.columns]
                   
-                  # 打印最新 5 个季度
                   print("\n🌟 核心提取字段展示 (近 5 个季度)：")
                   print(df[available_cols].head(5).to_markdown(index=False))
                   
-                  # 打印最远古的 5 个季度
                   print("\n🌟 核心提取字段展示 (远古历史底牌)：")
                   print(df[available_cols].tail(5).to_markdown(index=False))
 
