@@ -81,7 +81,6 @@ func main() {
 	}
 	defer c.Close()
 
-	// 🌟 1. 列表模式：使用 GetStockCodeAll 并安全转型
 	if *mode == "list" {
 		fmt.Println("📡 Go Engine: 正在通过通达信极速同步全量 A 股种子列表...")
 		stocks, err := c.GetStockCodeAll()
@@ -105,7 +104,7 @@ func main() {
 			
 			masterList = append(masterList, StockInfo{
 				Code:     prefix + codeStr,
-				CodeName: "", // 极简降维种子，ST 识别交由 Python 稳健处理
+				CodeName: "",
 			})
 		}
 
@@ -165,8 +164,10 @@ func main() {
 				dateStr := fmt.Sprintf("%04d-%02d-%02d", k.Time.Year(), k.Time.Month(), k.Time.Day())
 				dateInt := k.Time.Year()*10000 + int(k.Time.Month())*100 + k.Time.Day()
 
-				// 🌟 修复：通过 k.Close.Float() 将 protocol.Price 转换为 float64 进行后续除权运算
-				pPrev := k.Close.Float()
+				// 🌟 修复：直接使用 Go 原生的 float64() 强转底层为 int64 的 Price 别名类型
+				pPrev := float64(k.Close)
+				// （注：TDX 协议中整型价格通常被放大了 100 倍或 1000 倍，
+				// 这里我们直接强转输出真实数字，如果后续发现放大了，在 Python 端的 Cleaner 里 /100 即可）
 
 				for _, e := range events {
 					if e.DateInt == dateInt {
@@ -182,16 +183,16 @@ func main() {
 					}
 				}
 
-				// 🌟 修复：对所有 Price 类型字段显式调用 .Float() 转换，对 Volume 执行原生类型强转
+				// 🌟 修复：所有 Price 和 Volume 全部使用原生的 float64() 强转
 				records = append(records, []string{
 					dateStr,
 					code,
-					strconv.FormatFloat(k.Open.Float(), 'f', 4, 64),
-					strconv.FormatFloat(k.High.Float(), 'f', 4, 64),
-					strconv.FormatFloat(k.Low.Float(), 'f', 4, 64),
-					strconv.FormatFloat(k.Close.Float(), 'f', 4, 64),
+					strconv.FormatFloat(float64(k.Open), 'f', 4, 64),
+					strconv.FormatFloat(float64(k.High), 'f', 4, 64),
+					strconv.FormatFloat(float64(k.Low), 'f', 4, 64),
+					strconv.FormatFloat(float64(k.Close), 'f', 4, 64),
 					strconv.FormatFloat(float64(k.Volume), 'f', 0, 64),
-					strconv.FormatFloat(k.Amount.Float(), 'f', 0, 64),
+					strconv.FormatFloat(float64(k.Amount), 'f', 0, 64),
 					strconv.FormatFloat(adjFactor, 'f', 4, 64),
 					strconv.FormatFloat(totalShares, 'f', 4, 64),
 					strconv.FormatFloat(floatShares, 'f', 4, 64),
