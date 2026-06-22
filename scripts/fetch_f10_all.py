@@ -112,12 +112,12 @@ def fetch_f10_datacenter_with_retry(tdx_item):
     actual_filter = WORKING_FILTER.replace("PROBE_CODE", pure_code)
     url = "https://datacenter.eastmoney.com/api/data/v1/get"
     params = {
-        "sortColumns": "REPORTDATE", # 🛡️ 使用紧凑的 REPORTDATE 字段进行严格的时间正序排列
-        "sortTypes": "1",           # 1代表升序（从小到大，1995-2026）
-        "pageSize": "150",          # 支持单股 37 年全历史季度
+        "sortColumns": "REPORTDATE", // 🛡️ 使用紧凑的 REPORTDATE 字段进行严格的时间正序排列
+        "sortTypes": "1",           // 1代表升序（从小到大，1995-2026）
+        "pageSize": "150",          // 支持单股 37 年全历史季度
         "pageNumber": "1",
         "reportName": REPORT_NAME,
-        "columns": "ALL",           # 🌟 核心：拉取 37 个全量物理列，绝不遗漏
+        "columns": "ALL",           // 🌟 核心：拉取 37 个全量物理列，绝不遗漏
         "filter": actual_filter,
         "client": "WEB" 
     }
@@ -244,7 +244,7 @@ def main():
         
         # 强制约束 Polars 的物理 Schema 列类型，保证对齐一致性
         type_constraints = {
-            "code": pl.Utf8, "name": pl.Utf8, "trade_market_code": pl.Int32, "trade_market": pl.Utf8,
+            "code": pl.Utf8, "name": pl.Utf8, "trade_market_code": pl.Int64, "trade_market": pl.Utf8, # 🚀 升级为 pl.Int64 承载 11 位百亿级大市场编码
             "security_type_code": pl.Utf8, "security_type": pl.Utf8, "update_date": pl.Utf8, "report_date": pl.Utf8,
             "basic_eps": pl.Float64, "deduct_basic_eps": pl.Float64, "total_operate_income": pl.Float64,
             "parent_netprofit": pl.Float64, "weightavg_roe": pl.Float64, "ystz": pl.Float64, "sjltz": pl.Float64,
