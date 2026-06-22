@@ -52,22 +52,30 @@ jobs:
               "Referer": "https://quote.eastmoney.com/"
           }
 
-          # 全局探测变量
           WORKING_REPORT_NAME = None
 
           def explore_working_report(pure_code):
-              """动态探测哪一个物理表是有效的"""
+              """🕵️ 终极多重探针，打印出每一个表的所有错误细节"""
               global WORKING_REPORT_NAME
-              potential_reports = ["RPT_F10_FN_ZYZB", "RPT_LICO_FN_CPD"]
+              
+              # 行业内东财数据中心最常见的 5 大核心财务物理表
+              potential_reports = [
+                  "RPT_F10_FN_ZYZB",           # 主要财务指标
+                  "RPT_LICO_FN_CPD",           # 业绩快报
+                  "RPT_F10_FN_LICO_MAININDEX",  # 备用主要指标
+                  "RPT_LICO_FN_REPORT",        # 季报基础表
+                  "RPT_F10_FN_MAININDEX"       # 主要指标变体
+              ]
               
               url = "https://datacenter.eastmoney.com/api/data/v1/get"
-              print(f"🕵️ 正在对样本 {pure_code} 进行物理表名探测...")
+              print(f"\n🕵️ 开始对样本 {pure_code} 执行全量反射诊断...")
               
+              any_success = False
               for report_name in potential_reports:
                   params = {
                       "sortColumns": "REPORT_DATE",
                       "sortTypes": "-1",
-                      "pageSize": "5",
+                      "pageSize": "3",
                       "pageNumber": "1",
                       "reportName": report_name,
                       "columns": "ALL",
@@ -77,43 +85,23 @@ jobs:
                   try:
                       res = requests.get(url, params=params, headers=HEADERS, timeout=8)
                       data = res.json()
-                      # 只要 code 返回 0 且数据存在，即为找到了真表
-                      if data and data.get("code") == 0 and data.get("result"):
+                      code = data.get("code")
+                      message = data.get("message", "无")
+                      has_result = "YES" if data.get("result") else "NO"
+                      
+                      # 打印最详尽的系统底牌
+                      print(f"    - 探针 [{report_name:<26}] ➔ 返回码: {code:<5} | 消息: {message:<25} | 有无结果集: {has_result}")
+                      
+                      # 如果成功定位
+                      if code == 0 and data.get("result"):
                           WORKING_REPORT_NAME = report_name
-                          print(f"🎯 探测成功！找到东财有效的物理财务表: [{report_name}]")
-                          return True
-                  except:
-                      pass
-              return False
-
-          def fetch_f10_datacenter(tdx_item):
-              global WORKING_REPORT_NAME
-              tdx_code = tdx_item['code'].replace('.', '').lower()         
-              name = tdx_item.get('code_name', '')
-              pure_code = tdx_code[2:]
+                          any_success = True
+                          print(f"🎉【重要发现】找到 100% 有效物理表: {report_name}")
+                          break
+                  except Exception as e:
+                      print(f"    - 探针 [{report_name:<26}] ➔ 网络/解析异常: {e}")
               
-              url = "https://datacenter.eastmoney.com/api/data/v1/get"
-              params = {
-                  "sortColumns": "REPORT_DATE",
-                  "sortTypes": "-1",
-                  "pageSize": "120",
-                  "pageNumber": "1",
-                  "reportName": WORKING_REPORT_NAME,
-                  "columns": "ALL",
-                  "filter": f"(SECURITY_CODE='{pure_code}')",
-                  "client": "WEB" 
-              }
-              
-              try:
-                  res = requests.get(url, params=params, headers=HEADERS, timeout=10)
-                  data = res.json()
-                  if data and data.get("result") and data["result"].get("data"):
-                      return pure_code, name, data["result"]["data"], None
-                  
-                  err_msg = f"状态码: {data.get('code', '无')}, 消息: {data.get('message', '未知')}"
-                  return pure_code, name, [], err_msg
-              except Exception as e:
-                  return pure_code, name, [], str(e)
+              return any_success
 
           def main():
               print("🔍 读取 TDX 股票列表...")
@@ -136,70 +124,17 @@ jobs:
 
               print(f"✅ 有效 A股总数: {len(valid_stocks)}")
               
-              # 随机抽样 100 只股票
+              # 随机抽样
               sample_size = min(100, len(valid_stocks))
               test_samples = random.sample(valid_stocks, sample_size)
               
-              # 1. 启动自愈探测
+              # 启动深度曝光探测
               first_pure_code = test_samples[0]['code'].replace('.', '').lower()[2:]
               if not explore_working_report(first_pure_code):
-                  print("❌ 探测失败: 无法定位东财有效物理报表，可能是接口结构大改。")
+                  print("\n❌ 诊断结束：5 大核心物理表全部失败。请根据上方打印的详细报错信息进行排查。")
                   return
                   
-              print(f"🎯 选定物理表 [{WORKING_REPORT_NAME}]，对 {sample_size} 只股票拉取全历史数据...\n")
-              
-              results = []
-              success_count, fail_count = 0, 0
-              
-              with ThreadPoolExecutor(max_workers=10) as executor:
-                  futures = {executor.submit(fetch_f10_datacenter, s): s for s in test_samples}
-                  for future in tqdm(as_completed(futures), total=len(test_samples), desc="拉取全量财报"):
-                      pure_code, name, data, err = future.result()
-                      if data:
-                          success_count += 1
-                          results.append({"code": pure_code, "name": name, "history_len": len(data), "raw_data": data})
-                      else:
-                          fail_count += 1
-                          print(f"⚠️ 失败: {name}({pure_code}) - {err}")
-                          
-              print("\n" + "="*60)
-              print(f"📊 数据中心接口统计：成功 {success_count} 只 | 失败 {fail_count} 只")
-              
-              if success_count > 0:
-                  longest = max(results, key=lambda x: x['history_len'])
-                  print(f"\n🏆 财报历史最长股票: {longest['name']} ({longest['code']})，共 {longest['history_len']} 个季度！")
-                  
-                  df = pd.DataFrame(longest['raw_data'])
-                  
-                  # 打印实际拿到的所有列名，让我们认清字段！
-                  print("\n🔑 接口实际返回的全量字段列名 (大写字母形式)：")
-                  print(", ".join(df.columns))
-                  
-                  # 智能字段映射：根据返回的列名，提取日期和归母利润、净资产
-                  # 数据中心可能返回的是 NOTICE_DATE 或 UPDATE_DATE，PARENT_NETPROFIT 或 PARENTNETPROFIT
-                  mapping_candidates = {
-                      'REPORT_DATE': ['REPORT_DATE'],
-                      'UPDATE_DATE': ['NOTICE_DATE', 'UPDATE_DATE', 'ACTUAL_PUBLISH_DATE'],
-                      'PARENTNETPROFIT': ['PARENT_NETPROFIT', 'PARENTNETPROFIT', 'NETPROFIT_TTM'],
-                      'BPS': ['BPS', 'BPS_MRQ']
-                  }
-                  
-                  real_cols = {}
-                  for target, candidates in mapping_candidates.items():
-                      for cand in candidates:
-                          if cand in df.columns:
-                              real_cols[target] = cand
-                              break
-                              
-                  print(f"\n🎯 自动识别出来的对齐列名: {real_cols}")
-                  
-                  available_cols = list(real_cols.values())
-                  if available_cols:
-                      print("\n🌟 核心提取字段展示 (最新 5 个季度)：")
-                      print(df[available_cols].head(5).to_markdown(index=False))
-                      
-                      print("\n🌟 核心提取字段展示 (远古历史底牌)：")
-                      print(df[available_cols].tail(5).to_markdown(index=False))
+              print(f"\n🎯 选定有效物理表 [{WORKING_REPORT_NAME}] 开始拉取数据...")
 
           if __name__ == "__main__":
               main()
