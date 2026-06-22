@@ -82,12 +82,13 @@ def main():
                 if col in df_k_all.columns:
                     df_k_all[col] = pd.to_numeric(df_k_all[col], errors='coerce').fillna(0.0)
 
-            # 载入预计算的财务数据主表
+            # 载入由东财 F10 极速烘焙出来的财务序列主表
             if os.path.exists("finance_master.parquet"):
                 df_fin = pd.read_parquet("finance_master.parquet")
                 df_k_all = df_k_all.sort_values('date_dt')
+                df_fin['publish_date'] = pd.to_datetime(df_fin['publish_date'])
                 
-                # 🌟 核心：Pandas 时间旅行级联，完美规避未来函数
+                # 🌟 Pandas 级联 AsOf 拼接，按披露日向后滚配，绝无未来函数
                 df_k_all = pd.merge_asof(
                     df_k_all, 
                     df_fin,
@@ -104,24 +105,23 @@ def main():
             df_k_all = df_k_all[(df_k_all['date'] >= start) & (df_k_all['date'] <= end)].copy()
             df_k_all = df_k_all.sort_values(['code', 'date'])
             
-            # 基础衍生计算
+            # 计算 1：涨跌幅
             df_k_all['pctChg'] = df_k_all.groupby('code')['close'].pct_change() * 100
             df_k_all['pctChg'] = df_k_all['pctChg'].fillna(0.0)
             
-            # 🌟 进阶衍生与估值计算
-            # 换手率 = 成交量(股) / (流通股本(万股) * 10000) * 100
+            # 计算 2：换手率 = 成交量(股) / (流通股本(万股) * 10000) * 100
             df_k_all['turn'] = np.where(df_k_all['floatShares'] > 0, 
                                         (df_k_all['volume'] / (df_k_all['floatShares'] * 10000)) * 100, 0.0)
             
-            # 总市值与流通市值 (单位：万元)。收盘价(元) * 股本(万股) = 市值(万元)
+            # 计算 3：总市值与流通市值 (单位：万元)
             df_k_all['total_mv'] = df_k_all['close'] * df_k_all['totalShares']
             df_k_all['float_mv'] = df_k_all['close'] * df_k_all['floatShares']
             
-            # 滚动市盈率 与 最新市净率 (强行拦截负利润与资不抵债，防止回测失效)
-            df_k_all['peTTM'] = np.where(df_k_all['net_profit_ttm'] > 0, 
-                                         df_k_all['total_mv'] / df_k_all['net_profit_ttm'], 0.0)
-            df_k_all['pbMRQ'] = np.where(df_k_all['net_assets'] > 0, 
-                                         df_k_all['total_mv'] / df_k_all['net_assets'], 0.0)
+            # 计算 4：估值。PE = 市值/利润(万)， PB = 收盘价/BPS (每股净资产)。硬拦截负利润与负资产。
+            df_k_all['peTTM'] = np.where(df_k_all['net_profit_ttm_wan'] > 0, 
+                                         df_k_all['total_mv'] / df_k_all['net_profit_ttm_wan'], 0.0)
+            df_k_all['pbMRQ'] = np.where(df_k_all['bps'] > 0, 
+                                         df_k_all['close'] / df_k_all['bps'], 0.0)
 
             # 标记 ST
             st_map = {}
