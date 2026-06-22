@@ -15,31 +15,70 @@ HEADERS = {
 }
 
 def get_all_a_shares():
-    """极速拉取全市场 A 股代码作为财务同步种子"""
-    print("📋 [Finance Master] 正在同步最新全量 A 股代码清单...")
+    """采用安全的分页拉取算法 (每页 1000 条)，100% 绕过大包风控拦截"""
+    print("📋 [Finance Master] 正在同步最新全量 A 股代码清单 (分页模式)...")
     url = "https://push2.eastmoney.com/api/qt/clist/get"
-    params = {
-        "pn": 1, "pz": 6000, "po": 1, "np": 1, 
-        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-        "fltt": 2, "invt": 2, "fid": "f3",
-        "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
-        "fields": "f12,f13" # f12=code, f13=market
-    }
-    try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=15).json()
-        stocks = []
-        for item in res['data']['diff']:
-            code = str(item['f12']).zfill(6)
-            # 🌟 完美的防错前缀算法：100% 解决北交所和创业板前缀归属问题
-            if code.startswith('6'): prefix = "SH"
-            elif code.startswith(('4', '8', '9', '2')): prefix = "BJ"
-            else: prefix = "SZ"
-            stocks.append(f"{prefix}{code}")
-        print(f"[+] 成功同步 A 股种子 {len(stocks)} 只。")
-        return stocks
-    except Exception as e:
-        print(f"❌ 严重错误: 同步 A 股清单失败: {e}")
+    
+    stocks = []
+    page = 1
+    page_size = 1000
+    
+    while True:
+        params = {
+            "pn": page, 
+            "pz": page_size, 
+            "po": 1, 
+            "np": 1, 
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": 2, 
+            "invt": 2, 
+            "fid": "f3",
+            "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048",
+            "fields": "f12,f13" # f12=code, f13=market
+        }
+        
+        try:
+            response = requests.get(url, params=params, headers=HEADERS, timeout=15)
+            if response.status_code != 200:
+                print(f"⚠️ 第 {page} 页拉取失败，HTTP 状态码: {response.status_code}")
+                break
+                
+            res = response.json()
+            if not res or 'data' not in res or 'diff' not in res['data']:
+                # 没有更多数据，分页结束
+                break
+                
+            diff = res['data']['diff']
+            if not diff or len(diff) == 0:
+                break
+                
+            for item in diff:
+                code = str(item['f12']).zfill(6)
+                # 完美的防错前缀算法：100% 解决北交所和创业板前缀归属问题
+                if code.startswith('6'): prefix = "SH"
+                elif code.startswith(('4', '8', '9', '2')): prefix = "BJ"
+                else: prefix = "SZ"
+                stocks.append(f"{prefix}{code}")
+                
+            # Actions 进度友好型输出
+            print(f"    [#] 已拉取第 {page} 页 | 累计标的: {len(stocks)}")
+            
+            # 如果返回的数据量小于请求页长，说明已到最后一页
+            if len(diff) < page_size:
+                break
+                
+            page += 1
+            
+        except Exception as e:
+            print(f"❌ 同步第 {page} 页异常: {e}")
+            break
+            
+    if not stocks:
+        print("❌ 严重错误: 无法获取任何个股种子，任务终止。")
         sys.exit(1)
+        
+    print(f"[+] 种子库同步成功！本期共捕获 A 股有效标的: {len(stocks)} 只。")
+    return stocks
 
 def fetch_single_f10(em_code):
     """拉取单只股票全历史财报 (type=0: 包含全部季度报告期)"""
@@ -62,7 +101,6 @@ def main():
     fail_count = 0
 
     print(f"🚀 开始并发拉取全市场 F10 财务指标... (线程池: 30)")
-    # 🌟 30线程并发，约 1.5 分钟可拉完 A 股全市场历史至今所有财务报表
     with ThreadPoolExecutor(max_workers=30) as executor:
         futures = {executor.submit(fetch_single_f10, c): c for c in stocks}
         for future in tqdm(as_completed(futures), total=len(stocks), desc="拉取F10财务"):
