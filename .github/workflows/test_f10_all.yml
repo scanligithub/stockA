@@ -1,0 +1,167 @@
+name: Test F10 Full Market Stress Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  f10-all-stress-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          
+      - name: Install Python Dependencies
+        run: |
+          pip install requests pandas tqdm tabulate
+          
+      - name: Build TDX Go Engine
+        run: |
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          go build -o tdx_fetcher scripts/tdx_fetcher.go
+          
+      - name: Generate Master Stock List (via TDX)
+        run: |
+          echo "🚀 Running TDX Engine to get stock list..."
+          ./tdx_fetcher -mode=list
+          ls -lh stock_list_master.json
+          
+      - name: Create & Run Full Market F10 Stress Test
+        run: |
+          cat << 'EOF' > test_f10_all.py
+          import json
+          import time
+          import requests
+          import pandas as pd
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from tqdm import tqdm
+          from requests.adapters import HTTPAdapter
+
+          HEADERS = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+              "Referer": "https://quote.eastmoney.com/"
+          }
+
+          # 🌟 核心优化：构建长连接复用池，避免高并发握手触发 WAF
+          CONCURRENT_WORKERS = 30
+          session = requests.Session()
+          adapter = HTTPAdapter(pool_connections=CONCURRENT_WORKERS, pool_maxsize=CONCURRENT_WORKERS, max_retries=1)
+          session.mount("https://", adapter)
+          session.mount("http://", adapter)
+
+          def fetch_f10_history(tdx_item):
+              tdx_code = tdx_item['code'].replace('.', '').lower()         
+              name = tdx_item.get('code_name', '')
+              em_code = tdx_code.upper()
+              
+              # 🌟 进阶修改：使用 type=0 拉取全量历史季度财报（不仅仅是年报），测算真实负载
+              url = f"https://emweb.securities.eastmoney.com/PC_HSF10/NewFinanceAnalysis/ZYZBAjaxNew?type=0&code={em_code}"
+              
+              max_retries = 2
+              for attempt in range(max_retries):
+                  try:
+                      res = session.get(url, headers=HEADERS, timeout=8)
+                      if res.status_code == 200:
+                          data = res.json()
+                          if data and data.get("data"):
+                              return em_code, name, len(data["data"]), "SUCCESS"
+                          return em_code, name, 0, "EMPTY_DATA"
+                      elif res.status_code == 403:
+                          return em_code, name, 0, "403_FORBIDDEN"
+                      else:
+                          return em_code, name, 0, f"HTTP_{res.status_code}"
+                  except requests.exceptions.Timeout:
+                      if attempt < max_retries - 1:
+                          time.sleep(1) # 超时稍微等待重试
+                          continue
+                      return em_code, name, 0, "TIMEOUT"
+                  except Exception as e:
+                      return em_code, name, 0, f"ERROR_{str(e)[:15]}"
+              return em_code, name, 0, "FAIL"
+
+          def main():
+              start_time = time.time()
+              
+              print("🔍 读取 TDX 股票大盘表...")
+              try:
+                  with open('stock_list_master.json', 'r', encoding='utf-8') as f:
+                      master_list = json.load(f)
+              except Exception as e:
+                  print(f"❌ 读取 JSON 失败: {e}")
+                  return
+
+              valid_stocks = []
+              for s in master_list:
+                  if not s or 'code' not in s or not s['code']:
+                      continue
+                  code = s['code'].replace('.', '').lower()
+                  # A 股精确过滤
+                  if code.startswith('sh') and code[2:4] in ['60', '68']:
+                      valid_stocks.append(s)
+                  elif code.startswith('sz') and code[2:4] in ['00', '30']:
+                      valid_stocks.append(s)
+                  elif code.startswith('bj') and code[2:4] in ['43', '83', '87', '92']:
+                      valid_stocks.append(s)
+
+              total_stocks = len(valid_stocks)
+              print(f"✅ 清洗完成，本期全量压测 A股目标数: {total_stocks} 只")
+              print(f"🚀 启动连接池（并发数: {CONCURRENT_WORKERS}），开始极限压测...\n")
+
+              results = []
+              status_counter = {}
+              
+              with ThreadPoolExecutor(max_workers=CONCURRENT_WORKERS) as executor:
+                  futures = {executor.submit(fetch_f10_history, s): s for s in valid_stocks}
+                  
+                  for future in tqdm(as_completed(futures), total=total_stocks, desc="全量压测进行中"):
+                      em_code, name, history_len, status = future.result()
+                      status_counter[status] = status_counter.get(status, 0) + 1
+                      
+                      if status == "SUCCESS":
+                          results.append({"code": em_code, "name": name, "len": history_len})
+                      elif status == "403_FORBIDDEN" or "ERROR" in status:
+                          # 打印偶发的严重异常
+                          tqdm.write(f"⚠️ 触发异常: {name}({em_code}) | 状态: {status}")
+
+              duration = time.time() - start_time
+              speed = total_stocks / duration if duration > 0 else 0
+              success_count = status_counter.get("SUCCESS", 0)
+              success_rate = (success_count / total_stocks) * 100 if total_stocks > 0 else 0
+
+              print("\n" + "="*70)
+              print(f"📊 极限压测总结报告")
+              print(f"    - 总计压测股票数 : {total_stocks} 只")
+              print(f"    - 整体运行总耗时 : {duration:.2f} 秒 ({duration/60:.2f} 分钟)")
+              print(f"    - 平均吞吐速度   : {speed:.2f} 只 / 秒")
+              print(f"    - 综合下载成功率 : {success_rate:.2f} %")
+              print("="*70)
+              
+              print("\n📈 状态分布统计：")
+              for status, count in status_counter.items():
+                  percentage = (count / total_stocks) * 100
+                  print(f"    - {status:<15} : {count:<5} 只 ({percentage:.2f}%)")
+              print("="*70)
+
+              if success_count > 0:
+                  df_res = pd.DataFrame(results)
+                  print(f"\n🏆 财报历史最深股票: {df_res.iloc[df_res['len'].idxmax()]['name']} ({df_res.iloc[df_res['len'].idxmax()]['code']})，历史跨度达 {df_res['len'].max()} 个季度！")
+                  print(f"📊 历史财报平均跨度: {df_res['len'].mean():.1f} 个季度/股")
+              
+              session.close()
+
+          if __name__ == "__main__":
+              main()
+          EOF
+          
+          python test_f10_all.py
