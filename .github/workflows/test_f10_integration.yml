@@ -52,7 +52,42 @@ jobs:
               "Referer": "https://quote.eastmoney.com/"
           }
 
+          # 全局探测变量
+          WORKING_REPORT_NAME = None
+
+          def explore_working_report(pure_code):
+              """动态探测哪一个物理表是有效的"""
+              global WORKING_REPORT_NAME
+              potential_reports = ["RPT_F10_FN_ZYZB", "RPT_LICO_FN_CPD"]
+              
+              url = "https://datacenter.eastmoney.com/api/data/v1/get"
+              print(f"🕵️ 正在对样本 {pure_code} 进行物理表名探测...")
+              
+              for report_name in potential_reports:
+                  params = {
+                      "sortColumns": "REPORT_DATE",
+                      "sortTypes": "-1",
+                      "pageSize": "5",
+                      "pageNumber": "1",
+                      "reportName": report_name,
+                      "columns": "ALL",
+                      "filter": f"(SECURITY_CODE='{pure_code}')",
+                      "client": "WEB"
+                  }
+                  try:
+                      res = requests.get(url, params=params, headers=HEADERS, timeout=8)
+                      data = res.json()
+                      # 只要 code 返回 0 且数据存在，即为找到了真表
+                      if data and data.get("code") == 0 and data.get("result"):
+                          WORKING_REPORT_NAME = report_name
+                          print(f"🎯 探测成功！找到东财有效的物理财务表: [{report_name}]")
+                          return True
+                  except:
+                      pass
+              return False
+
           def fetch_f10_datacenter(tdx_item):
+              global WORKING_REPORT_NAME
               tdx_code = tdx_item['code'].replace('.', '').lower()         
               name = tdx_item.get('code_name', '')
               pure_code = tdx_code[2:]
@@ -63,11 +98,9 @@ jobs:
                   "sortTypes": "-1",
                   "pageSize": "120",
                   "pageNumber": "1",
-                  "reportName": "RPT_F10_FN_MAINOPINDEX",
+                  "reportName": WORKING_REPORT_NAME,
                   "columns": "ALL",
-                  # 🛡️ 修复：改用单引号保证 URL 编码兼容性
                   "filter": f"(SECURITY_CODE='{pure_code}')",
-                  # 🛡️ 修复：增加官方数据中心必填的终端标识别（client）
                   "client": "WEB" 
               }
               
@@ -77,10 +110,7 @@ jobs:
                   if data and data.get("result") and data["result"].get("data"):
                       return pure_code, name, data["result"]["data"], None
                   
-                  # 📊 诊断曝光：如果接口报错，把错误信息往上传
                   err_msg = f"状态码: {data.get('code', '无')}, 消息: {data.get('message', '未知')}"
-                  if not data.get("result"):
-                      err_msg += " (result字段为空)"
                   return pure_code, name, [], err_msg
               except Exception as e:
                   return pure_code, name, [], str(e)
@@ -106,9 +136,17 @@ jobs:
 
               print(f"✅ 有效 A股总数: {len(valid_stocks)}")
               
+              # 随机抽样 100 只股票
               sample_size = min(100, len(valid_stocks))
               test_samples = random.sample(valid_stocks, sample_size)
-              print(f"🎯 随机抽取了 {sample_size} 只股票测试数据中心接口历史深度...\n")
+              
+              # 1. 启动自愈探测
+              first_pure_code = test_samples[0]['code'].replace('.', '').lower()[2:]
+              if not explore_working_report(first_pure_code):
+                  print("❌ 探测失败: 无法定位东财有效物理报表，可能是接口结构大改。")
+                  return
+                  
+              print(f"🎯 选定物理表 [{WORKING_REPORT_NAME}]，对 {sample_size} 只股票拉取全历史数据...\n")
               
               results = []
               success_count, fail_count = 0, 0
@@ -122,7 +160,6 @@ jobs:
                           results.append({"code": pure_code, "name": name, "history_len": len(data), "raw_data": data})
                       else:
                           fail_count += 1
-                          # 打印最真实的排查日志
                           print(f"⚠️ 失败: {name}({pure_code}) - {err}")
                           
               print("\n" + "="*60)
@@ -133,14 +170,36 @@ jobs:
                   print(f"\n🏆 财报历史最长股票: {longest['name']} ({longest['code']})，共 {longest['history_len']} 个季度！")
                   
                   df = pd.DataFrame(longest['raw_data'])
-                  target_cols = ['REPORT_DATE', 'NOTICE_DATE', 'PARENT_NETPROFIT', 'BPS']
-                  available_cols = [c for c in target_cols if c in df.columns]
                   
-                  print("\n🌟 核心提取字段展示 (近 5 个季度)：")
-                  print(df[available_cols].head(5).to_markdown(index=False))
+                  # 打印实际拿到的所有列名，让我们认清字段！
+                  print("\n🔑 接口实际返回的全量字段列名 (大写字母形式)：")
+                  print(", ".join(df.columns))
                   
-                  print("\n🌟 核心提取字段展示 (远古历史底牌)：")
-                  print(df[available_cols].tail(5).to_markdown(index=False))
+                  # 智能字段映射：根据返回的列名，提取日期和归母利润、净资产
+                  # 数据中心可能返回的是 NOTICE_DATE 或 UPDATE_DATE，PARENT_NETPROFIT 或 PARENTNETPROFIT
+                  mapping_candidates = {
+                      'REPORT_DATE': ['REPORT_DATE'],
+                      'UPDATE_DATE': ['NOTICE_DATE', 'UPDATE_DATE', 'ACTUAL_PUBLISH_DATE'],
+                      'PARENTNETPROFIT': ['PARENT_NETPROFIT', 'PARENTNETPROFIT', 'NETPROFIT_TTM'],
+                      'BPS': ['BPS', 'BPS_MRQ']
+                  }
+                  
+                  real_cols = {}
+                  for target, candidates in mapping_candidates.items():
+                      for cand in candidates:
+                          if cand in df.columns:
+                              real_cols[target] = cand
+                              break
+                              
+                  print(f"\n🎯 自动识别出来的对齐列名: {real_cols}")
+                  
+                  available_cols = list(real_cols.values())
+                  if available_cols:
+                      print("\n🌟 核心提取字段展示 (最新 5 个季度)：")
+                      print(df[available_cols].head(5).to_markdown(index=False))
+                      
+                      print("\n🌟 核心提取字段展示 (远古历史底牌)：")
+                      print(df[available_cols].tail(5).to_markdown(index=False))
 
           if __name__ == "__main__":
               main()
