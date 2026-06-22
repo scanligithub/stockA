@@ -22,35 +22,28 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
+          cache: 'pip'
 
-      - name: 🔍 动态扫描内鬼文件
-        run: |
-          echo "=== 1. 当前工作区所有的 Go 文件 ==="
-          find . -name "*.go"
-          echo "=== 2. 查找包含 gbbq 导入的文件和精确行号 ==="
-          grep -rn "protocol/gbbq" . || true
-
-      - name: 🌐 Download Official GBBQ zip (HTTP Mode)
+      - name: 🌐 Download Official GBBQ zip
         run: |
           set -euxo pipefail
           URL="http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
-          curl -L \
-               --retry 3 \
-               --retry-delay 5 \
-               --connect-timeout 30 \
-               -o gbbq.zip \
-               "${URL}"
+          curl -L --retry 3 -o gbbq.zip "${URL}"
           unzip -o gbbq.zip
           mv gbbq gbbq.dat
-          ls -lh gbbq.dat
 
-      # 🌟 新增：全历史打包阶段，下载自 2005 年起至今的全部历史财务数据
-      - name: 📥 Download Full 20-Year History GPCW Zips
+      - name: 📥 Download Full History GPCW Zips
         env:
           START_YEAR: "2005"
         run: |
           pip install requests
           python scripts/download_gpcw.py
+
+      # 🌟 关键修改：在这里增加 Python 环境依赖并执行预处理
+      - name: 🧠 Pre-Calculate Finance Matrix (TTM & AsOf Prep)
+        run: |
+          pip install pytdx pandas pyarrow numpy
+          python scripts/parse_gpcw.py
 
       - name: Initialize Go Module
         run: |
@@ -65,15 +58,15 @@ jobs:
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
           
-      # 🌟 修改：将 gpcw_zips 整个加入 Master 历史产物分发链中
-      - name: Upload Master Metadata (List, GBBQ & GPCW)
+      # 🌟 关键修改：将提取出的高密度 finance_master 塞入发给 Worker 的资源包中
+      - name: Upload Master Metadata
         uses: actions/upload-artifact@v4
         with:
           name: master-metadata
           path: |
             stock_list_master.json
             gbbq.dat
-            gpcw_zips/
+            finance_master.parquet
           retention-days: 1
 
   fetch-full-history:
@@ -95,7 +88,6 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
-      # 🌟 自动下载包含 gpcw_zips/ 文件夹的 Master Artifact
       - name: Download Master Metadata
         uses: actions/download-artifact@v4
         with:
@@ -112,7 +104,7 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Full History (Local gbbq.dat + GPCW + Sina Flow)
+      - name: Fetch Full History (Local gbbq.dat + Finance Master + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
@@ -135,9 +127,7 @@ jobs:
           cache: 'pip'
           
       - name: Install Runtime Dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install polars
+        run: pip install -r requirements.txt
 
       - name: Download Latest Healed Sectors
         env:
@@ -165,7 +155,7 @@ jobs:
           python-version: "3.10"
       - run: pip install -r requirements.txt
       
-      - name: Download Master List (For DuckDB Metadata)
+      - name: Download Master List
         uses: actions/download-artifact@v4
         with:
           name: master-metadata
@@ -186,23 +176,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & Local gbbq.dat Parser" || true
+          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) with Local Fundamentals" || true
           gh release edit archive --draft=false --prerelease=false
           gh release upload archive output/*.parquet output/*.json output/*.md --clobber
-
-      - name: Publish Summary
-        if: always()
-        run: |
-          if [ -f output/qc_summary.md ]; then
-            cat output/qc_summary.md >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Upload QC Report to Artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: qc-report-full
-          path: |
-            output/qc_report.json
-            output/qc_summary.md
-          retention-days: 7
