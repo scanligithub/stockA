@@ -58,7 +58,7 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
-// LoadGbbqDat 🛡️ 终极自适应解析器：自动根据文件大小检测 0 字节或 270 字节头部，支持 web 下载与本地缓存两版 gbbq.dat
+// LoadGbbqDat 🛡️ 诊断自适应解析器：内置物理黑匣子，输出 Raw 二进制对照日志
 func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -73,15 +73,13 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	}
 	fileSize := stat.Size()
 
-	// 🎯 核心修正 A：智能识别头部大小
-	// 1. 若文件大小为 29 的整倍数，则是无头部的网络直载版
-	// 2. 若减去 270 字节后是 29 的整倍数，则是包含 270 字节头部的本地缓存版
+	// 🎯 核心逻辑：智能识别头部大小
 	headerSize := int64(0)
 	if fileSize%29 != 0 && (fileSize-270)%29 == 0 {
 		headerSize = 270
-		fmt.Printf("[Go Engine] Auto-detected: Local TDX cache gbbq.dat with 270-byte header.\n")
+		fmt.Printf("[Go Engine] 📊 Auto-detected: Local TDX cache gbbq.dat with 270-byte header. File size: %d bytes\n", fileSize)
 	} else {
-		fmt.Printf("[Go Engine] Auto-detected: Official web-downloaded gbbq with 0-byte header.\n")
+		fmt.Printf("[Go Engine] 📊 Auto-detected: Official web-downloaded gbbq with 0-byte header. File size: %d bytes\n", fileSize)
 	}
 
 	// 寻轨至对应头部后方开始解包
@@ -95,6 +93,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	
 	// 读取 29 字节（保持对齐），解析前 28 字节，忽略第 29 字节
 	buf := make([]byte, 29)
+	printCount := 0
 
 	for {
 		_, err := io.ReadFull(file, buf)
@@ -129,6 +128,13 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 		peiJia := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[16:20])))
 		songGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[20:24])))
 		peiGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[24:28])))
+
+		// 🔍 【黑匣子诊断日志】：打印前 15 条原始二进制数据及解析出的明文字段
+		if printCount < 15 {
+			fmt.Printf("[DEBUG GBBQ Record %d] raw_hex=%x | date=%d | market=%d | code=%q | tdxCode=%q | category=%d | fenHong=%.3f | peiJia=%.3f | songGu=%.3f | peiGu=%.3f\n",
+				printCount, buf, date, market, codeStr, tdxCode, category, fenHong, peiJia, songGu, peiGu)
+			printCount++
+		}
 
 		if category == 1 {
 			// A. 处理除权除息
