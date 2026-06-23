@@ -54,7 +54,7 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
-// LoadGbbqCSV 直接极速读取由 Python 翻译出来的纯净 GBBQ 数据
+// LoadGbbqCSV 🛡️ 严格按 PyTDX 标准 CSV 列索引和“万股”单位对齐读取 GBBQ
 func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -81,14 +81,22 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 			return nil, nil, err
 		}
 
-		// 列顺序：code,date,category,fenhong,peijia,songgu,peigu
-		codeStr := record[0]
-		date, _ := strconv.Atoi(record[1])
-		category, _ := strconv.Atoi(record[2])
-		fenHong, _ := strconv.ParseFloat(record[3], 64)
-		peiJia, _ := strconv.ParseFloat(record[4], 64)
-		songGu, _ := strconv.ParseFloat(record[5], 64)
-		peiGu, _ := strconv.ParseFloat(record[6], 64)
+		// 🎯 核心修正 A：根据 PyTDX 输出的实际 CSV 进行字段索引精确对齐
+		// record[0]: market (0 sz, 1 sh)
+		// record[1]: code (股票代码，如 "000001")
+		// record[2]: datetime (除权日期，如 19910502)
+		// record[3]: category (变更类别)
+		// record[4]: hongli_panqianliutong (分红金额 / 送配变更前流通股)
+		// record[5]: peigujia_qianzongguben (配股价 / 送配变更前总股本)
+		// record[6]: songgu_qianzongguben (送股数 / 送配变更后流通股)
+		// record[7]: peigu_houzongguben (配股数 / 送配变更后总股本)
+		codeStr := record[1]
+		date, _ := strconv.Atoi(record[2])
+		category, _ := strconv.Atoi(record[3])
+		fenHong, _ := strconv.ParseFloat(record[4], 64)
+		peiJia, _ := strconv.ParseFloat(record[5], 64)
+		songGu, _ := strconv.ParseFloat(record[6], 64)
+		peiGu, _ := strconv.ParseFloat(record[7], 64)
 
 		// 🎯 根据 A 股证券代码规则，智能补全交易所前缀
 		prefix := "sz"
@@ -110,10 +118,11 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 				PeiGu:   peiGu,
 			}
 		} else if category == 2 || category == 3 || category == 5 || category == 7 || category == 8 || category == 9 || category == 10 {
+			// 🎯 核心修正 B：PyTDX 输出的股本快照单位是“万股”，乘以 10000.0 换算为标准“股”
 			equityMap[tdxCode] = append(equityMap[tdxCode], EquityEventOrdered{
 				Date:        date,
-				FloatShares: songGu,
-				TotalShares: peiGu,
+				FloatShares: songGu * 10000.0,
+				TotalShares: peiGu * 10000.0,
 			})
 		}
 	}
