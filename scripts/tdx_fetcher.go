@@ -58,7 +58,7 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
-// LoadGbbqDat 🛡️ 严格按通达信标准的 270 字节头部跳过 + 29 字节磁盘物理对齐解析 gbbq.dat 文件
+// LoadGbbqDat 🛡️ 终极自适应解析器：自动根据文件大小检测 0 字节或 270 字节头部，支持 web 下载与本地缓存两版 gbbq.dat
 func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -66,16 +66,34 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	}
 	defer file.Close()
 
-	// 🎯 核心修正 A：通达信 gbbq.dat 文件头部有 270 字节的系统信息，必须跳过才能对齐后续的 29 字节记录体
-	_, err = file.Seek(270, io.SeekStart)
+	// 获取文件物理属性
+	stat, err := file.Stat()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to seek past 270-byte header: %v", err)
+		return nil, nil, err
+	}
+	fileSize := stat.Size()
+
+	// 🎯 核心修正 A：智能识别头部大小
+	// 1. 若文件大小为 29 的整倍数，则是无头部的网络直载版
+	// 2. 若减去 270 字节后是 29 的整倍数，则是包含 270 字节头部的本地缓存版
+	headerSize := int64(0)
+	if fileSize%29 != 0 && (fileSize-270)%29 == 0 {
+		headerSize = 270
+		fmt.Printf("[Go Engine] Auto-detected: Local TDX cache gbbq.dat with 270-byte header.\n")
+	} else {
+		fmt.Printf("[Go Engine] Auto-detected: Official web-downloaded gbbq with 0-byte header.\n")
+	}
+
+	// 寻轨至对应头部后方开始解包
+	_, err = file.Seek(headerSize, io.SeekStart)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to seek past header (%d bytes): %v", headerSize, err)
 	}
 
 	gbbqMap := make(map[string]map[int]GbbqEvent)
 	equityMap := make(map[string][]EquityEventOrdered)
 	
-	// 读取 29 字节（保持文件指针移动对齐），解析前 28 字节，丢弃第 29 字节。
+	// 读取 29 字节（保持对齐），解析前 28 字节，忽略第 29 字节
 	buf := make([]byte, 29)
 
 	for {
@@ -283,7 +301,7 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 					pClose := float64(bar.Close) / 1000.0
 					pVolume := float64(bar.Volume)
 					
-					// 🎯 核心修正 B：显式将自定义整型 protocol.Price 强转为 float64，并除以 1000.0 换算为标准元
+					// 显式将自定义整型 protocol.Price 强转为 float64，并除以 1000.0 换算为标准元
 					pAmount := float64(bar.Amount) / 1000.0
 
 					// 🚀 A. 计算复权因子 adjustFactor
