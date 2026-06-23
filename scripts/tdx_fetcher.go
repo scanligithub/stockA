@@ -58,9 +58,7 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
-// ---------------------------------------------------------
-// 🛡 极速二进制解析器：直接解析本地 29 字节标准的 gbbq.dat 文件 (双事件流并进版)
-// ---------------------------------------------------------
+// LoadGbbqDat 🛡️ 修正版：直接解析本地 29 字节标准的 gbbq.dat 文件 (双事件流并进)
 func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -81,10 +79,11 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 			return nil, nil, err
 		}
 
-		codeStr := strings.TrimSpace(string(buf[0:6]))
-		market := buf[6]
-		date := int(binary.LittleEndian.Uint32(buf[7:11]))
-		category := buf[11]
+		// 🎯 修复：严格对照通达信 gbbq.dat 物理存储偏移量进行解析
+		date := int(binary.LittleEndian.Uint32(buf[0:4])) // 0-3 字节：日期
+		market := buf[4]                                 // 4 字节：市场标识 (0 sz, 1 sh, 2 bj)
+		codeStr := strings.TrimSpace(string(buf[5:11]))   // 5-10 字节：6位股票代码
+		category := buf[11]                              // 11 字节：变更类别
 
 		prefix := "sz"
 		if market == 1 {
@@ -111,7 +110,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 				PeiGu:   peiGu,
 			}
 		} else if category == 2 || category == 3 || category == 5 || category == 7 || category == 8 || category == 9 || category == 10 {
-			// B. 处理股本变动快照 (songGu 对应 C3盘后流通, peiGu 对应 C4盘后总股本)
+			// B. 处理股本变动快照
 			equityMap[tdxCode] = append(equityMap[tdxCode], EquityEventOrdered{
 				Date:        date,
 				FloatShares: songGu,
@@ -120,7 +119,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 		}
 	}
 
-	// 将股本变动按照时间轴严格排序，保证后续 ASOF 检索极速对齐
+	// 保持不变：按照时间轴严格升序排序
 	for code := range equityMap {
 		sort.Slice(equityMap[code], func(i, j int) bool {
 			return equityMap[code][i].Date < equityMap[code][j].Date
