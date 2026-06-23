@@ -1,0 +1,61 @@
+name: Test GBBQ Parser
+
+on:
+  workflow_dispatch: # 支持在 GitHub Actions 页面手动点击运行
+
+jobs:
+  test-parser:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: 🌐 Download Official GBBQ zip (HTTP Mode)
+        run: |
+          set -euxo pipefail
+          URL="http://www.tdx.com.cn/products/data/data/dbf/gbbq.zip"
+          curl -L \
+               --retry 3 \
+               --retry-delay 5 \
+               --connect-timeout 30 \
+               -o gbbq.zip \
+               "${URL}"
+          unzip -o gbbq.zip
+          mv gbbq gbbq.dat
+          ls -lh gbbq.dat
+
+      - name: Initialize Go Module & Fetch Deps
+        run: |
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+
+      - name: Build TDX Go Engine
+        run: go build -o tdx_fetcher scripts/tdx_fetcher.go
+
+      - name: 🧪 Run GBBQ Parse & Fetch Verification
+        # 针对之前出错的 3 只代表性 A 股（石化油服、晋亿实业、奥康国际）进行单兵数据采集测试
+        run: |
+          ./tdx_fetcher \
+            -mode=fetch \
+            -codes="sh.600871,sz.002332,sh.603730" \
+            -out="test_out.csv"
+
+      - name: 📊 Display Sample Results (Verification)
+		# 打印生成文件的头部和尾部数据，便于直接在 GitHub Actions 控制台直观验证 shares 与 turn 指标
+        run: |
+          echo "=========================================================="
+          echo "🔍 [测试结果验证] 打印输出 CSV 的前 25 行记录"
+          echo "=========================================================="
+          head -n 25 test_out.csv
+          
+          echo ""
+          echo "=========================================================="
+          echo "🔍 [测试结果验证] 打印输出 CSV 的后 25 行记录"
+          echo "=========================================================="
+          tail -n 25 test_out.csv
