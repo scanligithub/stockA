@@ -39,6 +39,14 @@ jobs:
           mv gbbq gbbq.dat
           ls -lh gbbq.dat
 
+      - name: Install Python GBBQ Decryptor Deps
+        run: pip install pytdx pandas
+
+      - name: Run Python GBBQ Decoder (1 second)
+        run: |
+          python scripts/parse_gbbq.py gbbq.dat gbbq_clean.csv
+          ls -lh gbbq_clean.csv
+
       - name: Initialize Go Module
         run: |
           go mod init stockA || true
@@ -58,7 +66,7 @@ jobs:
           name: master-metadata
           path: |
             stock_list_master.json
-            gbbq.dat
+            gbbq_clean.csv
           retention-days: 1
 
   fetch-daily-data:
@@ -96,7 +104,7 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Current Year Daily Data (Local gbbq.dat + Sina Flow)
+      - name: Fetch Current Year Daily Data (Local gbbq_clean.csv + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
