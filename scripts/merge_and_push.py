@@ -142,8 +142,7 @@ def main():
     if not f10_ttm_df.empty:
         con.execute("CREATE OR REPLACE VIEW v_f10 AS SELECT * FROM read_parquet('temp_parts/f10_ttm_clean.parquet')")
         
-        # 🚀 极速时序非等值关联：使用 DuckDB ASOF 核心，将 K 线与发布日（notice_date）对齐
-        # 动态计算 peTTM 与 pbMRQ，并严格维持原始 Schema 18 列顺序不变
+        # 🚀 极速时序非等值关联：使用 SUBSTR(k.code, 4) 剔除前缀进行 ASOF JOIN
         print("⚡ Performing Look-ahead-bias-free ASOF JOIN via DuckDB...")
         con.execute("""
             CREATE OR REPLACE VIEW v_kline AS
@@ -154,16 +153,20 @@ def main():
                 k.high,
                 k.low,
                 k.close,
+                -- 🛡️ 兜底异常 amount：若缺失，可用 价格*成交量(手)*100 粗略估算，避免 NULL 值出现
+                CASE 
+                    WHEN k.amount IS NULL OR k.amount <= 0 THEN CAST(k.close * k.volume * 100 AS DOUBLE)
+                    ELSE k.amount
+                END as amount,
                 k.volume,
-                k.amount,
                 k.turn,
                 k.pctChg,
-                -- 滚动市盈率 = 总市值 / TTM归母净利润 (排除亏损股或零市值异常)
+                -- 滚动市盈率 = 总市值 / TTM归母净利润
                 CASE 
                     WHEN f.ttm_net_profit IS NULL OR f.ttm_net_profit <= 0 OR k.total_mv IS NULL OR k.total_mv <= 0 THEN 0.0
                     ELSE CAST(k.total_mv / f.ttm_net_profit AS FLOAT)
                 END as peTTM,
-                -- 滚动市净率 = 收盘价 / 每股净资产 (排除净资产为负的ST股)
+                -- 滚动市净率 = 收盘价 / 每股净资产
                 CASE 
                     WHEN f.bps IS NULL OR f.bps <= 0 THEN 0.0
                     ELSE CAST(k.close / f.bps AS FLOAT)
@@ -176,8 +179,8 @@ def main():
                 k.float_mv
             FROM v_kline_raw k
             ASOF LEFT JOIN v_f10 f
-                ON k.code = f.code
-               AND k.date >= f.notice_date; -- 保证每一天使用的都是当日市场已知的最新财报
+                ON SUBSTR(k.code, 4) = f.code  -- 🎯 修复：剥离 "sh." 等前缀，使其与 "603730" 精准匹配
+               AND k.date >= f.notice_date;
         """)
     else:
         print("⚠️ Warning: F10 TTM View could not be created. PE/PB remains 0.0.")
