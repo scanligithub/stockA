@@ -136,6 +136,7 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	return gbbqMap, equityMap, nil
 }
 
+// runFetchList 🛡️ 修正版：分交易所精细化过滤，彻底封杀上海指数（sh.00xxxx）混入个股池
 func runFetchList() {
 	fmt.Println("[Go Engine] Mode: LIST - Fetching A-shares list...")
 	cli, err := tdx.DialDefault()
@@ -153,21 +154,33 @@ func runFetchList() {
 			continue
 		}
 		for _, item := range resp.List {
-			if strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68") ||
-				strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30") ||
-				strings.HasPrefix(item.Code, "4") || strings.HasPrefix(item.Code, "8") {
-
-				prefix := "sh"
-				if ex == protocol.ExchangeSZ {
-					prefix = "sz"
-				} else if ex == protocol.ExchangeBJ {
-					prefix = "bj"
+			// 🎯 核心修正：按照各交易所个股代码区间进行物理隔离
+			if ex == protocol.ExchangeSH {
+				// 上海 A 股：只允许 60 (主板) 和 68 (科创板) 开头，彻底排除 00 开头的上证指数系列
+				if strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68") {
+					masterList = append(masterList, StockMaster{
+						Code:     fmt.Sprintf("sh.%s", item.Code),
+						CodeName: item.Name,
+					})
 				}
-
-				masterList = append(masterList, StockMaster{
-					Code:     fmt.Sprintf("%s.%s", prefix, item.Code),
-					CodeName: item.Name,
-				})
+			} else if ex == protocol.ExchangeSZ {
+				// 深圳 A 股：只允许 00 (主板/中小板) 和 30 (创业板) 开头
+				if strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30") {
+					masterList = append(masterList, StockMaster{
+						Code:     fmt.Sprintf("sz.%s", item.Code),
+						CodeName: item.Name,
+					})
+				}
+			} else if ex == protocol.ExchangeBJ {
+				// 北京 A 股：只允许 43, 83, 87, 88, 92 开头
+				if strings.HasPrefix(item.Code, "43") || strings.HasPrefix(item.Code, "83") ||
+					strings.HasPrefix(item.Code, "87") || strings.HasPrefix(item.Code, "88") ||
+					strings.HasPrefix(item.Code, "92") {
+					masterList = append(masterList, StockMaster{
+						Code:     fmt.Sprintf("bj.%s", item.Code),
+						CodeName: item.Name,
+					})
+				}
 			}
 		}
 	}
