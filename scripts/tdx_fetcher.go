@@ -58,7 +58,7 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
-// LoadGbbqDat 🛡️ 修正版：直接解析本地 29 字节标准的 gbbq.dat 文件 (双事件流并进)
+// LoadGbbqDat 🛡️ 终极修正版：严格按 28 字节对齐解析标准的 gbbq.dat 文件
 func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -68,7 +68,9 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 
 	gbbqMap := make(map[string]map[int]GbbqEvent)
 	equityMap := make(map[string][]EquityEventOrdered)
-	buf := make([]byte, 29)
+	
+	// 🎯 核心修正：通达信标准 gbbq 物理单条记录长度必须为 28 字节，防止指针累积偏移导致全局乱码
+	buf := make([]byte, 28)
 
 	for {
 		_, err := io.ReadFull(file, buf)
@@ -79,16 +81,22 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 			return nil, nil, err
 		}
 
-		// 🎯 修复：严格对照通达信 gbbq.dat 物理存储偏移量进行解析
-		date := int(binary.LittleEndian.Uint32(buf[0:4])) // 0-3 字节：日期
+		// 🎯 严格对应的 28 字节存储布局偏移量
+		date := int(binary.LittleEndian.Uint32(buf[0:4])) // 0-3 字节：日期 (YYYYMMDD)
 		market := buf[4]                                 // 4 字节：市场标识 (0 sz, 1 sh, 2 bj)
-		codeStr := strings.TrimSpace(string(buf[5:11]))   // 5-10 字节：6位股票代码
+		
+		// 5-10 字节为 6 位股票代码，安全剔除可能存在的 \x00 (Null 字符) 和空白字符
+		codeRaw := string(buf[5:11])
+		codeClean := strings.ReplaceAll(codeRaw, "\x00", "")
+		codeStr := strings.TrimSpace(codeClean)
+		
 		category := buf[11]                              // 11 字节：变更类别
 
+		// 防御性设计：兼容二进制整数与 ASCII 字符两套方案
 		prefix := "sz"
-		if market == 1 {
+		if market == 1 || market == '1' {
 			prefix = "sh"
-		} else if market == 2 {
+		} else if market == 2 || market == '2' {
 			prefix = "bj"
 		}
 		tdxCode := prefix + codeStr
@@ -118,6 +126,16 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 			})
 		}
 	}
+
+	// 保持不变：按照时间轴严格升序排序
+	for code := range equityMap {
+		sort.Slice(equityMap[code], func(i, j int) bool {
+			return equityMap[code][i].Date < equityMap[code][j].Date
+		})
+	}
+
+	return gbbqMap, equityMap, nil
+}
 
 	// 保持不变：按照时间轴严格升序排序
 	for code := range equityMap {
