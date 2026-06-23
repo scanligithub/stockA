@@ -58,7 +58,7 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
-// LoadGbbqDat 🛡️ 终极修正版：严格按 28 字节对齐解析标准的 gbbq.dat 文件
+// LoadGbbqDat 🛡️ 严格按通达信标准的 28 字节物理对齐解析 gbbq.dat 文件，解决文件指针偏移导致的全局乱码
 func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -69,7 +69,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	gbbqMap := make(map[string]map[int]GbbqEvent)
 	equityMap := make(map[string][]EquityEventOrdered)
 	
-	// 🎯 核心修正：通达信标准 gbbq 物理单条记录长度必须为 28 字节，防止指针累积偏移导致全局乱码
+	// 🎯 核心修正：单条记录物理长度必须为 28 字节，防止 29 字节导致累积 1 字节位移偏差
 	buf := make([]byte, 28)
 
 	for {
@@ -83,7 +83,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 
 		// 🎯 严格对应的 28 字节存储布局偏移量
 		date := int(binary.LittleEndian.Uint32(buf[0:4])) // 0-3 字节：日期 (YYYYMMDD)
-		market := buf[4]                                 // 4 字节：市场标识 (0 sz, 1 sh, 2 bj)
+		market := buf[4]                                 // 4 字节：市场标识 (0: sz, 1: sh, 2: bj)
 		
 		// 5-10 字节为 6 位股票代码，安全剔除可能存在的 \x00 (Null 字符) 和空白字符
 		codeRaw := string(buf[5:11])
@@ -92,7 +92,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 		
 		category := buf[11]                              // 11 字节：变更类别
 
-		// 防御性设计：兼容二进制整数与 ASCII 字符两套方案
+		// 防御性设计：兼容二进制整数与 ASCII 字符两套底层编码方案
 		prefix := "sz"
 		if market == 1 || market == '1' {
 			prefix = "sh"
@@ -127,7 +127,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 		}
 	}
 
-	// 保持不变：按照时间轴严格升序排序
+	// 按照时间轴严格升序排序
 	for code := range equityMap {
 		sort.Slice(equityMap[code], func(i, j int) bool {
 			return equityMap[code][i].Date < equityMap[code][j].Date
@@ -137,19 +137,6 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	return gbbqMap, equityMap, nil
 }
 
-	// 保持不变：按照时间轴严格升序排序
-	for code := range equityMap {
-		sort.Slice(equityMap[code], func(i, j int) bool {
-			return equityMap[code][i].Date < equityMap[code][j].Date
-		})
-	}
-
-	return gbbqMap, equityMap, nil
-}
-
-// ---------------------------------------------------------
-// 1. Prepare 阶段：使用 100% 编译稳定的历史接口拉取股票主列表
-// ---------------------------------------------------------
 func runFetchList() {
 	fmt.Println("[Go Engine] Mode: LIST - Fetching A-shares list...")
 	cli, err := tdx.DialDefault()
@@ -192,9 +179,6 @@ func runFetchList() {
 	fmt.Printf("[Go Engine] Master stock list resolved: %d stocks.\n", len(masterList))
 }
 
-// ---------------------------------------------------------
-// 2. Fetch 阶段：多协程并行，本地对齐股本与 14 列指标直出
-// ---------------------------------------------------------
 func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 	if codesStr == "" {
 		return
@@ -227,7 +211,6 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 	defer outFile.Close()
 
 	csvWriter := csv.NewWriter(outFile)
-	// 🚀 精准对齐 14 列标准 Schema 头部输出
 	csvWriter.Write([]string{
 		"code", "date", "open", "high", "low", "close", "volume", "amount", 
 		"adjustFactor", "total_shares", "float_shares", "total_mv", "float_mv", "turn",
@@ -312,7 +295,7 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 					totalMV := pClose * lastTotalShares
 					floatMV := pClose * lastFloatShares
 
-					// 换手率 = (K线手量 * 100 / 流通股) * 100
+					// 换手率
 					turn := 0.0
 					if lastFloatShares > 0 {
 						turn = (pVolume * 10000.0 / lastFloatShares)
