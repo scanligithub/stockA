@@ -58,7 +58,7 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
-// LoadGbbqDat 🛡️ 诊断自适应解析器：内置物理黑匣子，输出 Raw 二进制对照日志
+// LoadGbbqDat 🛡️ 全能自适应解析器：自动精准识别 4字节/270字节/0字节文件头
 func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -66,23 +66,27 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	}
 	defer file.Close()
 
-	// 获取文件物理属性
 	stat, err := file.Stat()
 	if err != nil {
 		return nil, nil, err
 	}
 	fileSize := stat.Size()
 
-	// 🎯 核心逻辑：智能识别头部大小
+	// 🎯 核心自适应判定防线
 	headerSize := int64(0)
-	if fileSize%29 != 0 && (fileSize-270)%29 == 0 {
+	if (fileSize-4)%29 == 0 {
+		headerSize = 4
+		fmt.Printf("[Go Engine] 🎯 Auto-detected: Official Web GBBQ with 4-byte count header. Total records: %d\n", (fileSize-4)/29)
+	} else if (fileSize-270)%29 == 0 {
 		headerSize = 270
-		fmt.Printf("[Go Engine] 📊 Auto-detected: Local TDX cache gbbq.dat with 270-byte header. File size: %d bytes\n", fileSize)
+		fmt.Printf("[Go Engine] 🎯 Auto-detected: Local TDX Cache GBBQ with 270-byte header. Total records: %d\n", (fileSize-270)/29)
+	} else if fileSize%29 == 0 {
+		headerSize = 0
+		fmt.Printf("[Go Engine] 🎯 Auto-detected: Raw GBBQ with 0-byte header. Total records: %d\n", fileSize/29)
 	} else {
-		fmt.Printf("[Go Engine] 📊 Auto-detected: Official web-downloaded gbbq with 0-byte header. File size: %d bytes\n", fileSize)
+		fmt.Printf("[Go Engine] ⚠️ Warning: Unrecognized file alignment size (%d). Defaulting to headerSize=0\n", fileSize)
 	}
 
-	// 寻轨至对应头部后方开始解包
 	_, err = file.Seek(headerSize, io.SeekStart)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to seek past header (%d bytes): %v", headerSize, err)
@@ -91,9 +95,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	gbbqMap := make(map[string]map[int]GbbqEvent)
 	equityMap := make(map[string][]EquityEventOrdered)
 	
-	// 读取 29 字节（保持对齐），解析前 28 字节，忽略第 29 字节
 	buf := make([]byte, 29)
-	printCount := 0
 
 	for {
 		_, err := io.ReadFull(file, buf)
@@ -104,18 +106,15 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 			return nil, nil, err
 		}
 
-		// 🎯 严格对应前 28 字节的物理存储布局偏移量
 		date := int(binary.LittleEndian.Uint32(buf[0:4])) // 0-3 字节：日期 (YYYYMMDD)
-		market := buf[4]                                 // 4 字节：市场标识 (0: sz, 1: sh, 2: bj)
+		market := buf[4]                                 // 4 字节：市场标识
 		
-		// 5-10 字节为 6 位股票代码，安全剔除可能存在的 \x00 (Null 字符) 和空白字符
 		codeRaw := string(buf[5:11])
 		codeClean := strings.ReplaceAll(codeRaw, "\x00", "")
 		codeStr := strings.TrimSpace(codeClean)
 		
-		category := buf[11]                              // 11 字节：变更类别
+		category := buf[11]
 
-		// 防御性设计：兼容二进制整数与 ASCII 字符两套底层编码方案
 		prefix := "sz"
 		if market == 1 || market == '1' {
 			prefix = "sh"
@@ -129,15 +128,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 		songGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[20:24])))
 		peiGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[24:28])))
 
-		// 🔍 【黑匣子诊断日志】：打印前 15 条原始二进制数据及解析出的明文字段
-		if printCount < 15 {
-			fmt.Printf("[DEBUG GBBQ Record %d] raw_hex=%x | date=%d | market=%d | code=%q | tdxCode=%q | category=%d | fenHong=%.3f | peiJia=%.3f | songGu=%.3f | peiGu=%.3f\n",
-				printCount, buf, date, market, codeStr, tdxCode, category, fenHong, peiJia, songGu, peiGu)
-			printCount++
-		}
-
 		if category == 1 {
-			// A. 处理除权除息
 			if _, ok := gbbqMap[tdxCode]; !ok {
 				gbbqMap[tdxCode] = make(map[int]GbbqEvent)
 			}
@@ -148,7 +139,6 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 				PeiGu:   peiGu,
 			}
 		} else if category == 2 || category == 3 || category == 5 || category == 7 || category == 8 || category == 9 || category == 10 {
-			// B. 处理股本变动快照
 			equityMap[tdxCode] = append(equityMap[tdxCode], EquityEventOrdered{
 				Date:        date,
 				FloatShares: songGu,
@@ -157,7 +147,6 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 		}
 	}
 
-	// 按照时间轴严格升序排序
 	for code := range equityMap {
 		sort.Slice(equityMap[code], func(i, j int) bool {
 			return equityMap[code][i].Date < equityMap[code][j].Date
@@ -306,8 +295,6 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 					pLow := float64(bar.Low) / 1000.0
 					pClose := float64(bar.Close) / 1000.0
 					pVolume := float64(bar.Volume)
-					
-					// 显式将自定义整型 protocol.Price 强转为 float64，并除以 1000.0 换算为标准元
 					pAmount := float64(bar.Amount) / 1000.0
 
 					// 🚀 A. 计算复权因子 adjustFactor
