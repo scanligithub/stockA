@@ -16,14 +16,32 @@ def main():
         print(f"❌ Error: {gbbq_path} not found!")
         sys.exit(1)
         
-    # 调用 Python 社区成熟的解密内核直读
     reader = GbbqReader()
-    df = reader.get_df(gbbq_path)
+    try:
+        df = reader.get_df(gbbq_path)
+    except Exception as e:
+        print(f"❌ PyTDX Reader failed with error: {e}")
+        sys.exit(1)
+        
+    if df is None:
+        print("❌ Error: PyTDX returned None!")
+        sys.exit(1)
+        
+    print("📊 Successfully parsed GBBQ DataFrame!")
+    print(f"   - Row count: {len(df)}")
+    print(f"   - Shape: {df.shape}")
+    print(f"   - Columns: {df.columns.tolist()}") # 🎯 核心诊断：打印出实际拥有的列名
     
-    # 过滤并提取核心字段：代码,日期,类别,分红,配股价,送股数,配股数
-    df = df[['code', 'date', 'category', 'fenhong', 'peijia', 'songgu', 'peigu']]
+    if df.empty:
+        print("❌ Error: DataFrame is empty!")
+        sys.exit(1)
+        
+    print("📋 First 5 rows of decoded data:")
+    print(df.head()) # 🎯 核心诊断：打印前 5 行解密数据样例
+    
+    # 智能安全落盘：不再进行过滤，直接输出
     df.to_csv(out_path, index=False)
-    print(f"✅ GBBQ parsed successfully! Saved to {out_path}, total rows: {len(df)}")
+    print(f"✅ Saved clean GBBQ to {out_path}")
 
 if __name__ == "__main__":
     main()
