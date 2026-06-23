@@ -1,13 +1,11 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -23,7 +21,6 @@ type StockMaster struct {
 	CodeName string `json:"code_name"`
 }
 
-// GbbqEvent 对应 Category 1 的除权除息数据
 type GbbqEvent struct {
 	FenHong float64
 	PeiJia  float64
@@ -31,17 +28,16 @@ type GbbqEvent struct {
 	PeiGu   float64
 }
 
-// EquityEventOrdered 对应 Category 2-10 的股本变动快照，按时间升序对齐
 type EquityEventOrdered struct {
 	Date        int
-	FloatShares float64 // 盘后流通股本 (单位：股)
-	TotalShares float64 // 盘后总股本 (单位：股)
+	FloatShares float64
+	TotalShares float64
 }
 
 func main() {
 	modeFlag := flag.String("mode", "fetch", "Mode: 'list' (fetch master list) or 'fetch' (download klines)")
 	codesFlag := flag.String("codes", "", "Comma separated stock codes")
-	gbbqPath := flag.String("gbbq", "gbbq.dat", "Local binary gbbq.dat file path")
+	gbbqPath := flag.String("gbbq", "gbbq_clean.csv", "Local clean GBBQ CSV file path")
 	outFlag := flag.String("out", "temp_kline.csv", "Output CSV path")
 	flag.Parse()
 
@@ -51,82 +47,57 @@ func main() {
 	}
 
 	if *modeFlag == "fetch" {
-		runFetchKlinesWithLocalDat(*codesFlag, *gbbqPath, *outFlag)
+		runFetchKlinesWithLocalCSV(*codesFlag, *gbbqPath, *outFlag)
 		return
 	}
 
 	fmt.Println("Unknown mode.")
 }
 
-// LoadGbbqDat 🛡️ 全能自适应解析器：自动精准识别 4字节/270字节/0字节文件头
-func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
+// LoadGbbqCSV 直接极速读取由 Python 翻译出来的纯净 GBBQ 数据
+func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer file.Close()
 
-	stat, err := file.Stat()
+	gbbqMap := make(map[string]map[int]GbbqEvent)
+	equityMap := make(map[string][]EquityEventOrdered)
+
+	reader := csv.NewReader(file)
+	// 跳过 CSV 头部
+	_, err = reader.Read()
 	if err != nil {
 		return nil, nil, err
 	}
-	fileSize := stat.Size()
-
-	// 🎯 核心自适应判定防线
-	headerSize := int64(0)
-	if (fileSize-4)%29 == 0 {
-		headerSize = 4
-		fmt.Printf("[Go Engine] 🎯 Auto-detected: Official Web GBBQ with 4-byte count header. Total records: %d\n", (fileSize-4)/29)
-	} else if (fileSize-270)%29 == 0 {
-		headerSize = 270
-		fmt.Printf("[Go Engine] 🎯 Auto-detected: Local TDX Cache GBBQ with 270-byte header. Total records: %d\n", (fileSize-270)/29)
-	} else if fileSize%29 == 0 {
-		headerSize = 0
-		fmt.Printf("[Go Engine] 🎯 Auto-detected: Raw GBBQ with 0-byte header. Total records: %d\n", fileSize/29)
-	} else {
-		fmt.Printf("[Go Engine] ⚠️ Warning: Unrecognized file alignment size (%d). Defaulting to headerSize=0\n", fileSize)
-	}
-
-	_, err = file.Seek(headerSize, io.SeekStart)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to seek past header (%d bytes): %v", headerSize, err)
-	}
-
-	gbbqMap := make(map[string]map[int]GbbqEvent)
-	equityMap := make(map[string][]EquityEventOrdered)
-	
-	buf := make([]byte, 29)
 
 	for {
-		_, err := io.ReadFull(file, buf)
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
+		record, err := reader.Read()
+		if err == io.EOF {
 			break
 		}
 		if err != nil {
 			return nil, nil, err
 		}
 
-		date := int(binary.LittleEndian.Uint32(buf[0:4])) // 0-3 字节：日期 (YYYYMMDD)
-		market := buf[4]                                 // 4 字节：市场标识
-		
-		codeRaw := string(buf[5:11])
-		codeClean := strings.ReplaceAll(codeRaw, "\x00", "")
-		codeStr := strings.TrimSpace(codeClean)
-		
-		category := buf[11]
+		// 列顺序：code,date,category,fenhong,peijia,songgu,peigu
+		codeStr := record[0]
+		date, _ := strconv.Atoi(record[1])
+		category, _ := strconv.Atoi(record[2])
+		fenHong, _ := strconv.ParseFloat(record[3], 64)
+		peiJia, _ := strconv.ParseFloat(record[4], 64)
+		songGu, _ := strconv.ParseFloat(record[5], 64)
+		peiGu, _ := strconv.ParseFloat(record[6], 64)
 
+		// 🎯 根据 A 股证券代码规则，智能补全交易所前缀
 		prefix := "sz"
-		if market == 1 || market == '1' {
+		if strings.HasPrefix(codeStr, "60") || strings.HasPrefix(codeStr, "68") {
 			prefix = "sh"
-		} else if market == 2 || market == '2' {
+		} else if strings.HasPrefix(codeStr, "43") || strings.HasPrefix(codeStr, "83") || strings.HasPrefix(codeStr, "87") || strings.HasPrefix(codeStr, "88") || strings.HasPrefix(codeStr, "92") {
 			prefix = "bj"
 		}
 		tdxCode := prefix + codeStr
-
-		fenHong := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[12:16])))
-		peiJia := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[16:20])))
-		songGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[20:24])))
-		peiGu := float64(math.Float32frombits(binary.LittleEndian.Uint32(buf[24:28])))
 
 		if category == 1 {
 			if _, ok := gbbqMap[tdxCode]; !ok {
@@ -198,7 +169,7 @@ func runFetchList() {
 	fmt.Printf("[Go Engine] Master stock list resolved: %d stocks.\n", len(masterList))
 }
 
-func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
+func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 	if codesStr == "" {
 		return
 	}
@@ -217,10 +188,10 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 		codeMap[tdxCode] = c
 	}
 
-	fmt.Printf("[Go Engine] Parsing local binary GBBQ: %s...\n", gbbqPath)
-	gbbqMap, equityMap, err := LoadGbbqDat(gbbqPath)
+	fmt.Printf("[Go Engine] Loading clean GBBQ CSV: %s...\n", gbbqPath)
+	gbbqMap, equityMap, err := LoadGbbqCSV(gbbqPath)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to parse local gbbq.dat: %v", err))
+		panic(fmt.Sprintf("Failed to load clean GBBQ CSV: %v", err))
 	}
 
 	gbbqCount := 0
@@ -231,7 +202,7 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 	for _, arr := range equityMap {
 		equityCount += len(arr)
 	}
-	fmt.Printf("[Go Engine] GBBQ resolved: %d stocks with %d ex-div events, %d stocks with %d capital events.\n", len(gbbqMap), gbbqCount, len(equityMap), equityCount)
+	fmt.Printf("[Go Engine] GBBQ loaded: %d stocks with %d ex-div events, %d stocks with %d capital events.\n", len(gbbqMap), gbbqCount, len(equityMap), equityCount)
 
 	outFile, err := os.Create(outPath)
 	if err != nil {
