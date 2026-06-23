@@ -58,7 +58,7 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
-// LoadGbbqDat 🛡️ 严格按通达信标准的 28 字节物理对齐解析 gbbq.dat 文件，解决文件指针偏移导致的全局乱码
+// LoadGbbqDat 🛡️ 严格按通达信标准的 270 字节头部跳过 + 29 字节磁盘物理对齐解析 gbbq.dat 文件
 func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -66,11 +66,17 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	}
 	defer file.Close()
 
+	// 🎯 核心修正 A：通达信 gbbq.dat 文件头部有 270 字节的系统信息，必须跳过才能对齐后续的 29 字节记录体
+	_, err = file.Seek(270, io.SeekStart)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to seek past 270-byte header: %v", err)
+	}
+
 	gbbqMap := make(map[string]map[int]GbbqEvent)
 	equityMap := make(map[string][]EquityEventOrdered)
 	
-	// 🎯 核心修正：单条记录物理长度必须为 28 字节，防止 29 字节导致累积 1 字节位移偏差
-	buf := make([]byte, 28)
+	// 读取 29 字节（保持文件指针移动对齐），解析前 28 字节，丢弃第 29 字节。
+	buf := make([]byte, 29)
 
 	for {
 		_, err := io.ReadFull(file, buf)
@@ -81,7 +87,7 @@ func LoadGbbqDat(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 			return nil, nil, err
 		}
 
-		// 🎯 严格对应的 28 字节存储布局偏移量
+		// 🎯 严格对应前 28 字节的物理存储布局偏移量
 		date := int(binary.LittleEndian.Uint32(buf[0:4])) // 0-3 字节：日期 (YYYYMMDD)
 		market := buf[4]                                 // 4 字节：市场标识 (0: sz, 1: sh, 2: bj)
 		
@@ -204,6 +210,16 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 		panic(fmt.Sprintf("Failed to parse local gbbq.dat: %v", err))
 	}
 
+	gbbqCount := 0
+	for _, m := range gbbqMap {
+		gbbqCount += len(m)
+	}
+	equityCount := 0
+	for _, arr := range equityMap {
+		equityCount += len(arr)
+	}
+	fmt.Printf("[Go Engine] GBBQ resolved: %d stocks with %d ex-div events, %d stocks with %d capital events.\n", len(gbbqMap), gbbqCount, len(equityMap), equityCount)
+
 	outFile, err := os.Create(outPath)
 	if err != nil {
 		panic(err)
@@ -266,7 +282,9 @@ func runFetchKlinesWithLocalDat(codesStr, gbbqPath, outPath string) {
 					pLow := float64(bar.Low) / 1000.0
 					pClose := float64(bar.Close) / 1000.0
 					pVolume := float64(bar.Volume)
-					pAmount := bar.Amount
+					
+					// 🎯 核心修正 B：显式将自定义整型 protocol.Price 强转为 float64，并除以 1000.0 换算为标准元
+					pAmount := float64(bar.Amount) / 1000.0
 
 					// 🚀 A. 计算复权因子 adjustFactor
 					if ev, ok := events[dateInt]; ok && prevClose > 0 {
