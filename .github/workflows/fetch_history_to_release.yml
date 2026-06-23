@@ -37,6 +37,14 @@ jobs:
           mv gbbq gbbq.dat
           ls -lh gbbq.dat
 
+      - name: Install Python GBBQ Decryptor Deps
+        run: pip install pytdx pandas
+
+      - name: Run Python GBBQ Decoder (1 second)
+        run: |
+          python scripts/parse_gbbq.py gbbq.dat gbbq_clean.csv
+          ls -lh gbbq_clean.csv
+
       - name: Initialize Go Module
         run: |
           go mod init stockA || true
@@ -56,7 +64,7 @@ jobs:
           name: master-metadata
           path: |
             stock_list_master.json
-            gbbq.dat
+            gbbq_clean.csv
           retention-days: 1
 
   fetch-full-history:
@@ -94,7 +102,7 @@ jobs:
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
       
-      - name: Fetch Full History (Local gbbq.dat + Sina Flow)
+      - name: Fetch Full History (Local gbbq_clean.csv + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
@@ -160,7 +168,7 @@ jobs:
           merge-multiple: true
           path: all_artifacts
           
-      # 🌟 新增：在单个 Finalize 节点极速拉取 37 字段全市场历史财报归档 (约 86 秒)
+      # 🌟 在单个 Finalize 节点极速拉取 37 字段全市场历史财报归档 (约 86 秒)
       - name: 🌐 Download All Stocks 37-Column F10 Financial Data
         run: |
           pip install polars
@@ -175,12 +183,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" || true
-          gh release edit archive --draft=false --prerelease=false
-          gh release upload archive output/*.parquet output/*.json output/*.md --clobber
-
-      # 🌟 将 QC 报告和全市场 F10 财务数据审计报告双重注入到 Job 总结页
-      - name: Publish Consolidated Summaries
+          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" --clobber || true
+          gh release upload archive output/*.parquet --clobber
+          
+      - name: Publish Consolidated Summaries to Workflow Page
         if: always()
         run: |
           if [ -f output/f10_audit_summary.md ]; then
