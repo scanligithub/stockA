@@ -1,9 +1,9 @@
 name: Daily Update to Hugging Face
 
 on:
-  schedule:
-    - cron: '0 10 * * 1-5' # 北京时间周一至周五下午 18:00 自动运行
-  workflow_dispatch:
+  repository_dispatch:
+    types: [daily_update]       # 允许外部服务通过该事件名称触发
+  workflow_dispatch:             # 仍保留手动触发选项
 
 permissions:
   contents: write
