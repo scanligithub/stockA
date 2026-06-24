@@ -2,7 +2,6 @@ import os
 import sys
 import pandas as pd
 import requests
-import re
 import json
 import datetime
 import time
@@ -21,332 +20,155 @@ INDEX_LIST = {
     "sz.399993": "中证信息安全", "sz.399975": "证券公司", "sz.399986": "中证银行", "sz.399932": "中证消费", "sz.399933": "中证医药",
     "sz.399967": "中证军工", "sz.399989": "中证医疗", "sz.399971": "中证传媒", "sz.399997": "中证白酒", "sh.000934": "中证能源",
     "sh.000935": "中证原材料", "sz.399990": "煤炭等权", "sz.399998": "中证有色", "sz.399974": "国证国企", "sh.000157": "中证央企",
-    "sh.931238": "SSH黄金股票"
+    "sh.931238": "SSH黄金股票", "sh.930606": "中证黄金产业"
 }
 
-TDX_SERVERS = [
-    {"ip": "124.71.187.122", "port": 7709, "desc": "华为云节点"},
-    {"ip": "119.29.25.16", "port": 7709, "desc": "腾讯云节点"},
-    {"ip": "119.147.171.115", "port": 7709, "desc": "招商证券主站"}
-]
-
-# 核心 Header 伪装
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-EM_HEADERS = {"User-Agent": UA, "Accept": "*/*", "Referer": "https://quote.eastmoney.com/", "Connection": "keep-alive"}
-SINA_HEADERS = {"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"}
-QQ_HEADERS = {"User-Agent": UA, "Referer": "https://gu.qq.com/"}
-NETEASE_HEADERS = {"User-Agent": UA, "Referer": "http://quotes.money.163.com/"}
-
-def get_code_aliases(pure_code):
-    aliases = [pure_code]
-    if pure_code.startswith("93"): aliases.append("H3" + pure_code[2:])
-    elif pure_code.startswith("0009"): 
-        aliases.extend(["H309" + pure_code[4:], "3999" + pure_code[4:]])
-    elif pure_code.startswith("3999"): aliases.append("H309" + pure_code[4:])
-    return list(dict.fromkeys(aliases))
+# 全局雪球 Session（核心提速点：只拿一次 Cookie，拒绝频繁握手）
+XQ_SESSION = requests.Session()
+XQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36"})
+try:
+    XQ_SESSION.get("https://xueqiu.com/", timeout=5) # 极速获取 xq_a_token
+except:
+    pass
 
 # [Engine 1] TDX 
 def fetch_from_tdx(api, code_str, is_incremental=False):
-    parts = code_str.split('.')
-    prefix, pure_code = parts[0], parts[1]
-    primary_market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
-    alternative_markets = [0, 1] if primary_market in [0, 1] else [2]
-    markets_to_try = [primary_market] + [m for m in alternative_markets if m != primary_market]
-    aliases = get_code_aliases(pure_code)
-    
-    for market in markets_to_try:
-        for alias_code in aliases:
-            all_bars = []
-            max_bars = 500 if is_incremental else 5600
-            step = 800
-            for start_idx in range(0, max_bars, step):
-                count_to_fetch = min(step, max_bars - start_idx)
-                try:
-                    bars = api.get_index_bars(9, market, alias_code, start_idx, count_to_fetch)
-                    if not bars:
-                        bars = api.get_security_bars(9, market, alias_code, start_idx, count_to_fetch)
-                    if not bars: break
-                    all_bars.extend(bars)
-                    if len(bars) < count_to_fetch: break
-                except:
-                    break
-            if all_bars:
-                return all_bars, market, primary_market, alias_code
-    return [], None, primary_market, pure_code
-
-# [Engine 2] EastMoney (多域名轮换 WAF 穿透)
-def fetch_from_eastmoney(code_str, is_incremental=False):
     prefix, pure_code = code_str.split('.')
-    lmt = 500 if is_incremental else 10000
+    market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
     
-    candidate_prefixes = ["119", "1", "0", "124", "90", "2", "47"]
-    candidate_secids = [f"{p}.{pure_code}" for p in candidate_prefixes]
-
-    domains = ["push2his.eastmoney.com", "73.push2his.eastmoney.com", "11.push2his.eastmoney.com"]
-    session = requests.Session()
-    
-    for domain in domains:
-        url = f"https://{domain}/api/qt/stock/kline/get"
-        for secid in candidate_secids:
-            params = {"secid": secid, "fields1": "f1,f2,f3,f4,f5,f6", "fields2": "f51,f52,f53,f54,f55,f56,f57,f58", "klt": "101", "fqt": "0", "end": "20500101", "lmt": str(lmt), "_": str(int(time.time()*1000))}
+    # 极简别名映射
+    aliases = [pure_code]
+    if pure_code.startswith("93"): aliases.append("H3" + pure_code[2:])
+    elif pure_code.startswith("3999"): aliases.append("H309" + pure_code[4:])
+        
+    for alias in aliases:
+        all_bars = []
+        max_bars = 500 if is_incremental else 5600
+        step = 800
+        for start_idx in range(0, max_bars, step):
+            count = min(step, max_bars - start_idx)
             try:
-                res = session.get(url, params=params, headers=EM_HEADERS, timeout=4).json()
-                if res and res.get("data") and res["data"].get("klines"):
-                    bars = []
-                    for k in res["data"]["klines"]:
-                        parts = k.split(',')
-                        bars.append({"datetime": parts[0], "open": float(parts[1]), "close": float(parts[2]),
-                                     "high": float(parts[3]), "low": float(parts[4]), "vol": float(parts[5]) * 100, "amount": float(parts[6])})
-                    return bars, secid
+                bars = api.get_index_bars(9, market, alias, start_idx, count)
+                if not bars: break
+                all_bars.extend(bars)
+                if len(bars) < count: break
             except:
-                continue
+                break
+        if all_bars:
+            return all_bars, "TDX"
     return [], None
 
-# [Engine 3] Sina Official API
-def fetch_from_sina(code_str, is_incremental=False):
-    symbol = code_str.replace('.', '')
-    limit = 500 if is_incremental else 6000
-    url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen={limit}"
-    try:
-        text = requests.get(url, headers=SINA_HEADERS, timeout=6).text
-        match = re.search(r'\[.*\]', text)
-        if match:
-            array_str = re.sub(r'([{,])\s*([a-zA-Z_]+)\s*:', r'\1"\2":', match.group(0))
-            bars = []
-            for k in json.loads(array_str):
-                bars.append({"datetime": k.get("day", ""), "open": float(k.get("open", 0)), "close": float(k.get("close", 0)),
-                             "high": float(k.get("high", 0)), "low": float(k.get("low", 0)), "vol": float(k.get("volume", 0)), "amount": 0.0})
-            return bars
-    except:
-        pass
-    return []
-
-# [Engine 4] Tencent API
-def fetch_from_tencent(code_str, is_incremental=False):
-    symbol = code_str.replace('.', '')
-    limit = 500 if is_incremental else 6000
-    url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={symbol},day,,,{limit},qfq"
-    try:
-        res = requests.get(url, headers=QQ_HEADERS, timeout=6).json()
-        if res and res.get("data") and res["data"].get(symbol):
-            bars = []
-            for k in res["data"][symbol].get("day", []):
-                bars.append({"datetime": k[0], "open": float(k[1]), "close": float(k[2]),
-                             "high": float(k[3]), "low": float(k[4]), "vol": float(k[5]) * 100 if len(k) > 5 else 0.0, "amount": 0.0})
-            return bars
-    except:
-        pass
-    return []
-
-# [Engine 5] NetEase 163 
-def fetch_from_netease(code_str, is_incremental=False):
-    prefix, pure_code = code_str.split('.')
-    ne_prefix = "0" if prefix == "sh" else "1"
-    symbol = ne_prefix + pure_code
-    end_date = datetime.datetime.now().strftime("%Y%m%d")
-    start_date = "19900101" if not is_incremental else (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
-    url = f"http://quotes.money.163.com/service/chddata.html?code={symbol}&start={start_date}&end={end_date}&fields=TCLOSE;HIGH;LOW;TOPEN;VOTURNOVER;VATURNOVER"
-    try:
-        res = requests.get(url, headers=NETEASE_HEADERS, timeout=8)
-        if res.status_code == 200 and "TCLOSE" in res.text:
-            lines = res.text.strip().split('\n')
-            bars = []
-            for line in lines[1:]: 
-                parts = line.split(',')
-                if len(parts) >= 9 and parts[3] != '0.0':
-                    dt_str = f"{parts[0][:4]}-{parts[0][4:6]}-{parts[0][6:]}" 
-                    bars.append({
-                        "datetime": dt_str, "close": float(parts[3] or 0), "high": float(parts[4] or 0),
-                        "low": float(parts[5] or 0), "open": float(parts[6] or 0),
-                        "vol": float(parts[7] or 0), "amount": float(parts[8] or 0)
-                    })
-            if bars:
-                bars.reverse() 
-                return bars
-    except:
-        pass
-    return []
-
-# [Engine 6] Baostock
-def fetch_from_baostock(code_str, is_incremental=False):
-    try:
-        import baostock as bs
-        bs.login()
-        start_date = "1990-01-01" if not is_incremental else (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
-        end_date = datetime.datetime.now().strftime("%Y-%m-%d")
-        rs = bs.query_history_k_data_plus(
-            code_str, 
-            "date,open,high,low,close,volume,amount", 
-            start_date=start_date, end_date=end_date, frequency="d"
-        )
-        bars = []
-        if rs and rs.error_code == '0':
-            while rs.next():
-                row = rs.get_row_data()
-                if row[1] and row[4]: 
-                    bars.append({
-                        "datetime": row[0], "open": float(row[1]), "high": float(row[2]),
-                        "low": float(row[3]), "close": float(row[4]), 
-                        "vol": float(row[5]) if row[5] else 0.0, 
-                        "amount": float(row[6]) if row[6] else 0.0
-                    })
-        bs.logout()
-        return bars
-    except:
-        try: bs.logout() 
-        except: pass
-        return []
-
-# 🌟 [Engine 7] Xueqiu (雪球：对极新、极冷门中证 93 系列具备 100% 统治力)
+# [Engine 2] Xueqiu (专杀 sh.93xxxx 系列新指数)
 def fetch_from_xueqiu(code_str, is_incremental=False):
     symbol = code_str.replace('.', '').upper()
     limit = 500 if is_incremental else 10000
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    })
+    ts = int(time.time() * 1000)
+    url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={ts}&period=day&type=before&count=-{limit}&indicator=kline"
+    
     try:
-        # 1. 动态骗取雪球首页风控 Cookie (xq_a_token)
-        session.get("https://xueqiu.com/", timeout=5)
-        
-        # 2. 拉取底层 JSON
-        ts = int(time.time() * 1000)
-        url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={ts}&period=day&type=before&count=-{limit}&indicator=kline"
-        
-        res = session.get(url, timeout=5).json()
-        
+        res = XQ_SESSION.get(url, timeout=5).json()
         if res and res.get("data") and res["data"].get("item"):
             bars = []
             for item in res["data"]["item"]:
                 dt = datetime.datetime.fromtimestamp(item[0]/1000).strftime('%Y-%m-%d')
                 bars.append({
-                    "datetime": dt,
-                    "open": float(item[2]), "high": float(item[3]),
+                    "datetime": dt, "open": float(item[2]), "high": float(item[3]),
                     "low": float(item[4]), "close": float(item[5]),
                     "vol": float(item[1]), "amount": float(item[9] or 0.0)
                 })
-            return bars
+            return bars, "❄️ Xueqiu"
     except:
         pass
-    return []
+    return [], None
+
+# [Engine 3] Tencent (宽基与旧指数的稳定备胎)
+def fetch_from_tencent(code_str, is_incremental=False):
+    symbol = code_str.replace('.', '')
+    limit = 500 if is_incremental else 6000
+    url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={symbol},day,,,{limit},qfq"
+    try:
+        res = requests.get(url, headers={"Referer": "https://gu.qq.com/"}, timeout=5).json()
+        if res and res.get("data") and res["data"].get(symbol):
+            bars = []
+            for k in res["data"][symbol].get("day", []):
+                bars.append({"datetime": k[0], "open": float(k[1]), "close": float(k[2]),
+                             "high": float(k[3]), "low": float(k[4]), "vol": float(k[5])*100 if len(k)>5 else 0.0, "amount": 0.0})
+            return bars, "🐧 Tencent"
+    except:
+        pass
+    return [], None
 
 def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
-    print(f"📥 Starting Hepta-Engine (七擎) Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
+    print(f"📥 Starting Tri-Core Sniper (三擎智能狙击) Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
     
     api = TdxHq_API()
     connected = False
-    for s in TDX_SERVERS:
-        try:
-            if api.connect(s['ip'], s['port']):
-                connected = True
-                print(f"✅ TDX Engine Online: {s['ip']}")
-                break
-        except Exception:
-            continue
-            
-    if not connected:
-        print("⚠️ TDX Engine failed to connect. Relying entirely on HTTP Engines.")
-        
+    try:
+        if api.connect("119.147.171.115", 7709): # 直接连最稳的招商证券节点
+            connected = True
+            print("✅ TDX Engine Online")
+    except:
+        pass
+
     all_rows = []
     success_records = []
     failed_records = []
-    MAX_RETRIES = 3 
+    
+    # 将 55 只指数分类，应用智能路由策略
+    for code_str, name in INDEX_LIST.items():
+        print(f"📊 Pulling: {code_str} ({name}) ...", end="")
+        
+        bars, engine_used = [], None
+        
+        # 🚀 智能路由：如果是 sh.93 开头的新定制指数，直接跳过无效查询，优先用雪球！
+        if code_str.startswith("sh.93"):
+            engines_to_try = [
+                lambda c: fetch_from_xueqiu(c, is_incremental),
+                lambda c: fetch_from_tdx(api, c, is_incremental) if connected else ([], None)
+            ]
+        else:
+            # 常规指数：优先 TDX，其次腾讯，最后雪球兜底
+            engines_to_try = [
+                lambda c: fetch_from_tdx(api, c, is_incremental) if connected else ([], None),
+                lambda c: fetch_from_tencent(c, is_incremental),
+                lambda c: fetch_from_xueqiu(c, is_incremental)
+            ]
 
-    try:
-        for code_str in INDEX_LIST.keys():
-            print(f"📊 Pulling Index: {code_str}...")
+        # 极速探测
+        for func in engines_to_try:
+            bars, engine_used = func(code_str)
+            if bars: 
+                break
+
+        # 如果第一轮全挂，仅进行 1 次无脑重试雪球
+        if not bars:
+            time.sleep(1)
+            bars, engine_used = fetch_from_xueqiu(code_str, is_incremental)
+
+        if not bars:
+            print(" ❌ Failed.")
+            failed_records.append(code_str)
+            continue
             
-            bars, actual_market, primary_market, alias_code = [], None, None, None
-            used_engine = "TDX"
-            
-            for attempt in range(MAX_RETRIES):
-                # [1] TDX
-                if connected:
-                    bars, actual_market, primary_market, alias_code = fetch_from_tdx(api, code_str, is_incremental)
-                
-                # [2] EastMoney
-                if not bars:
-                    bars, em_secid = fetch_from_eastmoney(code_str, is_incremental)
-                    if bars: used_engine, actual_market, alias_code = "🌐 EastMoney", "Web", em_secid
-                        
-                # [3] Sina 
-                if not bars:
-                    bars = fetch_from_sina(code_str, is_incremental)
-                    if bars: used_engine, actual_market, alias_code = "🧿 Sina", "Web", code_str
-                    
-                # [4] Tencent
-                if not bars:
-                    bars = fetch_from_tencent(code_str, is_incremental)
-                    if bars: used_engine, actual_market, alias_code = "🐧 Tencent", "Web", code_str
-
-                # [5] NetEase 163 
-                if not bars:
-                    bars = fetch_from_netease(code_str, is_incremental)
-                    if bars: used_engine, actual_market, alias_code = "📦 NetEase", "Web", code_str
-
-                # [6] Baostock
-                if not bars:
-                    bars = fetch_from_baostock(code_str, is_incremental)
-                    if bars: used_engine, actual_market, alias_code = "🛡️ Baostock", "Web", code_str
-
-                # 🌟 [7] Xueqiu (专杀 93 系列冷门指数的最终武器)
-                if not bars:
-                    print(f"   ⚠️ Escaping to ❄️ Xueqiu Engine for {code_str}...")
-                    bars = fetch_from_xueqiu(code_str, is_incremental)
-                    if bars: used_engine, actual_market, alias_code = "❄️ Xueqiu", "Web", code_str
-
-                if bars:
-                    break
-                    
-                if attempt < MAX_RETRIES - 1:
-                    delay = 2 * (attempt + 1)
-                    print(f"   ⏳ [Retry {attempt + 1}/{MAX_RETRIES - 1}] All engines missed {code_str}. Retrying in {delay}s...")
-                    time.sleep(delay)
-
-            if not bars:
-                print(f"❌ Failed: ALL 7 Engines defeated by {code_str} after {MAX_RETRIES} attempts.")
-                failed_records.append({"code": code_str, "name": INDEX_LIST[code_str]})
-                continue
-            
-            is_redirected = (used_engine != "TDX") or (actual_market != primary_market) or (alias_code != code_str.split('.')[1])
-            success_records.append({
-                "code": code_str, "name": INDEX_LIST[code_str], "count": len(bars),
-                "redirected": is_redirected, "target_code": alias_code, "engine": used_engine
+        print(f" ✅ Success ({engine_used}, {len(bars)} rows)")
+        success_records.append(code_str)
+        
+        for b in bars:
+            all_rows.append({
+                "date": b['datetime'][:10], "code": code_str, "open": float(b['open']),
+                "high": float(b['high']), "low": float(b['low']), "close": float(b['close']),
+                "volume": float(b['vol']), "amount": float(b['amount']),
             })
             
-            if is_redirected:
-                print(f"   🔄 [Healed] Handled by {used_engine} (Target: '{alias_code}')")
-                
-            print(f"   Success. Fetched {len(bars)} records.")
-            for b in bars:
-                all_rows.append({
-                    "date": b['datetime'][:10], "code": code_str, "open": float(b['open']),
-                    "high": float(b['high']), "low": float(b['low']), "close": float(b['close']),
-                    "volume": float(b['vol']), "amount": float(b['amount']),
-                })
-    finally:
-        if connected: api.disconnect()
+    if connected: api.disconnect()
         
-    print("\n" + "="*85)
-    print("📋 指数七擎大满贯架构总结报告 (INDEX HEPTA-ENGINE DOWNLOAD SUMMARY)")
-    print("="*85)
-    print(f"   - 目标抓取总数: {len(INDEX_LIST)} 只")
-    print(f"   - 成功同步指数: {len(success_records)} / {len(INDEX_LIST)}")
-    print(f"   - 失败异常指数: {len(failed_records)} / {len(INDEX_LIST)}")
-    
+    print(f"\n📋 INDEX SNIPER DOWNLOAD SUMMARY: {len(success_records)} / {len(INDEX_LIST)} SUCCESS")
     if failed_records:
-        print("\n❌ 失败明细:")
-        for f in failed_records:
-            print(f"   • {f['code']} ({f['name']}) -> [核心引擎全军覆没]")
-            
-    print("\n✅ 成功同步明细 (SUCCESSFUL LIST):")
-    for s in success_records:
-        heal_msg = f"  [{s['engine']} | Hit: {s['target_code']}]" if s['redirected'] else ""
-        print(f"   • {s['code']} ({s['name']}): 已拉取 {s['count']:,} 行 K 线{heal_msg}")
-    print("="*85 + "\n")
+        print(f"❌ FAILED: {failed_records}")
         
-    if not all_rows: sys.exit(1)
+    if not all_rows: 
+        sys.exit(1)
         
     df = pd.DataFrame(all_rows)
     df['date_dt'] = pd.to_datetime(df['date'], errors='coerce')
@@ -360,18 +182,14 @@ def main():
     df['pctChg'] = df.groupby('code')['close'].pct_change() * 100
     df['pctChg'] = df['pctChg'].fillna(0.0)
     
-    df['open'] = df['open'].astype('float32')
-    df['high'] = df['high'].astype('float32')
-    df['low'] = df['low'].astype('float32')
-    df['close'] = df['close'].astype('float32')
-    df['volume'] = df['volume'].astype('float64')
-    df['amount'] = df['amount'].astype('float64')
-    df['pctChg'] = df['pctChg'].astype('float32')
+    # 统一精度
+    for col in ['open', 'high', 'low', 'close', 'pctChg']: df[col] = df[col].astype('float32')
+    for col in ['volume', 'amount']: df[col] = df[col].astype('float64')
     
     os.makedirs("temp_parts", exist_ok=True)
     out_path = "temp_parts/index_kline_all.parquet"
     df.to_parquet(out_path, index=False)
-    print(f"🎉 物理落盘成功：已将 {len(df):,} 行高精度指数数据写入至 {out_path}!")
+    print(f"🎉 物理落盘成功至 {out_path}!")
 
 if __name__ == "__main__":
     main()
