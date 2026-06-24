@@ -5,6 +5,7 @@ import requests
 import re
 import json
 import datetime
+import time  # 🎯 新增 time 模块支持延时重试
 from pytdx.hq import TdxHq_API
 
 # 55 只量化指数
@@ -129,17 +130,13 @@ def fetch_from_sina(code_str, is_incremental=False):
         pass
     return []
 
-# 🌟 [Engine 4] Xueqiu (雪球终极破壁引擎)
+# [Engine 4] Xueqiu (雪球终极破壁引擎)
 def fetch_from_xueqiu(code_str, is_incremental=False):
-    """
-    🎯 重写：通过完美模拟浏览器初次访问主页，拿取雪球底层的 Cookie 认证凭据，无视新发指数白名单墙。
-    """
     prefix, pure_code = code_str.split('.')
-    symbol = prefix.upper() + pure_code # e.g., SH932252
+    symbol = prefix.upper() + pure_code 
     limit = 500 if is_incremental else 10000
     
     session = requests.Session()
-    # 模拟真实用户的雪球浏览器请求头
     xq_headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -149,26 +146,19 @@ def fetch_from_xueqiu(code_str, is_incremental=False):
     session.headers.update(xq_headers)
     
     try:
-        # 第一步：隐蔽获取通行证
         session.get("https://xueqiu.com/", timeout=5)
-        
-        # 第二步：携带通行证请求底层 JSON
-        import time
         current_ms = int(time.time() * 1000)
         api_headers = xq_headers.copy()
         api_headers["Referer"] = f"https://xueqiu.com/S/{symbol}"
         
         url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={current_ms}&period=day&type=before&count=-{limit}&indicator=kline"
-        
         res = session.get(url, headers=api_headers, timeout=8).json()
         if res and res.get("data") and res["data"].get("item"):
             bars = []
             for k in res["data"]["item"]:
-                # 🛡️ 强制 UTC+8 锁定，防止越界漂移
                 dt = datetime.datetime.fromtimestamp(k[0]/1000.0, tz=datetime.timezone(datetime.timedelta(hours=8))).strftime('%Y-%m-%d')
                 bars.append({
-                    "datetime": dt,
-                    "open": float(k[2] or 0), "high": float(k[3] or 0),
+                    "datetime": dt, "open": float(k[2] or 0), "high": float(k[3] or 0),
                     "low": float(k[4] or 0), "close": float(k[5] or 0),
                     "vol": float(k[1] or 0), "amount": float(k[9] or 0) if len(k) > 9 and k[9] else 0.0
                 })
@@ -187,39 +177,62 @@ def main():
         try:
             if api.connect(s['ip'], s['port']):
                 connected = True
+                print(f"✅ TDX Engine Online: {s['ip']}")
                 break
-        except:
+        except Exception:
             continue
             
+    if not connected:
+        print("⚠️ TDX Engine failed to connect. Relying entirely on HTTP Engines.")
+        
     all_rows = []
     success_records = []
     failed_records = []
     
+    # 🎯 最大重试次数设置
+    MAX_RETRIES = 3 
+
     try:
         for code_str in INDEX_LIST.keys():
             print(f"📊 Pulling Index: {code_str}...")
+            
             bars, actual_market, primary_market, alias_code = [], None, None, None
             used_engine = "TDX"
             
-            if connected:
-                bars, actual_market, primary_market, alias_code = fetch_from_tdx(api, code_str, is_incremental)
-            
-            if not bars:
-                bars, em_secid = fetch_from_eastmoney(code_str, is_incremental)
-                if bars: used_engine, actual_market, alias_code = "🌐 EastMoney", "Web", em_secid
-                    
-            if not bars:
-                bars = fetch_from_sina(code_str, is_incremental)
-                if bars: used_engine, actual_market, alias_code = "🧿 Sina", "Web", code_str
+            # 🎯 为单只指数包上 3 轮重试循环
+            for attempt in range(MAX_RETRIES):
+                # [1] TDX
+                if connected:
+                    bars, actual_market, primary_market, alias_code = fetch_from_tdx(api, code_str, is_incremental)
                 
-            # 🎯 召唤雪球破壁引擎，针对 932252 这种最新指数发出必杀
-            if not bars:
-                print(f"   ⚠️ Escaping to ❄️ Xueqiu Probing Engine for {code_str}...")
-                bars = fetch_from_xueqiu(code_str, is_incremental)
-                if bars: used_engine, actual_market, alias_code = "❄️ Xueqiu", "Web", code_str
+                # [2] EastMoney
+                if not bars:
+                    bars, em_secid = fetch_from_eastmoney(code_str, is_incremental)
+                    if bars: used_engine, actual_market, alias_code = "🌐 EastMoney", "Web", em_secid
+                        
+                # [3] Sina Official
+                if not bars:
+                    bars = fetch_from_sina(code_str, is_incremental)
+                    if bars: used_engine, actual_market, alias_code = "🧿 Sina", "Web", code_str
+                    
+                # [4] Xueqiu
+                if not bars:
+                    bars = fetch_from_xueqiu(code_str, is_incremental)
+                    if bars: used_engine, actual_market, alias_code = "❄️ Xueqiu", "Web", code_str
 
+                # 如果本轮成功抓到数据，跳出重试循环
+                if bars:
+                    break
+                    
+                # 如果没拿到数据且还没到最后一次重试，执行退避延时
+                if attempt < MAX_RETRIES - 1:
+                    delay = 2 * (attempt + 1) # 渐进式延时: 2秒, 4秒...
+                    print(f"   ⏳ [Retry {attempt + 1}/{MAX_RETRIES - 1}] All engines missed {code_str}. Retrying in {delay}s...")
+                    time.sleep(delay)
+
+            # 评估重试循环结束后的最终结果
             if not bars:
-                print(f"❌ Failed: ALL 4 Core Engines completely defeated by {code_str}")
+                print(f"❌ Failed: ALL 4 Engines defeated by {code_str} after {MAX_RETRIES} attempts.")
                 failed_records.append({"code": code_str, "name": INDEX_LIST[code_str]})
                 continue
             
@@ -252,7 +265,7 @@ def main():
     if failed_records:
         print("\n❌ 失败明细 (这已是国内公开数据的极限边界):")
         for f in failed_records:
-            print(f"   • {f['code']} ({f['name']}) -> [核心引擎全部阵亡]")
+            print(f"   • {f['code']} ({f['name']}) -> [核心引擎 3 轮重试全部阵亡]")
             
     print("\n✅ 成功同步明细 (SUCCESSFUL LIST):")
     for s in success_records:
@@ -273,19 +286,3 @@ def main():
     
     df['pctChg'] = df.groupby('code')['close'].pct_change() * 100
     df['pctChg'] = df['pctChg'].fillna(0.0)
-    
-    df['open'] = df['open'].astype('float32')
-    df['high'] = df['high'].astype('float32')
-    df['low'] = df['low'].astype('float32')
-    df['close'] = df['close'].astype('float32')
-    df['volume'] = df['volume'].astype('float64')
-    df['amount'] = df['amount'].astype('float64')
-    df['pctChg'] = df['pctChg'].astype('float32')
-    
-    os.makedirs("temp_parts", exist_ok=True)
-    out_path = "temp_parts/index_kline_all.parquet"
-    df.to_parquet(out_path, index=False)
-    print(f"🎉 物理落盘成功：已将 {len(df):,} 行高精度指数数据写入至 {out_path}!")
-
-if __name__ == "__main__":
-    main()
