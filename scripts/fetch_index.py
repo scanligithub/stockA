@@ -7,20 +7,17 @@ import datetime
 import time
 from pytdx.hq import TdxHq_API
 
-# 56 只量化指数
+# 已剔除 19 只不稳定指数，保留 37 只高冗余稳健核心指数
 INDEX_LIST = {
     "sh.000001": "上证指数", "sz.399001": "深证成指", "sz.399006": "创业板指", "sh.000688": "科创50", "bj.899050": "北证50",
     "sh.000016": "上证50", "sh.000300": "沪深300", "sh.000905": "中证500", "sh.000852": "中证1000", "sh.000851": "中证2000",
-    "sz.399303": "国证2000", "sh.000985": "中证全指", "sz.399330": "深证100", "sh.000090": "上证180",
-    "sh.000922": "中证红利", "sz.399324": "深证红利", "sh.000015": "红利指数", "sh.000918": "沪深300成长", "sh.000919": "沪深300价值",
-    "sh.000807": "中证超大盘", "sh.000827": "中证中盘", "sh.000925": "中证基本面50", "sh.000978": "中证大盘价值", "sz.399317": "国证1000",
-    "sz.399807": "中证人工智能", "sz.399977": "中证机器人", "sh.932252": "中证低空经济主题", "sz.399812": "国证芯片", "sh.000973": "中证半导体",
-    "sh.931160": "中证数据要素", "sz.399354": "国证人工智能", "sz.399673": "创业板50", "sz.399979": "中证空天安全", "sz.399285": "国证新能源",
-    "sh.931151": "中证光伏产业", "sz.399008": "中小100", "sh.931494": "中证消费电子主题", "sh.931409": "中证电网设备", "sh.931152": "中证创新药产业",
-    "sz.399993": "中证信息安全", "sz.399975": "证券公司", "sz.399986": "中证银行", "sz.399932": "中证消费", "sz.399933": "中证医药",
-    "sz.399967": "中证军工", "sz.399989": "中证医疗", "sz.399971": "中证传媒", "sz.399997": "中证白酒", "sh.000934": "中证能源",
-    "sh.000935": "中证原材料", "sz.399990": "煤炭等权", "sz.399998": "中证有色", "sz.399974": "国证国企", "sh.000157": "中证央企",
-    "sh.931238": "SSH黄金股票", "sh.930606": "中证黄金产业"
+    "sz.399303": "国证2000", "sz.399330": "深证100", "sh.000090": "上证180", "sz.399324": "深证红利", "sh.000015": "红利指数", 
+    "sh.000827": "中证中盘", "sz.399317": "国证1000", "sz.399807": "中证人工智能", "sz.399812": "国证芯片", 
+    "sz.399354": "国证人工智能", "sz.399673": "创业板50", "sz.399285": "国证新能源", "sz.399008": "中小100", 
+    "sz.399993": "中证信息安全", "sz.399975": "证券公司", "sz.399986": "中证银行", "sz.399932": "中证消费", 
+    "sz.399933": "中证医药", "sz.399967": "中证军工", "sz.399989": "中证医疗", "sz.399971": "中证传媒", 
+    "sz.399997": "中证白酒", "sh.000934": "中证能源", "sh.000935": "中证原材料", "sz.399990": "煤炭等权", 
+    "sz.399998": "中证有色", "sz.399974": "国证国企"
 }
 
 TDX_SERVERS = [
@@ -45,8 +42,7 @@ def fetch_from_tdx(api, code_str, is_incremental=False):
     market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
     
     aliases = [pure_code]
-    if pure_code.startswith("93"): aliases.append("H3" + pure_code[2:])
-    elif pure_code.startswith("3999"): aliases.append("H309" + pure_code[4:])
+    if pure_code.startswith("3999"): aliases.append("H309" + pure_code[4:])
         
     for alias in aliases:
         all_bars = []
@@ -68,7 +64,6 @@ def fetch_from_tdx(api, code_str, is_incremental=False):
 # [Engine 2] Xueqiu (安全边界版：硬性截断单次上限至 2000 行，绝不触发 400 报错)
 def fetch_from_xueqiu(code_str, is_incremental=False):
     symbol = code_str.replace('.', '').upper()
-    # 🎯 核心修正：单次请求行数超过 2000 会被雪球 WAF 直接拦截，这里强制截断
     limit = 500 if is_incremental else 2000
     ts = int(time.time() * 1000)
     url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={ts}&period=day&type=before&count=-{limit}&indicator=kline"
@@ -92,7 +87,6 @@ def fetch_from_xueqiu(code_str, is_incremental=False):
 # [Engine 3] Tencent (安全边界版：硬性截断单次上限至 1000 行)
 def fetch_from_tencent(code_str, is_incremental=False):
     symbol = code_str.replace('.', '')
-    # 🎯 核心修正：腾讯单次请求行数超过 1000 极易返回空数据或报错，强制截断
     limit = 500 if is_incremental else 1000
     url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={symbol},day,,,{limit},qfq"
     try:
@@ -113,7 +107,6 @@ def main():
     
     api = TdxHq_API()
     connected = False
-    # 🎯 核心修正：多服务器自动重试连接，直到连上最稳的节点
     for s in TDX_SERVERS:
         try:
             print(f"🔌 Trying to connect TDX Server: {s['desc']} ({s['ip']})...")
@@ -136,18 +129,12 @@ def main():
         
         bars, engine_used = [], None
         
-        # 智能路由：如果是新定制指数，直接优先用雪球
-        if code_str.startswith("sh.93"):
-            engines_to_try = [
-                lambda c: fetch_from_xueqiu(c, is_incremental),
-                lambda c: fetch_from_tdx(api, c, is_incremental) if connected else ([], None)
-            ]
-        else:
-            engines_to_try = [
-                lambda c: fetch_from_tdx(api, c, is_incremental) if connected else ([], None),
-                lambda c: fetch_from_tencent(c, is_incremental),
-                lambda c: fetch_from_xueqiu(c, is_incremental)
-            ]
+        # 宽基与核心指数顺序：优先 TDX，其次腾讯，最后雪球兜底
+        engines_to_try = [
+            lambda c: fetch_from_tdx(api, c, is_incremental) if connected else ([], None),
+            lambda c: fetch_from_tencent(c, is_incremental),
+            lambda c: fetch_from_xueqiu(c, is_incremental)
+        ]
 
         # 顺序探测
         for func in engines_to_try:
