@@ -30,9 +30,9 @@ TDX_SERVERS = [
     {"ip": "119.147.171.115", "port": 7709, "desc": "招商证券主站"}
 ]
 
-# 🎯 核心修复：各大引擎的 Referer 物理隔离，防止 WAF 跨站拦截
+# 核心 Header 伪装
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-EM_HEADERS = {"User-Agent": UA, "Referer": "https://quote.eastmoney.com/"}
+EM_HEADERS = {"User-Agent": UA, "Accept": "*/*", "Referer": "https://quote.eastmoney.com/", "Connection": "keep-alive"}
 SINA_HEADERS = {"User-Agent": UA, "Referer": "https://finance.sina.com.cn/"}
 QQ_HEADERS = {"User-Agent": UA, "Referer": "https://gu.qq.com/"}
 NETEASE_HEADERS = {"User-Agent": UA, "Referer": "http://quotes.money.163.com/"}
@@ -74,45 +74,32 @@ def fetch_from_tdx(api, code_str, is_incremental=False):
                 return all_bars, market, primary_market, alias_code
     return [], None, primary_market, pure_code
 
-# [Engine 2] EastMoney (修复了 Referer)
+# [Engine 2] EastMoney (多域名轮换 WAF 穿透)
 def fetch_from_eastmoney(code_str, is_incremental=False):
     prefix, pure_code = code_str.split('.')
     lmt = 500 if is_incremental else 10000
-    candidate_prefixes = ["1", "0", "119", "124", "90", "2", "47"]
-    candidate_secids = [f"{p}.{pure_code}" for p in candidate_prefixes]
     
-    EM_CODE_MAP = {
-        "sh.932252": ["119.932252", "90.932252", "1.932252"],
-        "sh.931160": ["119.931160", "90.931160", "1.931160"],
-        "sh.931151": ["119.931151", "90.931151", "1.931151"],
-        "sh.931494": ["119.931494", "90.931494", "1.931494"],
-        "sh.931409": ["119.931409", "90.931409", "1.931409"],
-        "sh.931152": ["119.931152", "90.931152", "1.931152"],
-        "sh.930606": ["119.930606", "90.930606", "1.930606"],
-        "sh.931238": ["119.931238", "90.931238", "1.931238"],
-        "sz.399977": ["90.399977", "124.399977", "0.399977"],
-        "sz.399979": ["90.399979", "124.399979", "0.399979"],
-        "sh.000918": ["119.000918", "90.000918", "1.000918"]
-    }
-    if code_str in EM_CODE_MAP:
-        candidate_secids = EM_CODE_MAP[code_str] + candidate_secids
-        candidate_secids = list(dict.fromkeys(candidate_secids))
+    candidate_prefixes = ["119", "1", "0", "124", "90", "2", "47"]
+    candidate_secids = [f"{p}.{pure_code}" for p in candidate_prefixes]
 
-    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-    for secid in candidate_secids:
-        params = {"secid": secid, "fields1": "f1,f2,f3,f4,f5,f6", "fields2": "f51,f52,f53,f54,f55,f56,f57,f58", "klt": "101", "fqt": "0", "end": "20500101", "lmt": str(lmt)}
-        try:
-            # 🎯 强制使用东财专属 Header
-            res = requests.get(url, params=params, headers=EM_HEADERS, timeout=5).json()
-            if res and res.get("data") and res["data"].get("klines"):
-                bars = []
-                for k in res["data"]["klines"]:
-                    parts = k.split(',')
-                    bars.append({"datetime": parts[0], "open": float(parts[1]), "close": float(parts[2]),
-                                 "high": float(parts[3]), "low": float(parts[4]), "vol": float(parts[5]) * 100, "amount": float(parts[6])})
-                return bars, secid
-        except:
-            continue
+    domains = ["push2his.eastmoney.com", "73.push2his.eastmoney.com", "11.push2his.eastmoney.com"]
+    session = requests.Session()
+    
+    for domain in domains:
+        url = f"https://{domain}/api/qt/stock/kline/get"
+        for secid in candidate_secids:
+            params = {"secid": secid, "fields1": "f1,f2,f3,f4,f5,f6", "fields2": "f51,f52,f53,f54,f55,f56,f57,f58", "klt": "101", "fqt": "0", "end": "20500101", "lmt": str(lmt), "_": str(int(time.time()*1000))}
+            try:
+                res = session.get(url, params=params, headers=EM_HEADERS, timeout=4).json()
+                if res and res.get("data") and res["data"].get("klines"):
+                    bars = []
+                    for k in res["data"]["klines"]:
+                        parts = k.split(',')
+                        bars.append({"datetime": parts[0], "open": float(parts[1]), "close": float(parts[2]),
+                                     "high": float(parts[3]), "low": float(parts[4]), "vol": float(parts[5]) * 100, "amount": float(parts[6])})
+                    return bars, secid
+            except:
+                continue
     return [], None
 
 # [Engine 3] Sina Official API
@@ -151,43 +138,101 @@ def fetch_from_tencent(code_str, is_incremental=False):
         pass
     return []
 
-# 🌟 [Engine 5] NetEase 163 (网易底层历史 CSV 归档接口，无差别兜底神器)
+# [Engine 5] NetEase 163 
 def fetch_from_netease(code_str, is_incremental=False):
     prefix, pure_code = code_str.split('.')
-    # 网易代码体系：上海=0，深圳=1
     ne_prefix = "0" if prefix == "sh" else "1"
     symbol = ne_prefix + pure_code
-    
     end_date = datetime.datetime.now().strftime("%Y%m%d")
     start_date = "19900101" if not is_incremental else (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y%m%d")
     url = f"http://quotes.money.163.com/service/chddata.html?code={symbol}&start={start_date}&end={end_date}&fields=TCLOSE;HIGH;LOW;TOPEN;VOTURNOVER;VATURNOVER"
-    
     try:
         res = requests.get(url, headers=NETEASE_HEADERS, timeout=8)
         if res.status_code == 200 and "TCLOSE" in res.text:
             lines = res.text.strip().split('\n')
             bars = []
-            for line in lines[1:]: # 忽略表头
+            for line in lines[1:]: 
                 parts = line.split(',')
-                # 网易返回: 日期,股票代码,名称,收盘价,最高价,最低价,开盘价,成交量,成交金额
                 if len(parts) >= 9 and parts[3] != '0.0':
-                    dt_str = f"{parts[0][:4]}-{parts[0][4:6]}-{parts[0][6:]}" # YYYY-MM-DD
+                    dt_str = f"{parts[0][:4]}-{parts[0][4:6]}-{parts[0][6:]}" 
                     bars.append({
-                        "datetime": dt_str,
-                        "close": float(parts[3] or 0), "high": float(parts[4] or 0),
+                        "datetime": dt_str, "close": float(parts[3] or 0), "high": float(parts[4] or 0),
                         "low": float(parts[5] or 0), "open": float(parts[6] or 0),
                         "vol": float(parts[7] or 0), "amount": float(parts[8] or 0)
                     })
             if bars:
-                bars.reverse() # 网易是倒序，必须反转为正序
+                bars.reverse() 
                 return bars
-    except Exception as e:
+    except:
+        pass
+    return []
+
+# [Engine 6] Baostock
+def fetch_from_baostock(code_str, is_incremental=False):
+    try:
+        import baostock as bs
+        bs.login()
+        start_date = "1990-01-01" if not is_incremental else (datetime.datetime.now() - datetime.timedelta(days=365)).strftime("%Y-%m-%d")
+        end_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        rs = bs.query_history_k_data_plus(
+            code_str, 
+            "date,open,high,low,close,volume,amount", 
+            start_date=start_date, end_date=end_date, frequency="d"
+        )
+        bars = []
+        if rs and rs.error_code == '0':
+            while rs.next():
+                row = rs.get_row_data()
+                if row[1] and row[4]: 
+                    bars.append({
+                        "datetime": row[0], "open": float(row[1]), "high": float(row[2]),
+                        "low": float(row[3]), "close": float(row[4]), 
+                        "vol": float(row[5]) if row[5] else 0.0, 
+                        "amount": float(row[6]) if row[6] else 0.0
+                    })
+        bs.logout()
+        return bars
+    except:
+        try: bs.logout() 
+        except: pass
+        return []
+
+# 🌟 [Engine 7] Xueqiu (雪球：对极新、极冷门中证 93 系列具备 100% 统治力)
+def fetch_from_xueqiu(code_str, is_incremental=False):
+    symbol = code_str.replace('.', '').upper()
+    limit = 500 if is_incremental else 10000
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    })
+    try:
+        # 1. 动态骗取雪球首页风控 Cookie (xq_a_token)
+        session.get("https://xueqiu.com/", timeout=5)
+        
+        # 2. 拉取底层 JSON
+        ts = int(time.time() * 1000)
+        url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={ts}&period=day&type=before&count=-{limit}&indicator=kline"
+        
+        res = session.get(url, timeout=5).json()
+        
+        if res and res.get("data") and res["data"].get("item"):
+            bars = []
+            for item in res["data"]["item"]:
+                dt = datetime.datetime.fromtimestamp(item[0]/1000).strftime('%Y-%m-%d')
+                bars.append({
+                    "datetime": dt,
+                    "open": float(item[2]), "high": float(item[3]),
+                    "low": float(item[4]), "close": float(item[5]),
+                    "vol": float(item[1]), "amount": float(item[9] or 0.0)
+                })
+            return bars
+    except:
         pass
     return []
 
 def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
-    print(f"📥 Starting Penta-Engine Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
+    print(f"📥 Starting Hepta-Engine (七擎) Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
     
     api = TdxHq_API()
     connected = False
@@ -206,7 +251,6 @@ def main():
     all_rows = []
     success_records = []
     failed_records = []
-    
     MAX_RETRIES = 3 
 
     try:
@@ -221,7 +265,7 @@ def main():
                 if connected:
                     bars, actual_market, primary_market, alias_code = fetch_from_tdx(api, code_str, is_incremental)
                 
-                # [2] EastMoney (已修复 Referer，王者归来)
+                # [2] EastMoney
                 if not bars:
                     bars, em_secid = fetch_from_eastmoney(code_str, is_incremental)
                     if bars: used_engine, actual_market, alias_code = "🌐 EastMoney", "Web", em_secid
@@ -236,11 +280,21 @@ def main():
                     bars = fetch_from_tencent(code_str, is_incremental)
                     if bars: used_engine, actual_market, alias_code = "🐧 Tencent", "Web", code_str
 
-                # [5] NetEase 163 CSV 暴力解析 (针对极冷门最新指数)
+                # [5] NetEase 163 
                 if not bars:
-                    print(f"   ⚠️ Escaping to 📦 NetEase Archive Engine for {code_str}...")
                     bars = fetch_from_netease(code_str, is_incremental)
-                    if bars: used_engine, actual_market, alias_code = "📦 NetEase 163", "Web", code_str
+                    if bars: used_engine, actual_market, alias_code = "📦 NetEase", "Web", code_str
+
+                # [6] Baostock
+                if not bars:
+                    bars = fetch_from_baostock(code_str, is_incremental)
+                    if bars: used_engine, actual_market, alias_code = "🛡️ Baostock", "Web", code_str
+
+                # 🌟 [7] Xueqiu (专杀 93 系列冷门指数的最终武器)
+                if not bars:
+                    print(f"   ⚠️ Escaping to ❄️ Xueqiu Engine for {code_str}...")
+                    bars = fetch_from_xueqiu(code_str, is_incremental)
+                    if bars: used_engine, actual_market, alias_code = "❄️ Xueqiu", "Web", code_str
 
                 if bars:
                     break
@@ -251,7 +305,7 @@ def main():
                     time.sleep(delay)
 
             if not bars:
-                print(f"❌ Failed: ALL 5 Engines defeated by {code_str} after {MAX_RETRIES} attempts.")
+                print(f"❌ Failed: ALL 7 Engines defeated by {code_str} after {MAX_RETRIES} attempts.")
                 failed_records.append({"code": code_str, "name": INDEX_LIST[code_str]})
                 continue
             
@@ -275,16 +329,16 @@ def main():
         if connected: api.disconnect()
         
     print("\n" + "="*85)
-    print("📋 指数五擎大满贯架构总结报告 (INDEX PENTA-ENGINE DOWNLOAD SUMMARY)")
+    print("📋 指数七擎大满贯架构总结报告 (INDEX HEPTA-ENGINE DOWNLOAD SUMMARY)")
     print("="*85)
     print(f"   - 目标抓取总数: {len(INDEX_LIST)} 只")
     print(f"   - 成功同步指数: {len(success_records)} / {len(INDEX_LIST)}")
     print(f"   - 失败异常指数: {len(failed_records)} / {len(INDEX_LIST)}")
     
     if failed_records:
-        print("\n❌ 失败明细 (这已是国内公开数据的极限边界):")
+        print("\n❌ 失败明细:")
         for f in failed_records:
-            print(f"   • {f['code']} ({f['name']}) -> [核心引擎 3 轮重试全部阵亡]")
+            print(f"   • {f['code']} ({f['name']}) -> [核心引擎全军覆没]")
             
     print("\n✅ 成功同步明细 (SUCCESSFUL LIST):")
     for s in success_records:
