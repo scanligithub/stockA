@@ -100,37 +100,18 @@ def main():
     k_files = glob.glob("all_artifacts/kline_part_*.parquet")
     f_files = glob.glob("all_artifacts/flow_part_*.parquet")
     sec_k_files = glob.glob("all_artifacts/sector_kline_full.parquet")
+    
+    # 🎯 独立读取高精度指数 Parquet 数据源
+    idx_source = glob.glob("all_artifacts/index_kline_all.parquet")
 
-    # 1. 创建视图与极速分流
     if k_files:
-        # 混合总物理表
-        con.execute(f"CREATE OR REPLACE VIEW v_kline_mixed AS SELECT * FROM read_parquet({k_files}, union_by_name=True)")
-        
-        # 🎯 个股视图：剔除所有指数代码（上海000/930/931/932，深圳399，北京899）
-        con.execute("""
-            CREATE OR REPLACE VIEW v_kline_raw AS 
-            SELECT * FROM v_kline_mixed 
-            WHERE NOT (code LIKE 'sh.000%' OR code LIKE 'sh.93%' OR code LIKE 'sz.399%' OR code LIKE 'bj.899%')
-        """)
-        
-        # 🎯 指数视图：保留所有指数（免除财务指标、市值和换手率，只保留价格与涨跌幅）
-        con.execute("""
-            CREATE OR REPLACE VIEW v_index_raw AS 
-            SELECT 
-                date,
-                code,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                amount,
-                pctChg
-            FROM v_kline_mixed 
-            WHERE (code LIKE 'sh.000%' OR code LIKE 'sh.93%' OR code LIKE 'sz.399%' OR code LIKE 'bj.899%')
-        """)
+        con.execute(f"CREATE OR REPLACE VIEW v_kline_raw AS SELECT * FROM read_parquet({k_files}, union_by_name=True)")
     else:
         con.execute("CREATE OR REPLACE VIEW v_kline_raw AS SELECT * FROM (SELECT '' as date, '' as code) WHERE 1=0")
+
+    if idx_source:
+        con.execute(f"CREATE OR REPLACE VIEW v_index_raw AS SELECT * FROM read_parquet('{idx_source[0]}')")
+    else:
         con.execute("CREATE OR REPLACE VIEW v_index_raw AS SELECT * FROM (SELECT '' as date, '' as code) WHERE 1=0")
 
     if f_files:
@@ -143,7 +124,7 @@ def main():
     else:
         con.execute("CREATE OR REPLACE VIEW v_sec_k AS SELECT * FROM (SELECT '' as date, '' as code) WHERE 1=0")
 
-    # 2. 载入 F10 财务指标计算 valuation
+    # 3. 载入 F10 财务指标计算 valuation
     f10_raw_path = "output/all_stocks_f10_raw.parquet"
     f10_ttm_df = calculate_ttm_net_profit(f10_raw_path)
     
@@ -193,7 +174,6 @@ def main():
     os.makedirs("output", exist_ok=True)
     targets = {}
 
-    # A 股个股主列表
     df_stocks = get_stock_list_with_names()
     if not df_stocks.empty:
         p = "output/stock_list.parquet"
@@ -201,16 +181,14 @@ def main():
         targets[p] = "stock_list.parquet"
         qc.check_dataframe(df_stocks, "stock_list.parquet", ["code_name"], file_path=p)
 
-    # 行业板块主列表
     if sec_k_files:
         p = 'output/sector_list.parquet'
         con.execute(f"COPY (SELECT DISTINCT code, name, type FROM v_sec_k ORDER BY type, code) TO '{p}' (FORMAT 'PARQUET')")
         targets[p] = "sector_list.parquet"
         qc.check_dataframe(pd.read_parquet(p), "sector_list.parquet", ["name"], file_path=p)
 
-    # 🎯 导出 55 只量化矩阵指数名称元数据表 index_list.parquet
+    # 导出 55 只量化矩阵指数名称元数据表 index_list.parquet
     index_meta = [
-        # 1. 宽基与规模 (14只)
         {"code": "sh.000001", "name": "上证指数"}, {"code": "sz.399001", "name": "深证成指"},
         {"code": "sz.399006", "name": "创业板指"}, {"code": "sh.000688", "name": "科创50"},
         {"code": "bj.899050", "name": "北证50"},   {"code": "sh.000016", "name": "上证50"},
@@ -218,13 +196,11 @@ def main():
         {"code": "sh.000852", "name": "中证1000"}, {"code": "sh.000851", "name": "中证2000"},
         {"code": "sz.399303", "name": "国证2000"}, {"code": "sh.000985", "name": "中证全指"},
         {"code": "sz.399330", "name": "深证100"},  {"code": "sh.000090", "name": "上证180"},
-        # 2. 风格与 Smart Beta (10只)
         {"code": "sh.000922", "name": "中证红利"}, {"code": "sz.399324", "name": "深证红利"},
         {"code": "sh.000015", "name": "红利指数"}, {"code": "sh.000918", "name": "沪深300成长"},
         {"code": "sh.000919", "name": "沪深300价值"}, {"code": "sh.000807", "name": "中证超大盘"},
         {"code": "sh.000827", "name": "中证中盘"}, {"code": "sh.000925", "name": "中证基本面50"},
         {"code": "sh.000978", "name": "中证大盘价值"}, {"code": "sz.399317", "name": "国证1000"},
-        # 3. 前沿科技与新质生产力 (16只)
         {"code": "sz.399807", "name": "中证人工智能"}, {"code": "sz.399977", "name": "中证机器人"},
         {"code": "sh.932252", "name": "中证低空经济主题"}, {"code": "sz.399812", "name": "国证芯片"},
         {"code": "sh.000973", "name": "中证半导体"}, {"code": "sh.931160", "name": "中证数据要素"},
@@ -233,7 +209,6 @@ def main():
         {"code": "sh.931151", "name": "中证光伏产业"}, {"code": "sz.399008", "name": "中小100"},
         {"code": "sh.931494", "name": "中证消费电子主题"}, {"code": "sh.931409", "name": "中证电网设备"},
         {"code": "sh.931152", "name": "中证创新药产业"}, {"code": "sz.399993", "name": "中证信息安全"},
-        # 4. 传统行业与大宗周期 (15只)
         {"code": "sz.399975", "name": "证券公司"}, {"code": "sz.399986", "name": "中证银行"},
         {"code": "sz.399932", "name": "中证消费"}, {"code": "sz.399933", "name": "中证医药"},
         {"code": "sz.399967", "name": "中证军工"}, {"code": "sz.399989", "name": "中证医疗"},
@@ -260,12 +235,11 @@ def main():
         print(f"🔪 Merging & Splitting Data for Year {y}...")
         start_date, end_date = f"{y}-01-01", f"{y}-12-31"
         
-        # 🎯 物理落盘任务链中正式并入并对齐 index_kline_{y}.parquet
         tasks = [
             ("v_kline", f"stock_kline_{y}.parquet", ["close", "volume", "peTTM", "pbMRQ", "total_mv", "turn"]),
             ("v_flow", f"stock_money_flow_{y}.parquet", ["net_amount"]),
             ("v_sec_k", f"sector_kline_{y}.parquet", ["close"]),
-            # 🌟 55 只常用指数历史 K 线落盘任务
+            # 🎯 高精度、零错位、日线完整的指数 parquet 切片物理生成任务
             ("v_index_raw", f"index_kline_{y}.parquet", ["close", "volume"])
         ]
         
