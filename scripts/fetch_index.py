@@ -21,7 +21,6 @@ INDEX_LIST = {
     "sh.930606": "中证黄金产业"
 }
 
-# 🎯 经过筛选的高频海外友好/券商托管骨干网 TDX 节点列表
 TDX_SERVERS = [
     {"ip": "124.71.187.122", "port": 7709, "desc": "华为云高带宽节点"},
     {"ip": "119.29.25.16", "port": 7709, "desc": "腾讯云高带宽节点"},
@@ -38,21 +37,34 @@ TDX_SERVERS = [
 def fetch_index_data(api, code_str, is_incremental=False):
     parts = code_str.split('.')
     prefix, pure_code = parts[0], parts[1]
-    market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
     
-    all_bars = []
-    max_bars = 500 if is_incremental else 5600
-    step = 800
+    # 🎯 核心自愈逻辑：构建尝试路由。
+    # 比如首选 sh(1)，如果失败则路由重定向尝试 sz(0)，最后兜底北京(2)
+    primary_market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
+    alternative_markets = [0, 1] if primary_market in [0, 1] else [2]
+    markets_to_try = [primary_market] + [m for m in alternative_markets if m != primary_market]
     
-    for start_idx in range(0, max_bars, step):
-        count_to_fetch = min(step, max_bars - start_idx)
-        bars = api.get_security_bars(9, market, pure_code, start_idx, count_to_fetch)
-        if not bars:
-            break
-        all_bars.extend(bars)
-        if len(bars) < count_to_fetch:
-            break
-    return all_bars
+    for market in markets_to_try:
+        all_bars = []
+        max_bars = 500 if is_incremental else 5600
+        step = 800
+        
+        for start_idx in range(0, max_bars, step):
+            count_to_fetch = min(step, max_bars - start_idx)
+            try:
+                bars = api.get_security_bars(9, market, pure_code, start_idx, count_to_fetch)
+                if not bars:
+                    break
+                all_bars.extend(bars)
+                if len(bars) < count_to_fetch:
+                    break
+            except:
+                break
+                
+        if all_bars:
+            return all_bars, market, primary_market
+            
+    return [], None, primary_market
 
 def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
@@ -63,7 +75,6 @@ def main():
     for s in TDX_SERVERS:
         print(f"🔌 Connection attempt to {s['ip']}:{s['port']} ({s['desc']})...")
         try:
-            # 🎯 核心修正：移除不支持的 timeout 关键字参数，恢复标准连接
             if api.connect(s['ip'], s['port']):
                 connected = True
                 print(f"✅ Connected to TDX Server: {s['ip']} ({s['desc']})")
@@ -80,11 +91,17 @@ def main():
     try:
         for code_str in INDEX_LIST.keys():
             print(f"📊 Pulling Index: {code_str}...")
-            bars = fetch_index_data(api, code_str, is_incremental=is_incremental)
+            bars, actual_market, primary_market = fetch_index_data(api, code_str, is_incremental=is_incremental)
+            
             if not bars:
                 print(f"⚠️ Warning: No bars fetched for {code_str}")
                 continue
             
+            # 🎯 打印重定向通知，展示数据自愈轨迹
+            if actual_market != primary_market:
+                print(f"   🔄 [Self-Healed] Redirected {code_str} to Market Partition {actual_market} (Primary was {primary_market})")
+                
+            print(f"   Success. Fetched {len(bars)} records.")
             for b in bars:
                 dt_str = b['datetime'][:10]
                 all_rows.append({
