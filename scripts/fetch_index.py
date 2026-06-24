@@ -2,7 +2,7 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-from pytdx.hq import TdxHq_API  # 🎯 修正：将 TdxHqAPI 替换为正确的 TdxHq_API
+from pytdx.hq import TdxHq_API
 import datetime
 
 # 55 只量化指数
@@ -21,10 +21,21 @@ INDEX_LIST = {
     "sh.930606": "中证黄金产业"
 }
 
+# 🎯 经过筛选的高频海外友好/券商托管骨干网 TDX 节点列表
 TDX_SERVERS = [
-    {"ip": "119.147.212.81", "port": 7709},
-    {"ip": "120.24.0.183", "port": 7709},
-    {"ip": "119.29.25.16", "port": 7709}
+    # 1. 云原生网络友好节点（极适合 Github Actions 容器环境，跨国穿透好）
+    {"ip": "124.71.187.122", "port": 7709, "desc": "华为云高带宽节点"},
+    {"ip": "119.29.25.16", "port": 7709, "desc": "腾讯云高带宽节点"},
+    {"ip": "124.223.116.142", "port": 7709, "desc": "腾讯云备用节点"},
+    # 2. 顶级大型券商托管于三大运营商核心机房的高等级服务器（稳定性强）
+    {"ip": "119.147.171.115", "port": 7709, "desc": "招商证券深圳主站"},
+    {"ip": "119.147.164.60", "port": 7709, "desc": "国信证券主站"},
+    {"ip": "112.95.140.93", "port": 7709, "desc": "华泰证券主站"},
+    # 3. 官方骨干网高频交易专线节点
+    {"ip": "115.238.90.165", "port": 7709, "desc": "浙江电信高带宽节点"},
+    {"ip": "218.75.126.9", "port": 7709, "desc": "浙江联通高带宽节点"},
+    {"ip": "120.24.0.183", "port": 7709, "desc": "深圳双线节点"},
+    {"ip": "119.147.212.81", "port": 7709, "desc": "广东电信节点"}
 ]
 
 def fetch_index_data(api, code_str, is_incremental=False):
@@ -50,15 +61,18 @@ def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
     print(f"📥 Starting PyTDX Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
     
-    api = TdxHq_API()  # 🎯 修正：创建 TdxHq_API 实例
+    api = TdxHq_API()
     connected = False
     for s in TDX_SERVERS:
+        print(f"🔌 Connection attempt to {s['ip']}:{s['port']} ({s['desc']})...")
         try:
-            if api.connect(s['ip'], s['port']):
+            # 🎯 设置 10.0 秒超时，给跨国 TCP 连接留足宽裕的排队和路由建立时间
+            if api.connect(s['ip'], s['port'], timeout=10.0):
                 connected = True
-                print(f"✅ Connected to TDX Server: {s['ip']}")
+                print(f"✅ Connected to TDX Server: {s['ip']} ({s['desc']})")
                 break
-        except:
+        except Exception as e:
+            print(f"⚠️ Failed to connect to {s['ip']}: {e}")
             continue
             
     if not connected:
@@ -68,8 +82,10 @@ def main():
     all_rows = []
     try:
         for code_str in INDEX_LIST.keys():
+            print(f"📊 Pulling Index: {code_str}...")
             bars = fetch_index_data(api, code_str, is_incremental=is_incremental)
             if not bars:
+                print(f"⚠️ Warning: No bars fetched for {code_str}")
                 continue
             
             for b in bars:
