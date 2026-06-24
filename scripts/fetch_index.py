@@ -2,10 +2,10 @@ import os
 import sys
 import pandas as pd
 import numpy as np
-from pytdx.hq import TdxHqAPI
+from pytdx.hq import TdxHq_API  # 🎯 修正：将 TdxHqAPI 替换为正确的 TdxHq_API
 import datetime
 
-# 55 只量化矩阵指数
+# 55 只量化指数
 INDEX_LIST = {
     "sh.000001": "上证指数", "sz.399001": "深证成指", "sz.399006": "创业板指", "sh.000688": "科创50", "bj.899050": "北证50",
     "sh.000016": "上证50", "sh.000300": "沪深300", "sh.000905": "中证500", "sh.000852": "中证1000", "sh.000851": "中证2000",
@@ -33,13 +33,11 @@ def fetch_index_data(api, code_str, is_incremental=False):
     market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
     
     all_bars = []
-    # 增量模式下抓取 500 行（覆盖当前年份即可），全历史模式抓取 5600 行（覆盖20+年）
     max_bars = 500 if is_incremental else 5600
     step = 800
     
     for start_idx in range(0, max_bars, step):
         count_to_fetch = min(step, max_bars - start_idx)
-        # 🎯 PyTDX 的 get_security_bars 自动适配指数的差分格式与正确的点数转换
         bars = api.get_security_bars(9, market, pure_code, start_idx, count_to_fetch)
         if not bars:
             break
@@ -52,7 +50,7 @@ def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
     print(f"📥 Starting PyTDX Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
     
-    api = TdxHqAPI()
+    api = TdxHq_API()  # 🎯 修正：创建 TdxHq_API 实例
     connected = False
     for s in TDX_SERVERS:
         try:
@@ -102,7 +100,7 @@ def main():
     df = df.drop_duplicates(subset=['date', 'code'], keep='last')
     df = df.sort_values(['code', 'date'])
     
-    # 🎯 物理计算每日涨跌幅百分比
+    # 物理计算每日涨跌幅百分比
     df['pctChg'] = df.groupby('code')['close'].pct_change() * 100
     df['pctChg'] = df['pctChg'].fillna(0.0)
     
