@@ -286,3 +286,19 @@ def main():
     
     df['pctChg'] = df.groupby('code')['close'].pct_change() * 100
     df['pctChg'] = df['pctChg'].fillna(0.0)
+    
+    df['open'] = df['open'].astype('float32')
+    df['high'] = df['high'].astype('float32')
+    df['low'] = df['low'].astype('float32')
+    df['close'] = df['close'].astype('float32')
+    df['volume'] = df['volume'].astype('float64')
+    df['amount'] = df['amount'].astype('float64')
+    df['pctChg'] = df['pctChg'].astype('float32')
+    
+    os.makedirs("temp_parts", exist_ok=True)
+    out_path = "temp_parts/index_kline_all.parquet"
+    df.to_parquet(out_path, index=False)
+    print(f"🎉 物理落盘成功：已将 {len(df):,} 行高精度指数数据写入至 {out_path}!")
+
+if __name__ == "__main__":
+    main()
