@@ -1,9 +1,8 @@
 import os
 import sys
 import pandas as pd
-import numpy as np
+import requests
 from pytdx.hq import TdxHq_API
-import datetime
 
 # 55 只量化指数
 INDEX_LIST = {
@@ -27,15 +26,10 @@ TDX_SERVERS = [
     {"ip": "124.223.116.142", "port": 7709, "desc": "腾讯云备用节点"},
     {"ip": "119.147.171.115", "port": 7709, "desc": "招商证券深圳主站"},
     {"ip": "119.147.164.60", "port": 7709, "desc": "国信证券主站"},
-    {"ip": "112.95.140.93", "port": 7709, "desc": "华泰证券主站"},
-    {"ip": "115.238.90.165", "port": 7709, "desc": "浙江电信高带宽节点"},
-    {"ip": "218.75.126.9", "port": 7709, "desc": "浙江联通高带宽节点"},
-    {"ip": "120.24.0.183", "port": 7709, "desc": "深圳双线节点"},
-    {"ip": "119.147.212.81", "port": 7709, "desc": "广东电信节点"}
+    {"ip": "112.95.140.93", "port": 7709, "desc": "华泰证券主站"}
 ]
 
 def get_code_aliases(pure_code):
-    """底层物理别名映射函数：自动生成通达信服务器内部使用的实际存储代码"""
     aliases = [pure_code]
     if pure_code.startswith("93"):
         aliases.append("H3" + pure_code[2:])
@@ -46,14 +40,14 @@ def get_code_aliases(pure_code):
         aliases.append("H309" + pure_code[4:])
     return list(dict.fromkeys(aliases))
 
-def fetch_index_data(api, code_str, is_incremental=False):
+# 🌟 引擎一：通达信抓取
+def fetch_from_tdx(api, code_str, is_incremental=False):
     parts = code_str.split('.')
     prefix, pure_code = parts[0], parts[1]
     
     primary_market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
     alternative_markets = [0, 1] if primary_market in [0, 1] else [2]
     markets_to_try = [primary_market] + [m for m in alternative_markets if m != primary_market]
-    
     aliases = get_code_aliases(pure_code)
     
     for market in markets_to_try:
@@ -65,16 +59,13 @@ def fetch_index_data(api, code_str, is_incremental=False):
             for start_idx in range(0, max_bars, step):
                 count_to_fetch = min(step, max_bars - start_idx)
                 try:
-                    # 双管齐下：优先专用包，备用标准包
                     bars = api.get_index_bars(9, market, alias_code, start_idx, count_to_fetch)
                     if not bars:
                         bars = api.get_security_bars(9, market, alias_code, start_idx, count_to_fetch)
                     
-                    if not bars:
-                        break
+                    if not bars: break
                     all_bars.extend(bars)
-                    if len(bars) < count_to_fetch:
-                        break
+                    if len(bars) < count_to_fetch: break
                 except:
                     break
                     
@@ -83,46 +74,93 @@ def fetch_index_data(api, code_str, is_incremental=False):
                 
     return [], None, primary_market, pure_code
 
+# 🌟 引擎二：东财原生 API 兜底抓取 (解决 TDX 缺失冷门/新定制中证指数的问题)
+def fetch_from_eastmoney(code_str, is_incremental=False):
+    prefix, pure_code = code_str.split('.')
+    # 东财市场代码：上海 1，其他(含深圳、北交所)统一算 0
+    secid = f"1.{pure_code}" if prefix == "sh" else f"0.{pure_code}"
+    lmt = 500 if is_incremental else 10000
+    
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    params = {
+        "secid": secid,
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+        "klt": "101",
+        "fqt": "0",
+        "end": "20500101",
+        "lmt": str(lmt)
+    }
+    
+    try:
+        res = requests.get(url, params=params, timeout=10).json()
+        if res and res.get("data") and res["data"].get("klines"):
+            klines = res["data"]["klines"]
+            bars = []
+            for k in klines:
+                parts = k.split(',')
+                bars.append({
+                    "datetime": parts[0],
+                    "open": float(parts[1]),
+                    "close": float(parts[2]),
+                    "high": float(parts[3]),
+                    "low": float(parts[4]),
+                    "vol": float(parts[5]) * 100, # 东财是“手”，TDX是“股”，统一乘以 100 对齐
+                    "amount": float(parts[6])
+                })
+            return bars
+    except:
+        pass
+    return []
+
 def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
-    print(f"📥 Starting PyTDX Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
+    print(f"📥 Starting Dual-Engine Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
     
     api = TdxHq_API()
     connected = False
     for s in TDX_SERVERS:
-        print(f"🔌 Connection attempt to {s['ip']}:{s['port']} ({s['desc']})...")
+        print(f"🔌 TDX Connection attempt to {s['ip']}:{s['port']}...")
         try:
             if api.connect(s['ip'], s['port']):
                 connected = True
-                print(f"✅ Connected to TDX Server: {s['ip']} ({s['desc']})")
+                print(f"✅ TDX Engine Online: {s['ip']}")
                 break
-        except Exception as e:
-            print(f"⚠️ Failed to connect to {s['ip']}: {e}")
+        except Exception:
             continue
             
     if not connected:
-        print("❌ Error: Failed to connect to any TDX server.")
+        print("❌ TDX Engine failed to connect. (Will rely fully on EastMoney if needed, but stopping for safety)")
         sys.exit(1)
         
     all_rows = []
-    
-    # 🎯 统计容器，记录成功和失败指标
     success_records = []
     failed_records = []
     
     try:
         for code_str in INDEX_LIST.keys():
             print(f"📊 Pulling Index: {code_str}...")
-            bars, actual_market, primary_market, alias_code = fetch_index_data(api, code_str, is_incremental=is_incremental)
             
+            # 第一优先级：通达信超高速拉取
+            bars, actual_market, primary_market, alias_code = fetch_from_tdx(api, code_str, is_incremental=is_incremental)
+            is_em_fallback = False
+            
+            # 第二优先级：东财 API 完美兜底
             if not bars:
-                # 记录失败
-                print(f"❌ Failed: No bars fetched for {code_str} ({INDEX_LIST[code_str]})")
+                print(f"   ⚠️ TDX missed {code_str}. Triggering EastMoney Fallback Engine...")
+                bars = fetch_from_eastmoney(code_str, is_incremental=is_incremental)
+                if bars:
+                    is_em_fallback = True
+                    actual_market = "EastMoney_API"
+                    alias_code = code_str
+
+            if not bars:
+                print(f"❌ Failed: Both engines failed for {code_str} ({INDEX_LIST[code_str]})")
                 failed_records.append({"code": code_str, "name": INDEX_LIST[code_str]})
                 continue
             
-            # 记录成功与是否重定向
-            is_redirected = (actual_market != primary_market) or (alias_code != code_str.split('.')[1])
+            is_redirected = is_em_fallback or (actual_market != primary_market) or (alias_code != code_str.split('.')[1])
+            
             success_records.append({
                 "code": code_str,
                 "name": INDEX_LIST[code_str],
@@ -133,13 +171,13 @@ def main():
             })
             
             if is_redirected:
-                print(f"   🔄 [Self-Healed] Redirected {code_str} -> Market {actual_market}, Code '{alias_code}'")
+                engine = "🌐 EastMoney API" if is_em_fallback else f"TDX Market {actual_market}"
+                print(f"   🔄 [Self-Healed] Redirected via: {engine} (Code: '{alias_code}')")
                 
             print(f"   Success. Fetched {len(bars)} records.")
             for b in bars:
-                dt_str = b['datetime'][:10]
                 all_rows.append({
-                    "date": dt_str,
+                    "date": b['datetime'][:10],
                     "code": code_str,
                     "open": float(b['open']),
                     "high": float(b['high']),
@@ -151,9 +189,8 @@ def main():
     finally:
         api.disconnect()
         
-    # 🎯 控制台输出精美、可读性极强的总结报告
     print("\n" + "="*80)
-    print("📋 指数下载总结报告 (INDEX DOWNLOAD SUMMARY REPORT)")
+    print("📋 指数双擎下载总结报告 (INDEX DUAL-ENGINE DOWNLOAD SUMMARY)")
     print("="*80)
     print(f"   - 目标抓取总数: {len(INDEX_LIST)} 只")
     print(f"   - 成功同步指数: {len(success_records)} / {len(INDEX_LIST)}")
@@ -162,11 +199,11 @@ def main():
     if failed_records:
         print("\n❌ 失败指数明细 (FAILED LIST):")
         for f in failed_records:
-            print(f"   • {f['code']} ({f['name']}) -> [物理连接超时或该代码在服务器端已下线]")
+            print(f"   • {f['code']} ({f['name']}) -> [双引擎均告失败]")
             
     print("\n✅ 成功同步明细 (SUCCESSFUL LIST):")
     for s in success_records:
-        heal_msg = f"  [自愈重定向: {s['target_code']}@M{s['target_market']}]" if s['redirected'] else ""
+        heal_msg = f"  [自愈重定向: {s['target_code']} @ {s['target_market']}]" if s['redirected'] else ""
         print(f"   • {s['code']} ({s['name']}): 已拉取 {s['count']:,} 行 K 线{heal_msg}")
     print("="*80 + "\n")
         
@@ -183,11 +220,9 @@ def main():
     df = df.drop_duplicates(subset=['date', 'code'], keep='last')
     df = df.sort_values(['code', 'date'])
     
-    # 物理计算每日涨跌幅百分比
     df['pctChg'] = df.groupby('code')['close'].pct_change() * 100
     df['pctChg'] = df['pctChg'].fillna(0.0)
     
-    # 类型强制约束与降维
     df['open'] = df['open'].astype('float32')
     df['high'] = df['high'].astype('float32')
     df['low'] = df['low'].astype('float32')
