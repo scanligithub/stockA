@@ -5,7 +5,7 @@ import requests
 import re
 import json
 import datetime
-import time  # 🎯 新增 time 模块支持延时重试
+import time
 from pytdx.hq import TdxHq_API
 
 # 55 只量化指数
@@ -72,25 +72,30 @@ def fetch_from_tdx(api, code_str, is_incremental=False):
                 return all_bars, market, primary_market, alias_code
     return [], None, primary_market, pure_code
 
-# [Engine 2] EastMoney
+# [Engine 2] EastMoney (引入 119 中证专区 与 124 国证专区)
 def fetch_from_eastmoney(code_str, is_incremental=False):
     prefix, pure_code = code_str.split('.')
     lmt = 500 if is_incremental else 10000
-    candidate_secids = [f"{p}.{pure_code}" for p in ["1", "0", "90", "2", "47"]]
+    
+    # 🎯 核心破译：加入 119(中证) 和 124(国证) 隐秘专区
+    candidate_prefixes = ["1", "0", "119", "124", "90", "2", "47"]
+    candidate_secids = [f"{p}.{pure_code}" for p in candidate_prefixes]
     
     EM_CODE_MAP = {
-        "sz.399977": ["90.399977", "0.399977", "1.399977"],
-        "sh.931160": ["90.931160", "1.931160", "0.931160"],
-        "sh.931151": ["90.931151", "1.931151", "0.931151"],
-        "sh.931494": ["90.931494", "1.931494", "0.931494"],
-        "sh.931409": ["90.931409", "1.931409", "0.931409"],
-        "sh.931152": ["90.931152", "1.931152", "0.931152"],
-        "sh.930606": ["90.930606", "1.930606", "0.930606"],
-        "sh.932252": ["90.932252", "1.932252", "0.932252"],
-        "sz.399979": ["90.399979", "0.399979", "1.399979"],
-        "sh.000918": ["90.000918", "1.000918", "0.000918"],
-        "sh.931238": ["90.931238", "1.931238", "0.931238"]
+        "sh.932252": ["119.932252", "90.932252", "1.932252", "0.932252"],
+        "sh.000157": ["1.000157", "119.000157", "0.000157", "90.000157"],
+        "sz.399977": ["90.399977", "124.399977", "0.399977"],
+        "sh.931160": ["119.931160", "90.931160", "1.931160"],
+        "sh.931151": ["119.931151", "90.931151", "1.931151"],
+        "sh.931494": ["119.931494", "90.931494", "1.931494"],
+        "sh.931409": ["119.931409", "90.931409", "1.931409"],
+        "sh.931152": ["119.931152", "90.931152", "1.931152"],
+        "sh.930606": ["119.930606", "90.930606", "1.930606"],
+        "sz.399979": ["124.399979", "90.399979", "0.399979"],
+        "sh.000918": ["119.000918", "90.000918", "1.000918"],
+        "sh.931238": ["119.931238", "90.931238", "1.931238"]
     }
+    
     if code_str in EM_CODE_MAP:
         candidate_secids = EM_CODE_MAP[code_str] + candidate_secids
         candidate_secids = list(dict.fromkeys(candidate_secids))
@@ -99,7 +104,7 @@ def fetch_from_eastmoney(code_str, is_incremental=False):
     for secid in candidate_secids:
         params = {"secid": secid, "fields1": "f1,f2,f3,f4,f5,f6", "fields2": "f51,f52,f53,f54,f55,f56,f57,f58", "klt": "101", "fqt": "0", "end": "20500101", "lmt": str(lmt)}
         try:
-            res = requests.get(url, params=params, headers=WEB_HEADERS, timeout=6).json()
+            res = requests.get(url, params=params, headers=WEB_HEADERS, timeout=5).json()
             if res and res.get("data") and res["data"].get("klines"):
                 bars = []
                 for k in res["data"]["klines"]:
@@ -117,7 +122,7 @@ def fetch_from_sina(code_str, is_incremental=False):
     limit = 500 if is_incremental else 6000
     url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen={limit}"
     try:
-        text = requests.get(url, headers=WEB_HEADERS, timeout=8).text
+        text = requests.get(url, headers=WEB_HEADERS, timeout=6).text
         match = re.search(r'\[.*\]', text)
         if match:
             array_str = re.sub(r'([{,])\s*([a-zA-Z_]+)\s*:', r'\1"\2":', match.group(0))
@@ -130,7 +135,7 @@ def fetch_from_sina(code_str, is_incremental=False):
         pass
     return []
 
-# [Engine 4] Xueqiu (雪球终极破壁引擎)
+# [Engine 4] Xueqiu 
 def fetch_from_xueqiu(code_str, is_incremental=False):
     prefix, pure_code = code_str.split('.')
     symbol = prefix.upper() + pure_code 
@@ -146,13 +151,15 @@ def fetch_from_xueqiu(code_str, is_incremental=False):
     session.headers.update(xq_headers)
     
     try:
-        session.get("https://xueqiu.com/", timeout=5)
+        # 🎯 核心破防：请求静态的 /about 页面拿取 Cookie，完美避开动态 JS 质询
+        session.get("https://xueqiu.com/about", timeout=5)
+        
         current_ms = int(time.time() * 1000)
         api_headers = xq_headers.copy()
         api_headers["Referer"] = f"https://xueqiu.com/S/{symbol}"
         
         url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={current_ms}&period=day&type=before&count=-{limit}&indicator=kline"
-        res = session.get(url, headers=api_headers, timeout=8).json()
+        res = session.get(url, headers=api_headers, timeout=6).json()
         if res and res.get("data") and res["data"].get("item"):
             bars = []
             for k in res["data"]["item"]:
@@ -189,7 +196,6 @@ def main():
     success_records = []
     failed_records = []
     
-    # 🎯 最大重试次数设置
     MAX_RETRIES = 3 
 
     try:
@@ -199,7 +205,6 @@ def main():
             bars, actual_market, primary_market, alias_code = [], None, None, None
             used_engine = "TDX"
             
-            # 🎯 为单只指数包上 3 轮重试循环
             for attempt in range(MAX_RETRIES):
                 # [1] TDX
                 if connected:
@@ -220,17 +225,14 @@ def main():
                     bars = fetch_from_xueqiu(code_str, is_incremental)
                     if bars: used_engine, actual_market, alias_code = "❄️ Xueqiu", "Web", code_str
 
-                # 如果本轮成功抓到数据，跳出重试循环
                 if bars:
                     break
                     
-                # 如果没拿到数据且还没到最后一次重试，执行退避延时
                 if attempt < MAX_RETRIES - 1:
-                    delay = 2 * (attempt + 1) # 渐进式延时: 2秒, 4秒...
+                    delay = 2 * (attempt + 1)
                     print(f"   ⏳ [Retry {attempt + 1}/{MAX_RETRIES - 1}] All engines missed {code_str}. Retrying in {delay}s...")
                     time.sleep(delay)
 
-            # 评估重试循环结束后的最终结果
             if not bars:
                 print(f"❌ Failed: ALL 4 Engines defeated by {code_str} after {MAX_RETRIES} attempts.")
                 failed_records.append({"code": code_str, "name": INDEX_LIST[code_str]})
@@ -269,7 +271,7 @@ def main():
             
     print("\n✅ 成功同步明细 (SUCCESSFUL LIST):")
     for s in success_records:
-        heal_msg = f"  [{s['engine']}]" if s['redirected'] else ""
+        heal_msg = f"  [{s['engine']} | Hit: {s['target_code']}]" if s['redirected'] else ""
         print(f"   • {s['code']} ({s['name']}): 已拉取 {s['count']:,} 行 K 线{heal_msg}")
     print("="*85 + "\n")
         
