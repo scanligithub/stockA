@@ -30,6 +30,7 @@ TDX_SERVERS = [
 ]
 
 def get_code_aliases(pure_code):
+    """通达信底层物理别名映射"""
     aliases = [pure_code]
     if pure_code.startswith("93"):
         aliases.append("H3" + pure_code[2:])
@@ -40,7 +41,7 @@ def get_code_aliases(pure_code):
         aliases.append("H309" + pure_code[4:])
     return list(dict.fromkeys(aliases))
 
-# 🌟 引擎一：通达信抓取
+# 🌟 引擎一：通达信抓取 (高速通道)
 def fetch_from_tdx(api, code_str, is_incremental=False):
     parts = code_str.split('.')
     prefix, pure_code = parts[0], parts[1]
@@ -62,7 +63,6 @@ def fetch_from_tdx(api, code_str, is_incremental=False):
                     bars = api.get_index_bars(9, market, alias_code, start_idx, count_to_fetch)
                     if not bars:
                         bars = api.get_security_bars(9, market, alias_code, start_idx, count_to_fetch)
-                    
                     if not bars: break
                     all_bars.extend(bars)
                     if len(bars) < count_to_fetch: break
@@ -74,44 +74,59 @@ def fetch_from_tdx(api, code_str, is_incremental=False):
                 
     return [], None, primary_market, pure_code
 
-# 🌟 引擎二：东财原生 API 兜底抓取 (解决 TDX 缺失冷门/新定制中证指数的问题)
+# 🌟 引擎二：东财原生 API 盲探兜底 (解决 TDX 缺失或前缀黑盒的问题)
 def fetch_from_eastmoney(code_str, is_incremental=False):
     prefix, pure_code = code_str.split('.')
-    # 东财市场代码：上海 1，其他(含深圳、北交所)统一算 0
-    secid = f"1.{pure_code}" if prefix == "sh" else f"0.{pure_code}"
     lmt = 500 if is_incremental else 10000
     
-    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-    params = {
-        "secid": secid,
-        "fields1": "f1,f2,f3,f4,f5,f6",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
-        "klt": "101",
-        "fqt": "0",
-        "end": "20500101",
-        "lmt": str(lmt)
+    # 🎯 核心自愈：东财前缀盲探池
+    # 1: 上海, 0: 深圳, 90: 东财定制指数/板块, 2: 北交所, 47: 衍生特征
+    candidate_prefixes = ["1", "0", "90", "2", "47"]
+    candidate_secids = [f"{p}.{pure_code}" for p in candidate_prefixes]
+    
+    # 特殊编码硬映射（以防连 pure_code 都被换了）
+    EM_CODE_MAP = {
+        "sz.399977": ["0.399977", "1.399977", "90.399977", "0.980017"],
+        "sh.931160": ["1.931160", "0.931160", "90.931160"]
     }
     
-    try:
-        res = requests.get(url, params=params, timeout=10).json()
-        if res and res.get("data") and res["data"].get("klines"):
-            klines = res["data"]["klines"]
-            bars = []
-            for k in klines:
-                parts = k.split(',')
-                bars.append({
-                    "datetime": parts[0],
-                    "open": float(parts[1]),
-                    "close": float(parts[2]),
-                    "high": float(parts[3]),
-                    "low": float(parts[4]),
-                    "vol": float(parts[5]) * 100, # 东财是“手”，TDX是“股”，统一乘以 100 对齐
-                    "amount": float(parts[6])
-                })
-            return bars
-    except:
-        pass
-    return []
+    if code_str in EM_CODE_MAP:
+        candidate_secids = EM_CODE_MAP[code_str] + candidate_secids
+        candidate_secids = list(dict.fromkeys(candidate_secids)) # 去重并保持优先级顺序
+
+    url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    
+    for secid in candidate_secids:
+        params = {
+            "secid": secid,
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+            "klt": "101",
+            "fqt": "0",
+            "end": "20500101",
+            "lmt": str(lmt)
+        }
+        try:
+            res = requests.get(url, params=params, timeout=5).json()
+            if res and res.get("data") and res["data"].get("klines"):
+                klines = res["data"]["klines"]
+                bars = []
+                for k in klines:
+                    parts = k.split(',')
+                    bars.append({
+                        "datetime": parts[0],
+                        "open": float(parts[1]),
+                        "close": float(parts[2]),
+                        "high": float(parts[3]),
+                        "low": float(parts[4]),
+                        "vol": float(parts[5]) * 100, # 东财指数成交量单位为“手”，强制乘100与TDX“股”对齐
+                        "amount": float(parts[6])
+                    })
+                return bars, secid
+        except:
+            continue
+            
+    return [], None
 
 def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
@@ -130,7 +145,7 @@ def main():
             continue
             
     if not connected:
-        print("❌ TDX Engine failed to connect. (Will rely fully on EastMoney if needed, but stopping for safety)")
+        print("❌ TDX Engine failed to connect. Stop for safety.")
         sys.exit(1)
         
     all_rows = []
@@ -145,17 +160,17 @@ def main():
             bars, actual_market, primary_market, alias_code = fetch_from_tdx(api, code_str, is_incremental=is_incremental)
             is_em_fallback = False
             
-            # 第二优先级：东财 API 完美兜底
+            # 第二优先级：东财 API 盲探兜底
             if not bars:
-                print(f"   ⚠️ TDX missed {code_str}. Triggering EastMoney Fallback Engine...")
-                bars = fetch_from_eastmoney(code_str, is_incremental=is_incremental)
+                print(f"   ⚠️ TDX missed {code_str}. Triggering EastMoney Probing Engine...")
+                bars, em_secid = fetch_from_eastmoney(code_str, is_incremental=is_incremental)
                 if bars:
                     is_em_fallback = True
                     actual_market = "EastMoney_API"
-                    alias_code = code_str
+                    alias_code = em_secid # 记录真实命中的 secid
 
             if not bars:
-                print(f"❌ Failed: Both engines failed for {code_str} ({INDEX_LIST[code_str]})")
+                print(f"❌ Failed: Both engines missed {code_str} ({INDEX_LIST[code_str]})")
                 failed_records.append({"code": code_str, "name": INDEX_LIST[code_str]})
                 continue
             
@@ -172,7 +187,7 @@ def main():
             
             if is_redirected:
                 engine = "🌐 EastMoney API" if is_em_fallback else f"TDX Market {actual_market}"
-                print(f"   🔄 [Self-Healed] Redirected via: {engine} (Code: '{alias_code}')")
+                print(f"   🔄 [Self-Healed] Redirected via: {engine} (Hit Code: '{alias_code}')")
                 
             print(f"   Success. Fetched {len(bars)} records.")
             for b in bars:
@@ -199,7 +214,7 @@ def main():
     if failed_records:
         print("\n❌ 失败指数明细 (FAILED LIST):")
         for f in failed_records:
-            print(f"   • {f['code']} ({f['name']}) -> [双引擎均告失败]")
+            print(f"   • {f['code']} ({f['name']}) -> [双引擎均告失败，可能是极度冷门或代码已废弃]")
             
     print("\n✅ 成功同步明细 (SUCCESSFUL LIST):")
     for s in success_records:
