@@ -3,7 +3,7 @@ name: Daily Update to Hugging Face
 on:
   repository_dispatch:
     types: [daily_update]       # 允许外部服务通过该事件名称触发
-  workflow_dispatch:             # 仍保留手动触发选项
+  workflow_dispatch:             # 保留手动触发选项
 
 permissions:
   contents: write
@@ -129,7 +129,7 @@ jobs:
       - name: Install Runtime Dependencies
         run: |
           pip install -r requirements.txt
-          pip install polars
+          pip install polars pytdx
 
       - name: Download Latest Healed Sectors
         env:
@@ -139,6 +139,10 @@ jobs:
 
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
+
+      # 🎯 核心修正：运行高精度指数增量获取脚本，生成 index_kline_all.parquet
+      - name: 📈 Fetch Daily Incremental Index Data
+        run: python scripts/fetch_index.py --incremental
 
       - name: Upload Sector Parquet
         uses: actions/upload-artifact@v4
@@ -170,7 +174,6 @@ jobs:
           merge-multiple: true
           path: all_artifacts
           
-      # 🚀 增量同步核心：每日 Finalize 阶段同样拉取最新财报，秒级捕获昨日夜间可能新披露的业绩
       - name: 🌐 Sync All Stocks 37-Column F10 Financial Data
         run: |
           pip install polars
