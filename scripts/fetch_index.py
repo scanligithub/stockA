@@ -7,7 +7,7 @@ import datetime
 import time
 from pytdx.hq import TdxHq_API
 
-# 55 只量化指数
+# 56 只量化指数
 INDEX_LIST = {
     "sh.000001": "上证指数", "sz.399001": "深证成指", "sz.399006": "创业板指", "sh.000688": "科创50", "bj.899050": "北证50",
     "sh.000016": "上证50", "sh.000300": "沪深300", "sh.000905": "中证500", "sh.000852": "中证1000", "sh.000851": "中证2000",
@@ -23,20 +23,27 @@ INDEX_LIST = {
     "sh.931238": "SSH黄金股票", "sh.930606": "中证黄金产业"
 }
 
-# 全局雪球 Session（核心提速点：只拿一次 Cookie，拒绝频繁握手）
+TDX_SERVERS = [
+    {"ip": "119.147.171.115", "port": 7709, "desc": "深圳招商"},
+    {"ip": "124.71.187.122", "port": 7709, "desc": "华为云节点"},
+    {"ip": "119.29.25.16", "port": 7709, "desc": "腾讯云节点"}
+]
+
+# 全局雪球 Session（增加 3 次容错握手）
 XQ_SESSION = requests.Session()
-XQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36"})
-try:
-    XQ_SESSION.get("https://xueqiu.com/", timeout=5) # 极速获取 xq_a_token
-except:
-    pass
+XQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
+for _ in range(3):
+    try:
+        XQ_SESSION.get("https://xueqiu.com/", timeout=5)
+        break
+    except:
+        time.sleep(1)
 
 # [Engine 1] TDX 
 def fetch_from_tdx(api, code_str, is_incremental=False):
     prefix, pure_code = code_str.split('.')
     market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
     
-    # 极简别名映射
     aliases = [pure_code]
     if pure_code.startswith("93"): aliases.append("H3" + pure_code[2:])
     elif pure_code.startswith("3999"): aliases.append("H309" + pure_code[4:])
@@ -58,10 +65,11 @@ def fetch_from_tdx(api, code_str, is_incremental=False):
             return all_bars, "TDX"
     return [], None
 
-# [Engine 2] Xueqiu (专杀 sh.93xxxx 系列新指数)
+# [Engine 2] Xueqiu (安全边界版：硬性截断单次上限至 2000 行，绝不触发 400 报错)
 def fetch_from_xueqiu(code_str, is_incremental=False):
     symbol = code_str.replace('.', '').upper()
-    limit = 500 if is_incremental else 10000
+    # 🎯 核心修正：单次请求行数超过 2000 会被雪球 WAF 直接拦截，这里强制截断
+    limit = 500 if is_incremental else 2000
     ts = int(time.time() * 1000)
     url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={ts}&period=day&type=before&count=-{limit}&indicator=kline"
     
@@ -81,10 +89,11 @@ def fetch_from_xueqiu(code_str, is_incremental=False):
         pass
     return [], None
 
-# [Engine 3] Tencent (宽基与旧指数的稳定备胎)
+# [Engine 3] Tencent (安全边界版：硬性截断单次上限至 1000 行)
 def fetch_from_tencent(code_str, is_incremental=False):
     symbol = code_str.replace('.', '')
-    limit = 500 if is_incremental else 6000
+    # 🎯 核心修正：腾讯单次请求行数超过 1000 极易返回空数据或报错，强制截断
+    limit = 500 if is_incremental else 1000
     url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={symbol},day,,,{limit},qfq"
     try:
         res = requests.get(url, headers={"Referer": "https://gu.qq.com/"}, timeout=5).json()
@@ -104,46 +113,50 @@ def main():
     
     api = TdxHq_API()
     connected = False
-    try:
-        if api.connect("119.147.171.115", 7709): # 直接连最稳的招商证券节点
-            connected = True
-            print("✅ TDX Engine Online")
-    except:
-        pass
+    # 🎯 核心修正：多服务器自动重试连接，直到连上最稳的节点
+    for s in TDX_SERVERS:
+        try:
+            print(f"🔌 Trying to connect TDX Server: {s['desc']} ({s['ip']})...")
+            if api.connect(s['ip'], s['port']):
+                connected = True
+                print(f"✅ TDX Engine Online: {s['desc']}")
+                break
+        except:
+            continue
+
+    if not connected:
+        print("⚠️ TDX Engine offline. Using Web Engines fallback.")
 
     all_rows = []
     success_records = []
     failed_records = []
     
-    # 将 55 只指数分类，应用智能路由策略
     for code_str, name in INDEX_LIST.items():
         print(f"📊 Pulling: {code_str} ({name}) ...", end="")
         
         bars, engine_used = [], None
         
-        # 🚀 智能路由：如果是 sh.93 开头的新定制指数，直接跳过无效查询，优先用雪球！
+        # 智能路由：如果是新定制指数，直接优先用雪球
         if code_str.startswith("sh.93"):
             engines_to_try = [
                 lambda c: fetch_from_xueqiu(c, is_incremental),
                 lambda c: fetch_from_tdx(api, c, is_incremental) if connected else ([], None)
             ]
         else:
-            # 常规指数：优先 TDX，其次腾讯，最后雪球兜底
             engines_to_try = [
                 lambda c: fetch_from_tdx(api, c, is_incremental) if connected else ([], None),
                 lambda c: fetch_from_tencent(c, is_incremental),
                 lambda c: fetch_from_xueqiu(c, is_incremental)
             ]
 
-        # 极速探测
+        # 顺序探测
         for func in engines_to_try:
             bars, engine_used = func(code_str)
             if bars: 
                 break
 
-        # 如果第一轮全挂，仅进行 1 次无脑重试雪球
+        # 无脑兜底
         if not bars:
-            time.sleep(1)
             bars, engine_used = fetch_from_xueqiu(code_str, is_incremental)
 
         if not bars:
@@ -182,7 +195,6 @@ def main():
     df['pctChg'] = df.groupby('code')['close'].pct_change() * 100
     df['pctChg'] = df['pctChg'].fillna(0.0)
     
-    # 统一精度
     for col in ['open', 'high', 'low', 'close', 'pctChg']: df[col] = df[col].astype('float32')
     for col in ['volume', 'amount']: df[col] = df[col].astype('float64')
     
