@@ -127,7 +127,7 @@ jobs:
       - name: Install Runtime Dependencies
         run: |
           pip install -r requirements.txt
-          pip install polars
+          pip install polars pytdx
 
       - name: Download Latest Healed Sectors
         env:
@@ -137,6 +137,10 @@ jobs:
 
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
+
+      # 🎯 核心修正：全历史构建时，运行不带限制参数的 fetch_index.py，完整拉取 20+ 年指数历史 K 线
+      - name: 📈 Fetch Full Historical Index Data
+        run: python scripts/fetch_index.py
 
       - name: Upload Sector Parquet
         uses: actions/upload-artifact@v4
@@ -168,7 +172,6 @@ jobs:
           merge-multiple: true
           path: all_artifacts
           
-      # 🌟 在单个 Finalize 节点极速拉取 37 字段全市场历史财报归档 (约 86 秒)
       - name: 🌐 Download All Stocks 37-Column F10 Financial Data
         run: |
           pip install polars
