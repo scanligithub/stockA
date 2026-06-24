@@ -54,6 +54,14 @@ func main() {
 	fmt.Println("Unknown mode.")
 }
 
+// isIndex 🛡️ 高性能无冲突前缀匹配。满足上海000/930/931/932，深圳399，北京899特征的一律判定为指数
+func isIndex(code string) bool {
+	return strings.HasPrefix(code, "sh000") || 
+		strings.HasPrefix(code, "sh9") || 
+		strings.HasPrefix(code, "sz399") || 
+		strings.HasPrefix(code, "bj899")
+}
+
 // LoadGbbqCSV 🛡️ 严格按 PyTDX 标准 CSV 列索引和“万股”单位对齐读取 GBBQ
 func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
@@ -66,8 +74,7 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	equityMap := make(map[string][]EquityEventOrdered)
 
 	reader := csv.NewReader(file)
-	// 跳过 CSV 头部
-	_, err = reader.Read()
+	_, err = reader.Read() // Skip Header
 	if err != nil {
 		return nil, nil, err
 	}
@@ -81,15 +88,6 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 			return nil, nil, err
 		}
 
-		// 🎯 核心修正 A：根据 PyTDX 输出的实际 CSV 进行字段索引精确对齐
-		// record[0]: market (0 sz, 1 sh)
-		// record[1]: code (股票代码，如 "000001")
-		// record[2]: datetime (除权日期，如 19910502)
-		// record[3]: category (变更类别)
-		// record[4]: hongli_panqianliutong (分红金额 / 送配变更前流通股)
-		// record[5]: peigujia_qianzongguben (配股价 / 送配变更前总股本)
-		// record[6]: songgu_qianzongguben (送股数 / 送配变更后流通股)
-		// record[7]: peigu_houzongguben (配股数 / 送配变更后总股本)
 		codeStr := record[1]
 		date, _ := strconv.Atoi(record[2])
 		category, _ := strconv.Atoi(record[3])
@@ -98,7 +96,6 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 		songGu, _ := strconv.ParseFloat(record[6], 64)
 		peiGu, _ := strconv.ParseFloat(record[7], 64)
 
-		// 🎯 根据 A 股证券代码规则，智能补全交易所前缀
 		prefix := "sz"
 		if strings.HasPrefix(codeStr, "60") || strings.HasPrefix(codeStr, "68") {
 			prefix = "sh"
@@ -118,7 +115,6 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 				PeiGu:   peiGu,
 			}
 		} else if category == 2 || category == 3 || category == 5 || category == 7 || category == 8 || category == 9 || category == 10 {
-			// 🎯 核心修正 B：PyTDX 输出的股本快照单位是“万股”，乘以 10000.0 换算为标准“股”
 			equityMap[tdxCode] = append(equityMap[tdxCode], EquityEventOrdered{
 				Date:        date,
 				FloatShares: songGu * 10000.0,
@@ -136,7 +132,6 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	return gbbqMap, equityMap, nil
 }
 
-// runFetchList 🛡️ 修正版：分交易所精细化过滤，彻底封杀上海指数（sh.00xxxx）混入个股池
 func runFetchList() {
 	fmt.Println("[Go Engine] Mode: LIST - Fetching A-shares list...")
 	cli, err := tdx.DialDefault()
@@ -154,9 +149,7 @@ func runFetchList() {
 			continue
 		}
 		for _, item := range resp.List {
-			// 🎯 核心修正：按照各交易所个股代码区间进行物理隔离
 			if ex == protocol.ExchangeSH {
-				// 上海 A 股：只允许 60 (主板) 和 68 (科创板) 开头，彻底排除 00 开头的上证指数系列
 				if strings.HasPrefix(item.Code, "60") || strings.HasPrefix(item.Code, "68") {
 					masterList = append(masterList, StockMaster{
 						Code:     fmt.Sprintf("sh.%s", item.Code),
@@ -164,7 +157,6 @@ func runFetchList() {
 					})
 				}
 			} else if ex == protocol.ExchangeSZ {
-				// 深圳 A 股：只允许 00 (主板/中小板) 和 30 (创业板) 开头
 				if strings.HasPrefix(item.Code, "00") || strings.HasPrefix(item.Code, "30") {
 					masterList = append(masterList, StockMaster{
 						Code:     fmt.Sprintf("sz.%s", item.Code),
@@ -172,7 +164,6 @@ func runFetchList() {
 					})
 				}
 			} else if ex == protocol.ExchangeBJ {
-				// 北京 A 股：只允许 43, 83, 87, 88, 92 开头
 				if strings.HasPrefix(item.Code, "43") || strings.HasPrefix(item.Code, "83") ||
 					strings.HasPrefix(item.Code, "87") || strings.HasPrefix(item.Code, "88") ||
 					strings.HasPrefix(item.Code, "92") {
@@ -210,21 +201,10 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 		codeMap[tdxCode] = c
 	}
 
-	fmt.Printf("[Go Engine] Loading clean GBBQ CSV: %s...\n", gbbqPath)
 	gbbqMap, equityMap, err := LoadGbbqCSV(gbbqPath)
 	if err != nil {
 		panic(fmt.Sprintf("Failed to load clean GBBQ CSV: %v", err))
 	}
-
-	gbbqCount := 0
-	for _, m := range gbbqMap {
-		gbbqCount += len(m)
-	}
-	equityCount := 0
-	for _, arr := range equityMap {
-		equityCount += len(arr)
-	}
-	fmt.Printf("[Go Engine] GBBQ loaded: %d stocks with %d ex-div events, %d stocks with %d capital events.\n", len(gbbqMap), gbbqCount, len(equityMap), equityCount)
 
 	outFile, err := os.Create(outPath)
 	if err != nil {
@@ -278,6 +258,8 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 					lastTotalShares = equities[0].TotalShares
 				}
 
+				isIdx := isIndex(tcode)
+
 				for _, bar := range resp.List {
 					dateStr := bar.Time.Format("2006-01-02")
 					dateIntStr := bar.Time.Format("20060102")
@@ -290,37 +272,42 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 					pVolume := float64(bar.Volume)
 					pAmount := float64(bar.Amount) / 1000.0
 
-					// 🚀 A. 计算复权因子 adjustFactor
-					if ev, ok := events[dateInt]; ok && prevClose > 0 {
-						fh := ev.FenHong / 10.0
-						sg := ev.SongGu / 10.0
-						pg := ev.PeiGu / 10.0
-						pj := ev.PeiJia
+					var totalMV, floatMV, turn float64 = 0.0, 0.0, 0.0
 
-						pEx := (prevClose - fh + pg*pj) / (1.0 + sg + pg)
-						if pEx > 0 {
-							adjustFactor *= (prevClose / pEx)
+					if !isIdx {
+						// 🚀 A. [个股逻辑] 计算复权因子 adjustFactor
+						if ev, ok := events[dateInt]; ok && prevClose > 0 {
+							fh := ev.FenHong / 10.0
+							sg := ev.SongGu / 10.0
+							pg := ev.PeiGu / 10.0
+							pj := ev.PeiJia
+
+							pEx := (prevClose - fh + pg*pj) / (1.0 + sg + pg)
+							if pEx > 0 {
+								adjustFactor *= (prevClose / pEx)
+							}
 						}
-					}
 
-					// 🚀 B. ASOF 时序非等值关联：对齐当日最新的股本快照
-					for _, eq := range equities {
-						if eq.Date <= dateInt {
-							lastFloatShares = eq.FloatShares
-							lastTotalShares = eq.TotalShares
-						} else {
-							break
+						// 🚀 B. [个股逻辑] ASOF 时序非等值关联：对齐当日最新的股本快照
+						for _, eq := range equities {
+							if eq.Date <= dateInt {
+								lastFloatShares = eq.FloatShares
+								lastTotalShares = eq.TotalShares
+							} else {
+								break
+							}
 						}
-					}
 
-					// 🚀 C. 衍生指标动态计算
-					totalMV := pClose * lastTotalShares
-					floatMV := pClose * lastFloatShares
-
-					// 换手率
-					turn := 0.0
-					if lastFloatShares > 0 {
-						turn = (pVolume * 10000.0 / lastFloatShares)
+						totalMV = pClose * lastTotalShares
+						floatMV = pClose * lastFloatShares
+						if lastFloatShares > 0 {
+							turn = (pVolume * 10000.0 / lastFloatShares)
+						}
+					} else {
+						// 📈 [指数逻辑] 免复权，指标安全置零
+						adjustFactor = 1.0
+						lastTotalShares = 0.0
+						lastFloatShares = 0.0
 					}
 
 					records = append(records, []string{
