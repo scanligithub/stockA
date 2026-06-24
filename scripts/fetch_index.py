@@ -34,37 +34,54 @@ TDX_SERVERS = [
     {"ip": "119.147.212.81", "port": 7709, "desc": "广东电信节点"}
 ]
 
+def get_code_aliases(pure_code):
+    """底层物理别名映射函数：自动生成通达信服务器内部使用的实际存储代码"""
+    aliases = [pure_code]
+    if pure_code.startswith("93"):
+        aliases.append("H3" + pure_code[2:])
+    elif pure_code.startswith("0009"):
+        aliases.append("H309" + pure_code[4:])
+        aliases.append("3999" + pure_code[4:])
+    elif pure_code.startswith("3999"):
+        aliases.append("H309" + pure_code[4:])
+    return list(dict.fromkeys(aliases))
+
 def fetch_index_data(api, code_str, is_incremental=False):
     parts = code_str.split('.')
     prefix, pure_code = parts[0], parts[1]
     
-    # 🎯 核心自愈逻辑：构建尝试路由。
-    # 比如首选 sh(1)，如果失败则路由重定向尝试 sz(0)，最后兜底北京(2)
     primary_market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
     alternative_markets = [0, 1] if primary_market in [0, 1] else [2]
     markets_to_try = [primary_market] + [m for m in alternative_markets if m != primary_market]
     
+    aliases = get_code_aliases(pure_code)
+    
     for market in markets_to_try:
-        all_bars = []
-        max_bars = 500 if is_incremental else 5600
-        step = 800
-        
-        for start_idx in range(0, max_bars, step):
-            count_to_fetch = min(step, max_bars - start_idx)
-            try:
-                bars = api.get_security_bars(9, market, pure_code, start_idx, count_to_fetch)
-                if not bars:
-                    break
-                all_bars.extend(bars)
-                if len(bars) < count_to_fetch:
-                    break
-            except:
-                break
-                
-        if all_bars:
-            return all_bars, market, primary_market
+        for alias_code in aliases:
+            all_bars = []
+            max_bars = 500 if is_incremental else 5600
+            step = 800
             
-    return [], None, primary_market
+            for start_idx in range(0, max_bars, step):
+                count_to_fetch = min(step, max_bars - start_idx)
+                try:
+                    # 双管齐下：优先专用包，备用标准包
+                    bars = api.get_index_bars(9, market, alias_code, start_idx, count_to_fetch)
+                    if not bars:
+                        bars = api.get_security_bars(9, market, alias_code, start_idx, count_to_fetch)
+                    
+                    if not bars:
+                        break
+                    all_bars.extend(bars)
+                    if len(bars) < count_to_fetch:
+                        break
+                except:
+                    break
+                    
+            if all_bars:
+                return all_bars, market, primary_market, alias_code
+                
+    return [], None, primary_market, pure_code
 
 def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
@@ -88,18 +105,35 @@ def main():
         sys.exit(1)
         
     all_rows = []
+    
+    # 🎯 统计容器，记录成功和失败指标
+    success_records = []
+    failed_records = []
+    
     try:
         for code_str in INDEX_LIST.keys():
             print(f"📊 Pulling Index: {code_str}...")
-            bars, actual_market, primary_market = fetch_index_data(api, code_str, is_incremental=is_incremental)
+            bars, actual_market, primary_market, alias_code = fetch_index_data(api, code_str, is_incremental=is_incremental)
             
             if not bars:
-                print(f"⚠️ Warning: No bars fetched for {code_str}")
+                # 记录失败
+                print(f"❌ Failed: No bars fetched for {code_str} ({INDEX_LIST[code_str]})")
+                failed_records.append({"code": code_str, "name": INDEX_LIST[code_str]})
                 continue
             
-            # 🎯 打印重定向通知，展示数据自愈轨迹
-            if actual_market != primary_market:
-                print(f"   🔄 [Self-Healed] Redirected {code_str} to Market Partition {actual_market} (Primary was {primary_market})")
+            # 记录成功与是否重定向
+            is_redirected = (actual_market != primary_market) or (alias_code != code_str.split('.')[1])
+            success_records.append({
+                "code": code_str,
+                "name": INDEX_LIST[code_str],
+                "count": len(bars),
+                "redirected": is_redirected,
+                "target_code": alias_code,
+                "target_market": actual_market
+            })
+            
+            if is_redirected:
+                print(f"   🔄 [Self-Healed] Redirected {code_str} -> Market {actual_market}, Code '{alias_code}'")
                 
             print(f"   Success. Fetched {len(bars)} records.")
             for b in bars:
@@ -117,8 +151,27 @@ def main():
     finally:
         api.disconnect()
         
+    # 🎯 控制台输出精美、可读性极强的总结报告
+    print("\n" + "="*80)
+    print("📋 指数下载总结报告 (INDEX DOWNLOAD SUMMARY REPORT)")
+    print("="*80)
+    print(f"   - 目标抓取总数: {len(INDEX_LIST)} 只")
+    print(f"   - 成功同步指数: {len(success_records)} / {len(INDEX_LIST)}")
+    print(f"   - 失败异常指数: {len(failed_records)} / {len(INDEX_LIST)}")
+    
+    if failed_records:
+        print("\n❌ 失败指数明细 (FAILED LIST):")
+        for f in failed_records:
+            print(f"   • {f['code']} ({f['name']}) -> [物理连接超时或该代码在服务器端已下线]")
+            
+    print("\n✅ 成功同步明细 (SUCCESSFUL LIST):")
+    for s in success_records:
+        heal_msg = f"  [自愈重定向: {s['target_code']}@M{s['target_market']}]" if s['redirected'] else ""
+        print(f"   • {s['code']} ({s['name']}): 已拉取 {s['count']:,} 行 K 线{heal_msg}")
+    print("="*80 + "\n")
+        
     if not all_rows:
-        print("❌ Error: No index data fetched!")
+        print("❌ 严重错误: 未抓取到任何有效的指数行情数据。")
         sys.exit(1)
         
     df = pd.DataFrame(all_rows)
@@ -146,7 +199,7 @@ def main():
     os.makedirs("temp_parts", exist_ok=True)
     out_path = "temp_parts/index_kline_all.parquet"
     df.to_parquet(out_path, index=False)
-    print(f"🎉 Successfully saved {len(df):,} index rows to {out_path}!")
+    print(f"🎉 物理落盘成功：已将 {len(df):,} 行高精度指数数据写入至 {out_path}!")
 
 if __name__ == "__main__":
     main()
