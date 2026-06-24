@@ -21,22 +21,13 @@ def get_stock_list_with_names():
                 data = json.load(f)
             if data:
                 df = pd.DataFrame(data)
-                df['tradeStatus'] = '1' # 默认占位
+                df['tradeStatus'] = '1'
                 return df
         except Exception as e:
             print(f"⚠️ Failed to parse stock JSON: {e}")
     return pd.DataFrame()
 
 def calculate_ttm_net_profit(f10_parquet_path):
-    """
-    🧮 滚动 TTM 归母净利润计算模块 (Pandas 离线无损计算)
-    原理：
-    - Q1: TTM = Q1_Cum + Q4_prev - Q1_prev
-    - Q2: TTM = Q2_Cum + Q4_prev - Q2_prev
-    - Q3: TTM = Q3_Cum + Q4_prev - Q3_prev
-    - Q4: TTM = Q4_Cum
-    - 内置首发上市无 comparative historical 记录时的“季节乘数安全自愈估算”，防 PE 坠入 NaN
-    """
     print("🧮 Calculating Trailing Twelve Months (TTM) Net Profit...")
     if not os.path.exists(f10_parquet_path):
         print("⚠️ Warning: F10 raw parquet not found! PE/PB will fall back to 0.0.")
@@ -46,27 +37,22 @@ def calculate_ttm_net_profit(f10_parquet_path):
     if df.empty:
         return pd.DataFrame()
 
-    # 1. 建立时间结构
     df = df.sort_values(['code', 'report_date'])
     df['month_day'] = df['report_date'].str[-5:]
     df['year'] = df['report_date'].str[:4].astype(int)
 
-    # 2. 构造去年的 Q4 年报查找字典 (作为 Q4_prev)
     df_q4 = df[df['month_day'] == '12-31'][['code', 'year', 'parent_netprofit']].copy()
-    df_q4['prev_year'] = df_q4['year']  # 映射到下一年的关联键
+    df_q4['prev_year'] = df_q4['year']
     df_q4.rename(columns={'parent_netprofit': 'q4_prev_profit'}, inplace=True)
 
-    # 3. 构造去年的同比季度累计查找字典 (作为 Q1_prev / Q2_prev / Q3_prev)
     df_prev = df.copy()
     df_prev['prev_year'] = df_prev['year']
     df_prev.rename(columns={'parent_netprofit': 'prev_cum_profit'}, inplace=True)
 
-    # 4. 广播拼合
     df['prev_year'] = df['year'] - 1
     df = pd.merge(df, df_q4[['code', 'prev_year', 'q4_prev_profit']], on=['code', 'prev_year'], how='left')
     df = pd.merge(df, df_prev[['code', 'prev_year', 'month_day', 'prev_cum_profit']], on=['code', 'prev_year', 'month_day'], how='left')
 
-    # 5. 执行 TTM 滚动算法
     q_num_map = {'03-31': 1, '06-30': 2, '09-30': 3, '12-31': 4}
     df['q_num'] = df['month_day'].map(q_num_map).fillna(4)
 
@@ -85,20 +71,17 @@ def calculate_ttm_net_profit(f10_parquet_path):
         if md == '12-31':
             ttm_vals.append(cum)
         elif pd.isnull(q4_prev) or pd.isnull(prev_cum):
-            # 💡 新股/借壳重组首年自愈估算：累计净利润 * (4 / 季度数)
             ttm_vals.append(cum * 4.0 / q_num)
         else:
-            # 🎯 经典滚动季度抵消算法
             ttm_vals.append(cum + q4_prev - prev_cum)
 
     df['ttm_net_profit'] = ttm_vals
     
-    # 瘦身并输出，作为 DuckDB 关联的数据源
     f10_clean = df[['code', 'name', 'report_date', 'notice_date', 'bps', 'ttm_net_profit']].copy()
     os.makedirs("temp_parts", exist_ok=True)
     clean_f10_path = "temp_parts/f10_ttm_clean.parquet"
     f10_clean.to_parquet(clean_f10_path, index=False)
-    print(f"✅ F10 TTM 预处理完毕。生成清洗库: {clean_f10_path}")
+    print(f"✅ F10 TTM 预处理完毕。")
     return f10_clean
 
 def main():
@@ -117,13 +100,38 @@ def main():
     k_files = glob.glob("all_artifacts/kline_part_*.parquet")
     f_files = glob.glob("all_artifacts/flow_part_*.parquet")
     sec_k_files = glob.glob("all_artifacts/sector_kline_full.parquet")
-    sec_c_files = glob.glob("all_artifacts/sector_constituents_latest.parquet")
 
-    # 1. 创建 K 线、资金流向、行业板块的视图
+    # 1. 创建视图与极速分流
     if k_files:
-        con.execute(f"CREATE OR REPLACE VIEW v_kline_raw AS SELECT * FROM read_parquet({k_files}, union_by_name=True)")
+        # 混合总物理表
+        con.execute(f"CREATE OR REPLACE VIEW v_kline_mixed AS SELECT * FROM read_parquet({k_files}, union_by_name=True)")
+        
+        # 🎯 个股视图：剔除所有指数代码（上海000/930/931/932，深圳399，北京899）
+        con.execute("""
+            CREATE OR REPLACE VIEW v_kline_raw AS 
+            SELECT * FROM v_kline_mixed 
+            WHERE NOT (code LIKE 'sh.000%' OR code LIKE 'sh.93%' OR code LIKE 'sz.399%' OR code LIKE 'bj.899%')
+        """)
+        
+        # 🎯 指数视图：保留所有指数（免除财务指标、市值和换手率，只保留价格与涨跌幅）
+        con.execute("""
+            CREATE OR REPLACE VIEW v_index_raw AS 
+            SELECT 
+                date,
+                code,
+                open,
+                high,
+                low,
+                close,
+                volume,
+                amount,
+                pctChg
+            FROM v_kline_mixed 
+            WHERE (code LIKE 'sh.000%' OR code LIKE 'sh.93%' OR code LIKE 'sz.399%' OR code LIKE 'bj.899%')
+        """)
     else:
         con.execute("CREATE OR REPLACE VIEW v_kline_raw AS SELECT * FROM (SELECT '' as date, '' as code) WHERE 1=0")
+        con.execute("CREATE OR REPLACE VIEW v_index_raw AS SELECT * FROM (SELECT '' as date, '' as code) WHERE 1=0")
 
     if f_files:
         con.execute(f"CREATE OR REPLACE VIEW v_flow AS SELECT * FROM read_parquet({f_files}, union_by_name=True)")
@@ -135,14 +143,13 @@ def main():
     else:
         con.execute("CREATE OR REPLACE VIEW v_sec_k AS SELECT * FROM (SELECT '' as date, '' as code) WHERE 1=0")
 
-    # 2. 核心：载入东财 F10 并执行 ASOF JOIN 计算滚动估值指标
+    # 2. 载入 F10 财务指标计算 valuation
     f10_raw_path = "output/all_stocks_f10_raw.parquet"
     f10_ttm_df = calculate_ttm_net_profit(f10_raw_path)
     
     if not f10_ttm_df.empty:
         con.execute("CREATE OR REPLACE VIEW v_f10 AS SELECT * FROM read_parquet('temp_parts/f10_ttm_clean.parquet')")
         
-        # 🚀 极速时序非等值关联：使用 SUBSTR(k.code, 4) 剔除前缀进行 ASOF JOIN
         print("⚡ Performing Look-ahead-bias-free ASOF JOIN via DuckDB...")
         con.execute("""
             CREATE OR REPLACE VIEW v_kline AS
@@ -153,7 +160,6 @@ def main():
                 k.high,
                 k.low,
                 k.close,
-                -- 🛡️ 兜底异常 amount：若缺失，可用 价格*成交量(手)*100 粗略估算，避免 NULL 值出现
                 CASE 
                     WHEN k.amount IS NULL OR k.amount <= 0 THEN CAST(k.close * k.volume * 100 AS DOUBLE)
                     ELSE k.amount
@@ -161,12 +167,10 @@ def main():
                 k.volume,
                 k.turn,
                 k.pctChg,
-                -- 滚动市盈率 = 总市值 / TTM归母净利润
                 CASE 
                     WHEN f.ttm_net_profit IS NULL OR f.ttm_net_profit <= 0 OR k.total_mv IS NULL OR k.total_mv <= 0 THEN 0.0
                     ELSE CAST(k.total_mv / f.ttm_net_profit AS FLOAT)
                 END as peTTM,
-                -- 滚动市净率 = 收盘价 / 每股净资产
                 CASE 
                     WHEN f.bps IS NULL OR f.bps <= 0 THEN 0.0
                     ELSE CAST(k.close / f.bps AS FLOAT)
@@ -179,7 +183,7 @@ def main():
                 k.float_mv
             FROM v_kline_raw k
             ASOF LEFT JOIN v_f10 f
-                ON SUBSTR(k.code, 4) = f.code  -- 🎯 修复：剥离 "sh." 等前缀，使其与 "603730" 精准匹配
+                ON SUBSTR(k.code, 4) = f.code
                AND k.date >= f.notice_date;
         """)
     else:
@@ -189,6 +193,7 @@ def main():
     os.makedirs("output", exist_ok=True)
     targets = {}
 
+    # A 股个股主列表
     df_stocks = get_stock_list_with_names()
     if not df_stocks.empty:
         p = "output/stock_list.parquet"
@@ -196,11 +201,53 @@ def main():
         targets[p] = "stock_list.parquet"
         qc.check_dataframe(df_stocks, "stock_list.parquet", ["code_name"], file_path=p)
 
+    # 行业板块主列表
     if sec_k_files:
         p = 'output/sector_list.parquet'
         con.execute(f"COPY (SELECT DISTINCT code, name, type FROM v_sec_k ORDER BY type, code) TO '{p}' (FORMAT 'PARQUET')")
         targets[p] = "sector_list.parquet"
         qc.check_dataframe(pd.read_parquet(p), "sector_list.parquet", ["name"], file_path=p)
+
+    # 🎯 导出 55 只量化矩阵指数名称元数据表 index_list.parquet
+    index_meta = [
+        # 1. 宽基与规模 (14只)
+        {"code": "sh.000001", "name": "上证指数"}, {"code": "sz.399001", "name": "深证成指"},
+        {"code": "sz.399006", "name": "创业板指"}, {"code": "sh.000688", "name": "科创50"},
+        {"code": "bj.899050", "name": "北证50"},   {"code": "sh.000016", "name": "上证50"},
+        {"code": "sh.000300", "name": "沪深300"},  {"code": "sh.000905", "name": "中证500"},
+        {"code": "sh.000852", "name": "中证1000"}, {"code": "sh.000851", "name": "中证2000"},
+        {"code": "sz.399303", "name": "国证2000"}, {"code": "sh.000985", "name": "中证全指"},
+        {"code": "sz.399330", "name": "深证100"},  {"code": "sh.000090", "name": "上证180"},
+        # 2. 风格与 Smart Beta (10只)
+        {"code": "sh.000922", "name": "中证红利"}, {"code": "sz.399324", "name": "深证红利"},
+        {"code": "sh.000015", "name": "红利指数"}, {"code": "sh.000918", "name": "沪深300成长"},
+        {"code": "sh.000919", "name": "沪深300价值"}, {"code": "sh.000807", "name": "中证超大盘"},
+        {"code": "sh.000827", "name": "中证中盘"}, {"code": "sh.000925", "name": "中证基本面50"},
+        {"code": "sh.000978", "name": "中证大盘价值"}, {"code": "sz.399317", "name": "国证1000"},
+        # 3. 前沿科技与新质生产力 (16只)
+        {"code": "sz.399807", "name": "中证人工智能"}, {"code": "sz.399977", "name": "中证机器人"},
+        {"code": "sh.932252", "name": "中证低空经济主题"}, {"code": "sz.399812", "name": "国证芯片"},
+        {"code": "sh.000973", "name": "中证半导体"}, {"code": "sh.931160", "name": "中证数据要素"},
+        {"code": "sz.399354", "name": "国证人工智能"}, {"code": "sz.399673", "name": "创业板50"},
+        {"code": "sz.399979", "name": "中证空天安全"}, {"code": "sz.399285", "name": "国证新能源"},
+        {"code": "sh.931151", "name": "中证光伏产业"}, {"code": "sz.399008", "name": "中小100"},
+        {"code": "sh.931494", "name": "中证消费电子主题"}, {"code": "sh.931409", "name": "中证电网设备"},
+        {"code": "sh.931152", "name": "中证创新药产业"}, {"code": "sz.399993", "name": "中证信息安全"},
+        # 4. 传统行业与大宗周期 (15只)
+        {"code": "sz.399975", "name": "证券公司"}, {"code": "sz.399986", "name": "中证银行"},
+        {"code": "sz.399932", "name": "中证消费"}, {"code": "sz.399933", "name": "中证医药"},
+        {"code": "sz.399967", "name": "中证军工"}, {"code": "sz.399989", "name": "中证医疗"},
+        {"code": "sz.399971", "name": "中证传媒"}, {"code": "sz.399997", "name": "中证白酒"},
+        {"code": "sh.000934", "name": "中证能源"}, {"code": "sh.000935", "name": "中证原材料"},
+        {"code": "sz.399990", "name": "煤炭等权"}, {"code": "sz.399998", "name": "中证有色"},
+        {"code": "sz.399974", "name": "国证国企"}, {"code": "sh.000157", "name": "中证央企"},
+        {"code": "sh.930606", "name": "中证黄金产业"}
+    ]
+    df_idx_meta = pd.DataFrame(index_meta)
+    idx_p = "output/index_list.parquet"
+    df_idx_meta.to_parquet(idx_p, index=False)
+    targets[idx_p] = "index_list.parquet"
+    qc.check_dataframe(df_idx_meta, "index_list.parquet", ["name"], file_path=idx_p)
 
     if args.year == 9999:
         years = range(2005, datetime.datetime.now().year + 1)
@@ -213,10 +260,13 @@ def main():
         print(f"🔪 Merging & Splitting Data for Year {y}...")
         start_date, end_date = f"{y}-01-01", f"{y}-12-31"
         
+        # 🎯 物理落盘任务链中正式并入并对齐 index_kline_{y}.parquet
         tasks = [
             ("v_kline", f"stock_kline_{y}.parquet", ["close", "volume", "peTTM", "pbMRQ", "total_mv", "turn"]),
             ("v_flow", f"stock_money_flow_{y}.parquet", ["net_amount"]),
-            ("v_sec_k", f"sector_kline_{y}.parquet", ["close"])
+            ("v_sec_k", f"sector_kline_{y}.parquet", ["close"]),
+            # 🌟 55 只常用指数历史 K 线落盘任务
+            ("v_index_raw", f"index_kline_{y}.parquet", ["close", "volume"])
         ]
         
         for view_name, out_name, check_cols in tasks:
@@ -241,6 +291,8 @@ def main():
             except Exception as e:
                 print(f"❌ Error merging {out_name}: {e}")
 
+        # 板块成分股关系复制
+        sec_c_files = glob.glob("all_artifacts/sector_constituents_latest.parquet")
         if sec_c_files:
             c_out = f"output/sector_constituents_{y}.parquet"
             try:
@@ -254,9 +306,7 @@ def main():
     with open("output/qc_summary.md", "w", encoding="utf-8") as f:
         f.write(qc.get_summary_md())
 
-    # =========================================================
-    # 🛡️ 数据源自愈监控报告汇总
-    # =========================================================
+    # 汇总复权异常等监控指标
     factor_stat_files = glob.glob("all_artifacts/factor_stats_*.json")
     all_retried_codes = set()
     for f_path in factor_stat_files:
@@ -268,28 +318,10 @@ def main():
 
     with open("output/qc_summary.md", "a", encoding="utf-8") as f:
         f.write("\n## 🛡️ 数据源监控与自愈报告\n")
-        f.write(f"- **复权因子异常拦截：** 今日拦截并强制重试了 **{len(all_retried_codes)}** 只存在复权因子错乱(非正数/断层)的股票。\n")
-        if all_retried_codes:
-            sample = ", ".join(list(all_retried_codes)[:15])
-            f.write(f"- **受影响股票示例：** {sample}{'...' if len(all_retried_codes)>15 else ''}\n")
-
-    try:
-        with open("output/qc_report.json", "r", encoding="utf-8") as f:
-            report_data = json.load(f)
-        report_data["Data_Healing_Stats"] = {
-            "factor_retried_count": len(all_retried_codes),
-            "retried_codes": list(all_retried_codes)
-        }
-        with open("output/qc_report.json", "w", encoding="utf-8") as f:
-            json.dump(report_data, f, ensure_ascii=False, indent=2)
-    except:
-        pass
-    
-    targets["output/qc_report.json"] = "qc_report.json"
-    targets["output/qc_summary.md"] = "qc_summary.md"
+        f.write(f"- **复权因子异常拦截：** 今日拦截并强制重试了 **{len(all_retried_codes)}** 只存在复权因子错乱的股票。\n")
 
     if args.mode == "hf" and os.getenv("HF_TOKEN"):
-        print("🚀 Using Legacy HF API Upload (commits per file)...")
+        print("🚀 Uploading Consolidations to Hugging Face...")
         hf = HFManager(os.getenv("HF_TOKEN"), os.getenv("HF_REPO"))
         for local, remote in targets.items():
             hf.upload_file(local, remote)
@@ -298,7 +330,6 @@ def main():
         print(f"✅ Data Preparation Success!")
         print(f"📂 Location: {os.path.abspath('output/')}")
         print(f"📊 Total Files: {len(targets)}")
-        print(f"🚀 Action will now execute 'git push --force' to sync.")
         print(f"{'='*50}\n")
 
 if __name__ == "__main__":
