@@ -140,7 +140,6 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      # 🎯 核心修正：运行高精度指数增量获取脚本，生成 index_kline_all.parquet
       - name: 📈 Fetch Daily Incremental Index Data
         run: python scripts/fetch_index.py --incremental
 
@@ -179,6 +178,13 @@ jobs:
           pip install polars
           python scripts/fetch_f10_all.py
           ls -lh output/all_stocks_f10_raw.parquet
+
+      - name: ❄️ Fetch All Stocks Full Historical Main Operating Business Detail
+        env:
+          XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }}
+        run: |
+          python scripts/fetch_f10_mainbus.py
+          ls -lh output/all_stocks_mainbus_raw.parquet
 
       - name: Merge & Split by Year (HF Mode)
         env:
