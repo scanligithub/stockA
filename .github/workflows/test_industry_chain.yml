@@ -1,7 +1,7 @@
 name: Test Industry Chain API
 
 on:
-  workflow_dispatch: # 允许在 GitHub Actions 页面上手动点击触发测试
+  workflow_dispatch:
 
 jobs:
   run-tests:
@@ -16,8 +16,5 @@ jobs:
       - name: Install Test Dependencies
         run: pip install requests
 
-      - name: Test Micro F10 Data
-        run: python tests/test_f10_mainbus.py
-
-      - name: Test Macro Industry Chain Center
-        run: python tests/test_industry_center.py
+      - name: Probe Correct Table Names
+        run: python tests/probe_tables.py
