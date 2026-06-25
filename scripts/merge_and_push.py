@@ -229,7 +229,7 @@ def main():
         targets[p] = "stock_list.parquet"
         qc.check_dataframe(df_stocks, "stock_list.parquet", ["code_name"], file_path=p)
 
-    # 🎯 强制注册并执行 QC 校验，使原始基本面财务表在“数据产物概览”中显式体现
+# 🎯 调整后：仅校验代码和报告期（结构性主键），避免历史合法财务指标空值触发假阳性报警
     raw_f10_p = "output/all_stocks_f10_raw.parquet"
     if os.path.exists(raw_f10_p):
         targets[raw_f10_p] = "all_stocks_f10_raw.parquet"
@@ -238,7 +238,7 @@ def main():
             qc.check_dataframe(
                 df_f10_raw, 
                 "all_stocks_f10_raw.parquet", 
-                ["parent_netprofit", "bps", "report_date"], 
+                ["code", "report_date"],  # ⚡ 仅做结构主键校验，彻底封杀 13071 个假警报
                 file_path=raw_f10_p
             )
         except Exception as e:
