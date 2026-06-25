@@ -5,19 +5,19 @@ on:
 
 jobs:
   run-tests:
-    runs-on: ubuntu-latest
+    runs-ok: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-          cache: 'pip' # 使用 pip 缓存加速依赖安装
+          cache: 'pip'
 
       - name: Install Quant Dependencies
         run: |
           pip install --upgrade pip
-          pip install akshare pandas
+          pip install pandas pyarrow lxml html5lib
 
-      - name: Test AkShare Mobile API
-        run: python tests/test_akshare_zygc.py
+      - name: Test Sina HTML Parser
+        run: python tests/test_sina_mainbus.py
