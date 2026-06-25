@@ -1,0 +1,28 @@
+name: Test Xueqiu F10 Connection
+
+on:
+  workflow_dispatch: # 仅支持在 GitHub Action 页面手动点击运行，不污染日常自动化流
+
+jobs:
+  run-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          
+      - name: Install Test Dependencies
+        run: pip install polars requests pyarrow
+
+      - name: Run Xueqiu F10 Space Test
+        run: python scripts/test_xueqiu_mainbus.py
+
+      # 运行完毕后，将测试 Parquet 压缩并挂载在 Actions 页面供您下载质检
+      - name: Upload Test Output to Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xueqiu-mainbus-test-data
+          path: output_test/*.parquet
+          retention-days: 3
