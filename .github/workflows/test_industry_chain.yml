@@ -5,7 +5,7 @@ on:
 
 jobs:
   run-tests:
-    runs-on: ubuntu-latest # 🛡️ 已修正：runs-ok 改为 runs-on
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
