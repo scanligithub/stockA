@@ -5,10 +5,9 @@ import requests
 import polars as pl
 from datetime import datetime
 
-# 完善标准浏览器请求头，全面模拟真实浏览器行为
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Referer": "https://xueqiu.com/",
     "Connection": "keep-alive"
@@ -36,56 +35,51 @@ def ms_to_date_str(ms):
 
 def main():
     print("="*70)
-    print("📡 Actions 环境雪球 V5 财务数据空间连通性与吞吐量测试 (Cookie 自愈版)")
+    print("📡 Actions 环境雪球 V5 财务数据空间连通性测试 (Secrets 安全注入版)")
     print("="*70)
     
     session = requests.Session()
     session.headers.update(HEADERS)
     
-    # 1. 第一步：尝试首页握手
-    print("[*] 正在执行第一阶段首页握手...")
-    try:
-        session.get("https://xueqiu.com/", timeout=10)
-    except Exception as e:
-        print(f"⚠️ 首页握手异常 (跳过): {e}")
-
-    # 2. 第二步核心：模拟访问真实的个股 HTML 详情页，强迫雪球下发安全 Token
-    print("[*] 正在执行第二阶段：模拟访问个股 HTML 落地页以激活完整安全 Cookie...")
-    try:
-        # 访问个股 HTML 页面（非 API）
-        r_html = session.get("https://xueqiu.com/S/SZ300750", timeout=10)
-        print(f"    - 页面请求状态: {r_html.status_code}")
-    except Exception as e:
-        print(f"❌ 激活安全 Cookie 异常: {e}")
-        return
-
-    # 3. 诊断当前获取到的 Cookie
-    cookies_dict = session.cookies.get_dict()
-    print("\n" + "-"*50)
-    print(f"📡 诊断信息：当前 Session 已挂载的 Cookie: \n{json.dumps(cookies_dict, indent=4)}")
-    print("-"*50 + "\n")
+    # 🛡️ 核心改变：优先从 GitHub Repository Secrets 读取注入安全 Token
+    xq_token = os.getenv("XQ_A_TOKEN", "").strip()
     
-    if "xq_a_token" not in cookies_dict:
-        print("❌ 严重警告: 未能在 Cookie 中检测到 'xq_a_token'，雪球可能会拒绝后续的 API 请求 (HTTP 400)。")
+    if xq_token:
+        print("🔑 检测到 GitHub Repository Secrets 中的 XQ_A_TOKEN，正在执行安全注入...")
+        # 强制将 Token 绑定到 .xueqiu.com 根域名作用域下
+        session.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
+        print("✅ 安全 Token 注入完成。")
     else:
-        print("✅ 成功捕获安全 Token (xq_a_token)，进入高能采集状态。")
+        print("⚠️ 未检测到环境变量中的 XQ_A_TOKEN，将使用退化的【访客模式】握手...")
+        try:
+            session.get("https://xueqiu.com/", timeout=8)
+            session.get("https://xueqiu.com/S/SZ300750", timeout=8)
+        except Exception as e:
+            print(f"⚠️ 访客握手发生异常: {e}")
+
+    # 打印最终 Cookie 诊断信息（安全性考量：对 Token 执行部分脱敏）
+    cookies_dict = session.cookies.get_dict()
+    safe_cookies = cookies_dict.copy()
+    if "xq_a_token" in safe_cookies:
+        raw_t = safe_cookies["xq_a_token"]
+        safe_cookies["xq_a_token"] = f"{raw_t[:6]}...{raw_t[-6:]}" if len(raw_t) > 12 else "MASKED"
+        
+    print("\n" + "-"*50)
+    print(f"📡 诊断信息：当前发送请求的 Cookie 状态: \n{json.dumps(safe_cookies, indent=4)}")
+    print("-"*50 + "\n")
 
     all_rows = []
     success_count = 0
     
     # 4. 遍历拉取测试股全部历史
-    print(f"\n[*] 开始拉取 {len(TEST_STOCKS)} 只代表性个股的全部历史主营业务构成...")
+    print(f"[*] 开始拉取 {len(TEST_STOCKS)} 只代表性个股的全部历史主营业务构成...")
     for s in TEST_STOCKS:
         code, name = s["code"], s["name"]
         print(f" 📥 正在请求: {name} ({code}) ... ", end="")
         
         url = f"https://stock.xueqiu.com/v5/stock/finance/cn/business.json?symbol={code}"
         try:
-            # 必须在请求头中明确告知服务器我们接受 JSON，防止防盗链拦截
-            api_headers = HEADERS.copy()
-            api_headers["Accept"] = "application/json, text/plain, */*"
-            
-            res = session.get(url, headers=api_headers, timeout=10)
+            res = session.get(url, timeout=10)
             if res.status_code != 200:
                 print(f"❌ 失败 (HTTP {res.status_code})")
                 continue
