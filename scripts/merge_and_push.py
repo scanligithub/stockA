@@ -222,12 +222,23 @@ def main():
     os.makedirs("output", exist_ok=True)
     targets = {}
 
+# 在 scripts/merge_and_push.py 中，定位到 df_stocks = get_stock_list_with_names() 这一行
+
     df_stocks = get_stock_list_with_names()
     if not df_stocks.empty:
         p = "output/stock_list.parquet"
         df_stocks.to_parquet(p, index=False)
         targets[p] = "stock_list.parquet"
         qc.check_dataframe(df_stocks, "stock_list.parquet", ["code_name"], file_path=p)
+
+    # 🎯 生产对齐：强制注册 F10 财务原始库与雪球主营原始库，确保其自动上传至 Hugging Face 与 GitHub Releases
+    raw_f10_p = "output/all_stocks_f10_raw.parquet"
+    if os.path.exists(raw_f10_p):
+        targets[raw_f10_p] = "all_stocks_f10_raw.parquet"
+        
+    raw_mainbus_p = "output/all_stocks_mainbus_raw.parquet"
+    if os.path.exists(raw_mainbus_p):
+        targets[raw_mainbus_p] = "all_stocks_mainbus_raw.parquet"
 
     if sec_k_files:
         p = 'output/sector_list.parquet'
