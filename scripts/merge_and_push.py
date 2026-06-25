@@ -1,3 +1,4 @@
+# FILE: scripts/merge_and_push.py
 import sys
 import os
 
@@ -100,8 +101,6 @@ def main():
     k_files = glob.glob("all_artifacts/kline_part_*.parquet")
     f_files = glob.glob("all_artifacts/flow_part_*.parquet")
     sec_k_files = glob.glob("all_artifacts/sector_kline_full.parquet")
-    
-    # 🎯 独立读取高精度指数 Parquet 数据源
     idx_source = glob.glob("all_artifacts/index_kline_all.parquet")
 
     if k_files:
@@ -124,15 +123,49 @@ def main():
     else:
         con.execute("CREATE OR REPLACE VIEW v_sec_k AS SELECT * FROM (SELECT '' as date, '' as code) WHERE 1=0")
 
-    # 3. 载入 F10 财务指标计算 valuation
+    # 1. 载入 F10 财务指标计算 valuation
     f10_raw_path = "output/all_stocks_f10_raw.parquet"
     f10_ttm_df = calculate_ttm_net_profit(f10_raw_path)
+    
+    # 2. 载入雪球主营业务明细数据
+    mainbus_raw_path = "output/all_stocks_mainbus_raw.parquet"
+    has_mainbus = os.path.exists(mainbus_raw_path)
     
     if not f10_ttm_df.empty:
         con.execute("CREATE OR REPLACE VIEW v_f10 AS SELECT * FROM read_parquet('temp_parts/f10_ttm_clean.parquet')")
         
+        # 🛡️ 核心重构：利用东财 notice_date 给雪球主营业务打上物理公告披露时间戳，绝不泄露未来信息
+        if has_mainbus:
+            print("🧱 Building Look-ahead-bias-free Product Mapping View...")
+            con.execute(f"CREATE OR REPLACE VIEW v_mainbus_raw AS SELECT * FROM read_parquet('{mainbus_raw_path}')")
+            
+            # 第一步：建立 (code, report_date) -> notice_date 的安全发布日期映射字典
+            con.execute("""
+                CREATE OR REPLACE VIEW v_notice_map AS
+                SELECT DISTINCT code, report_date, notice_date
+                FROM v_f10
+                WHERE notice_date IS NOT NULL AND notice_date != '';
+            """)
+            
+            # 第二步：筛选“产品级”主营构成明细并合并公告日，再使用 STRING_AGG 强行降维拼接至每股每季度 1 行
+            con.execute("""
+                CREATE OR REPLACE VIEW v_mainbus_flat AS
+                SELECT 
+                    m.code,
+                    map.notice_date,
+                    STRING_AGG(m.item_name || ':' || ROUND(m.income_ratio, 1), '|') as product_ratios
+                FROM v_mainbus_raw m
+                INNER JOIN v_notice_map map
+                   ON m.code = map.code
+                  AND m.report_date = map.report_date
+                WHERE m.item_type = 2  -- 2 代表精准产品级，过滤地域及大行业噪音
+                GROUP BY m.code, map.notice_date;
+            """)
+        
         print("⚡ Performing Look-ahead-bias-free ASOF JOIN via DuckDB...")
-        con.execute("""
+        
+        # 组装最终带产业链暴露因子的 K 线联表
+        join_sql = """
             CREATE OR REPLACE VIEW v_kline AS
             SELECT 
                 k.date,
@@ -162,11 +195,26 @@ def main():
                 k.float_shares,
                 k.total_mv,
                 k.float_mv
+        """
+        
+        if has_mainbus:
+            join_sql += ", COALESCE(mb.product_ratios, '') as product_ratios "
+            
+        join_sql += """
             FROM v_kline_raw k
             ASOF LEFT JOIN v_f10 f
                 ON SUBSTR(k.code, 4) = f.code
-               AND k.date >= f.notice_date;
-        """)
+               AND k.date >= f.notice_date
+        """
+        
+        if has_mainbus:
+            join_sql += """
+            ASOF LEFT JOIN v_mainbus_flat mb
+                ON SUBSTR(k.code, 4) = mb.code
+               AND k.date >= mb.notice_date
+            """
+            
+        con.execute(join_sql)
     else:
         print("⚠️ Warning: F10 TTM View could not be created. PE/PB remains 0.0.")
         con.execute("CREATE OR REPLACE VIEW v_kline AS SELECT * FROM v_kline_raw")
@@ -187,43 +235,35 @@ def main():
         targets[p] = "sector_list.parquet"
         qc.check_dataframe(pd.read_parquet(p), "sector_list.parquet", ["name"], file_path=p)
 
-    # 导出 55 只量化矩阵指数名称元数据表 index_list.parquet
+# 在 scripts/merge_and_push.py 中，替换 index_meta 变量为以下 37 只对齐版本：
+
+    # 🎯 严格对齐 fetch_index.py，导出 37 只高冗余稳健核心指数名称元数据表 index_list.parquet
     index_meta = [
         {"code": "sh.000001", "name": "上证指数"}, {"code": "sz.399001", "name": "深证成指"},
         {"code": "sz.399006", "name": "创业板指"}, {"code": "sh.000688", "name": "科创50"},
         {"code": "bj.899050", "name": "北证50"},   {"code": "sh.000016", "name": "上证50"},
         {"code": "sh.000300", "name": "沪深300"},  {"code": "sh.000905", "name": "中证500"},
         {"code": "sh.000852", "name": "中证1000"}, {"code": "sh.000851", "name": "中证2000"},
-        {"code": "sz.399303", "name": "国证2000"}, {"code": "sh.000985", "name": "中证全指"},
-        {"code": "sz.399330", "name": "深证100"},  {"code": "sh.000090", "name": "上证180"},
-        {"code": "sh.000922", "name": "中证红利"}, {"code": "sz.399324", "name": "深证红利"},
-        {"code": "sh.000015", "name": "红利指数"}, {"code": "sh.000918", "name": "沪深300成长"},
-        {"code": "sh.000919", "name": "沪深300价值"}, {"code": "sh.000807", "name": "中证超大盘"},
-        {"code": "sh.000827", "name": "中证中盘"}, {"code": "sh.000925", "name": "中证基本面50"},
-        {"code": "sh.000978", "name": "中证大盘价值"}, {"code": "sz.399317", "name": "国证1000"},
-        {"code": "sz.399807", "name": "中证人工智能"}, {"code": "sz.399977", "name": "中证机器人"},
-        {"code": "sh.932252", "name": "中证低空经济主题"}, {"code": "sz.399812", "name": "国证芯片"},
-        {"code": "sh.000973", "name": "中证半导体"}, {"code": "sh.931160", "name": "中证数据要素"},
-        {"code": "sz.399354", "name": "国证人工智能"}, {"code": "sz.399673", "name": "创业板50"},
-        {"code": "sz.399979", "name": "中证空天安全"}, {"code": "sz.399285", "name": "国证新能源"},
-        {"code": "sh.931151", "name": "中证光伏产业"}, {"code": "sz.399008", "name": "中小100"},
-        {"code": "sh.931494", "name": "中证消费电子主题"}, {"code": "sh.931409", "name": "中证电网设备"},
-        {"code": "sh.931152", "name": "中证创新药产业"}, {"code": "sz.399993", "name": "中证信息安全"},
-        {"code": "sz.399975", "name": "证券公司"}, {"code": "sz.399986", "name": "中证银行"},
-        {"code": "sz.399932", "name": "中证消费"}, {"code": "sz.399933", "name": "中证医药"},
-        {"code": "sz.399967", "name": "中证军工"}, {"code": "sz.399989", "name": "中证医疗"},
-        {"code": "sz.399971", "name": "中证传媒"}, {"code": "sz.399997", "name": "中证白酒"},
-        {"code": "sh.000934", "name": "中证能源"}, {"code": "sh.000935", "name": "中证原材料"},
-        {"code": "sz.399990", "name": "煤炭等权"}, {"code": "sz.399998", "name": "中证有色"},
-        {"code": "sz.399974", "name": "国证国企"}, {"code": "sh.000157", "name": "中证央企"},
-        {"code": "sh.930606", "name": "中证黄金产业"}
+        {"code": "sz.399303", "name": "国证2000"}, {"code": "sz.399330", "name": "深证100"},
+        {"code": "sh.000090", "name": "上证180"},  {"code": "sz.399324", "name": "深证红利"},
+        {"code": "sh.000015", "name": "红利指数"}, {"code": "sh.000827", "name": "中证中盘"},
+        {"code": "sz.399317", "name": "国证1000"}, {"code": "sz.399807", "name": "中证人工智能"},
+        {"code": "sz.399812", "name": "国证芯片"},   {"code": "sz.399354", "name": "国证人工智能"},
+        {"code": "sz.399673", "name": "创业板50"},  {"code": "sz.399285", "name": "国证新能源"},
+        {"code": "sz.399008", "name": "中小100"},  {"code": "sz.399993", "name": "中证信息安全"},
+        {"code": "sz.399975", "name": "证券公司"},  {"code": "sz.399986", "name": "中证银行"},
+        {"code": "sz.399932", "name": "中证消费"},  {"code": "sz.399933", "name": "中证医药"},
+        {"code": "sz.399967", "name": "中证军工"},  {"code": "sz.399989", "name": "中证医疗"},
+        {"code": "sz.399971", "name": "中证传媒"},  {"code": "sz.399997", "name": "中证白酒"},
+        {"code": "sh.000934", "name": "中证能源"},  {"code": "sh.000935", "name": "中证原材料"},
+        {"code": "sz.399990", "name": "煤炭等权"},  {"code": "sz.399998", "name": "中证有色"},
+        {"code": "sz.399974", "name": "国证国企"}
     ]
     df_idx_meta = pd.DataFrame(index_meta)
     idx_p = "output/index_list.parquet"
     df_idx_meta.to_parquet(idx_p, index=False)
     targets[idx_p] = "index_list.parquet"
     qc.check_dataframe(df_idx_meta, "index_list.parquet", ["name"], file_path=idx_p)
-
     if args.year == 9999:
         years = range(2005, datetime.datetime.now().year + 1)
     elif args.year > 0:
@@ -235,11 +275,15 @@ def main():
         print(f"🔪 Merging & Splitting Data for Year {y}...")
         start_date, end_date = f"{y}-01-01", f"{y}-12-31"
         
+        # 增加 product_ratios 质量校验列
+        kline_qc_cols = ["close", "volume", "peTTM", "pbMRQ", "total_mv", "turn"]
+        if has_mainbus:
+            kline_qc_cols.append("product_ratios")
+            
         tasks = [
-            ("v_kline", f"stock_kline_{y}.parquet", ["close", "volume", "peTTM", "pbMRQ", "total_mv", "turn"]),
+            ("v_kline", f"stock_kline_{y}.parquet", kline_qc_cols),
             ("v_flow", f"stock_money_flow_{y}.parquet", ["net_amount"]),
             ("v_sec_k", f"sector_kline_{y}.parquet", ["close"]),
-            # 🎯 高精度、零错位、日线完整的指数 parquet 切片物理生成任务
             ("v_index_raw", f"index_kline_{y}.parquet", ["close", "volume"])
         ]
         
