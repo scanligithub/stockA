@@ -1,0 +1,23 @@
+name: Test Industry Chain API
+
+on:
+  workflow_dispatch: # 允许在 GitHub Actions 页面上手动点击触发测试
+
+jobs:
+  run-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install Test Dependencies
+        run: pip install requests
+
+      - name: Test Micro F10 Data
+        run: python tests/test_f10_mainbus.py
+
+      - name: Test Macro Industry Chain Center
+        run: python tests/test_industry_center.py
