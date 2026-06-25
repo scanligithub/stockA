@@ -134,12 +134,12 @@ def main():
     if not f10_ttm_df.empty:
         con.execute("CREATE OR REPLACE VIEW v_f10 AS SELECT * FROM read_parquet('temp_parts/f10_ttm_clean.parquet')")
         
-        # 🛡️ 核心重构：利用东财 notice_date 给雪球主营业务打上物理公告披露时间戳，绝不泄露未来信息
+        # 🛡️ 利用东财 notice_date 给雪球主营业务打上物理公告披露时间戳，去未来化
         if has_mainbus:
             print("🧱 Building Look-ahead-bias-free Product Mapping View...")
             con.execute(f"CREATE OR REPLACE VIEW v_mainbus_raw AS SELECT * FROM read_parquet('{mainbus_raw_path}')")
             
-            # 第一步：建立 (code, report_date) -> notice_date 的安全发布日期映射字典
+            # 建立 (code, report_date) -> notice_date 的安全发布日期映射字典
             con.execute("""
                 CREATE OR REPLACE VIEW v_notice_map AS
                 SELECT DISTINCT code, report_date, notice_date
@@ -147,7 +147,7 @@ def main():
                 WHERE notice_date IS NOT NULL AND notice_date != '';
             """)
             
-            # 第二步：筛选“产品级”主营构成明细并合并公告日，再使用 STRING_AGG 强行降维拼接至每股每季度 1 行
+            # 筛选“产品级”主营构成明细并合并公告日，再使用 STRING_AGG 强行降维拼接至每股每季度 1 行
             con.execute("""
                 CREATE OR REPLACE VIEW v_mainbus_flat AS
                 SELECT 
@@ -158,13 +158,13 @@ def main():
                 INNER JOIN v_notice_map map
                    ON m.code = map.code
                   AND m.report_date = map.report_date
-                WHERE m.item_type = 2  -- 2 代表精准产品级，过滤地域及大行业噪音
+                WHERE m.item_type = 2  -- 2 代表产品级明细
                 GROUP BY m.code, map.notice_date;
             """)
         
         print("⚡ Performing Look-ahead-bias-free ASOF JOIN via DuckDB...")
         
-        # 组装最终带产业链暴露因子的 K 线联表
+        # 组装最终带产业链产品暴露因子的 K 线联表
         join_sql = """
             CREATE OR REPLACE VIEW v_kline AS
             SELECT 
@@ -222,8 +222,6 @@ def main():
     os.makedirs("output", exist_ok=True)
     targets = {}
 
-# 在 scripts/merge_and_push.py 中，定位到 df_stocks = get_stock_list_with_names() 这一行
-
     df_stocks = get_stock_list_with_names()
     if not df_stocks.empty:
         p = "output/stock_list.parquet"
@@ -231,22 +229,41 @@ def main():
         targets[p] = "stock_list.parquet"
         qc.check_dataframe(df_stocks, "stock_list.parquet", ["code_name"], file_path=p)
 
-    # 🎯 生产对齐：强制注册 F10 财务原始库与雪球主营原始库，确保其自动上传至 Hugging Face 与 GitHub Releases
+    # 🎯 强制注册并执行 QC 校验，使原始基本面财务表在“数据产物概览”中显式体现
     raw_f10_p = "output/all_stocks_f10_raw.parquet"
     if os.path.exists(raw_f10_p):
         targets[raw_f10_p] = "all_stocks_f10_raw.parquet"
+        try:
+            df_f10_raw = pd.read_parquet(raw_f10_p)
+            qc.check_dataframe(
+                df_f10_raw, 
+                "all_stocks_f10_raw.parquet", 
+                ["parent_netprofit", "bps", "report_date"], 
+                file_path=raw_f10_p
+            )
+        except Exception as e:
+            print(f"⚠️ QC check failed for f10 raw: {e}")
         
+    # 🎯 强制注册并执行 QC 校验，使原始主营明细表在“数据产物概览”中显式体现
     raw_mainbus_p = "output/all_stocks_mainbus_raw.parquet"
     if os.path.exists(raw_mainbus_p):
         targets[raw_mainbus_p] = "all_stocks_mainbus_raw.parquet"
+        try:
+            df_mb_raw = pd.read_parquet(raw_mainbus_p)
+            qc.check_dataframe(
+                df_mb_raw, 
+                "all_stocks_mainbus_raw.parquet", 
+                ["item_name", "income_ratio", "report_date"], 
+                file_path=raw_mainbus_p
+            )
+        except Exception as e:
+            print(f"⚠️ QC check failed for mainbus raw: {e}")
 
     if sec_k_files:
         p = 'output/sector_list.parquet'
         con.execute(f"COPY (SELECT DISTINCT code, name, type FROM v_sec_k ORDER BY type, code) TO '{p}' (FORMAT 'PARQUET')")
         targets[p] = "sector_list.parquet"
         qc.check_dataframe(pd.read_parquet(p), "sector_list.parquet", ["name"], file_path=p)
-
-# 在 scripts/merge_and_push.py 中，替换 index_meta 变量为以下 37 只对齐版本：
 
     # 🎯 严格对齐 fetch_index.py，导出 37 只高冗余稳健核心指数名称元数据表 index_list.parquet
     index_meta = [
@@ -275,6 +292,7 @@ def main():
     df_idx_meta.to_parquet(idx_p, index=False)
     targets[idx_p] = "index_list.parquet"
     qc.check_dataframe(df_idx_meta, "index_list.parquet", ["name"], file_path=idx_p)
+
     if args.year == 9999:
         years = range(2005, datetime.datetime.now().year + 1)
     elif args.year > 0:
