@@ -5,42 +5,49 @@ HEADERS = {
     "Referer": "https://quote.eastmoney.com/"
 }
 
-# 1. 主营构成候选表名
+# 两个并存的东财数据中心网关
+DOMAINS = [
+    "https://datacenter.eastmoney.com",
+    "https://datacenter-web.eastmoney.com"
+]
+
+# 1. 主营构成候选表名 (重点加入 RPT_LICO_ 空间)
 CANDIDATES_MAINBUS = [
-    "RPT_F10_FN_MAINOPBCOMP",    # 候选 1 (最可能，OPB 代表 Operating Business)
-    "RPT_F10_FN_MAINOPBDETAIL", # 候选 2 (明细表)
-    "RPT_F10_FN_MAINBUSSINESS", # 候选 3
-    "RPT_F10_FN_MAINORBCOMP"    # 候选 4 (之前失败的)
+    "RPT_LICO_FN_MAINOPBCOMP",    # 候选 1 (最符合 LICO 规范: Listed Co Main Operating Business Composition)
+    "RPT_LICO_FN_MAINOPBDETAIL", # 候选 2 (Listed Co Main Operating Business Detail)
+    "RPT_LICO_MAINOPBCOMP",       # 候选 3 (无 FN 缩写)
+    "RPT_LICO_FN_MAINOPB",        # 候选 4
+    "RPT_F10_OPBCOMP",            # 候选 5
+    "RPT_F10_MAINOPBCOMP",        # 候选 6
 ]
 
-# 2. 产业链图谱候选表名
+# 2. 产业链图谱候选表名 (行业图谱、板块地图相关)
 CANDIDATES_CHAIN = [
-    "RPT_MAP_CH_NODE",           # 候选 1 (最可能，图谱链节点)
-    "RPT_MAP_CH_RELATION",       # 候选 2 (图谱链关系)
-    "RPT_INDUSTRY_MAP_NODE",     # 候选 3 (行业图谱节点)
-    "RPT_INDUSTRY_MAP_RELATION", # 候选 4 (行业图谱关系)
-    "RPT_CH_MAP_NODE"            # 候选 5 (之前失败的)
+    "RPT_MAP_CH_NODE",           # 候选 1 (Map Chain Node)
+    "RPT_MAP_CH_RELATION",       # 候选 2 (Map Chain Relation)
+    "RPT_MAP_CH_STOCK",          # 候选 3
+    "RPT_INDUSTRY_CHAIN_NODE",   # 候选 4
+    "RPT_INDUSTRY_CHAIN_MAP",    # 候选 5
+    "RPT_CH_MAP_NODE"            # 候选 6
 ]
 
-def probe_table(report_name, is_stock=True):
-    url = "https://datacenter.eastmoney.com/api/data/v1/get"
+def probe_table(domain, report_name, is_stock=True):
+    url = f"{domain}/api/data/v1/get"
     params = {
-        "pageSize": "3",
+        "pageSize": "2",
         "pageNumber": "1",
         "reportName": report_name,
         "columns": "ALL",
         "client": "WEB"
     }
     if is_stock:
-        # 个股查询需要带上过滤条件防止全表扫描报错
         params["filter"] = '(SECURITY_CODE="300750")'
     else:
-        # 产业链宏观表不需要个股过滤，只需限制数量
-        params["sortColumns"] = "CHAIN_CODE" if "CHAIN" in report_name or "CH" in report_name else "UPDATE_DATE"
-        params["sortTypes"] = "1"
+        params["sortColumns"] = "UPDATE_DATE"
+        params["sortTypes"] = "-1"
 
     try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=8).json()
+        res = requests.get(url, params=params, headers=HEADERS, timeout=5).json()
         if res.get("code") == 0 and res.get("result"):
             return True, None
         return False, res.get("message", "Unknown error")
@@ -48,40 +55,57 @@ def probe_table(report_name, is_stock=True):
         return False, str(e)
 
 def main():
-    print("="*60)
-    print("🔍 启动东财数据网关物理表名深度探测")
-    print("="*60)
+    print("="*75)
+    print("🔍 启动双域名 + LICO 空间深度联合探测")
+    print("="*75)
 
-    # 探测主营构成
-    print("\n[1] 正在探测主营产品构成数据源...")
+    # 1. 探测主营构成
+    print("\n[1] 开始探测主营产品构成数据源...")
     found_mainbus = False
-    for name in CANDIDATES_MAINBUS:
-        success, err = probe_table(name, is_stock=True)
-        if success:
-            print(f"    🎯 【成功探测】主营业务真实表名为: {name}")
-            found_mainbus = True
+    for domain in DOMAINS:
+        domain_name = domain.split("//")[1]
+        for name in CANDIDATES_MAINBUS:
+            success, err = probe_table(domain, name, is_stock=True)
+            if success:
+                print(f"    🎯 【成功】在 [{domain_name}] 下探测到主营业务表: {name}")
+                found_mainbus = True
+                break
+            else:
+                # 仅打印异常原因，忽略配置不存在的常规报错
+                if "配置不存在" not in str(err):
+                    print(f"    ⚠️ [{domain_name}] {name} -> {err}")
+        if found_mainbus:
             break
-        else:
-            print(f"    ❌ {name} -> 失败原因: {err}")
 
-    # 探测产业链
-    print("\n[2] 正在探测宏观产业链中心数据源...")
+    if not found_mainbus:
+        print("    ❌ 未能匹配到主营业务表，我们将继续排查。")
+
+    # 2. 探测产业链
+    print("\n[2] 开始探测宏观产业链中心数据源...")
     found_chain = False
-    for name in CANDIDATES_CHAIN:
-        success, err = probe_table(name, is_stock=False)
-        if success:
-            print(f"    🎯 【成功探测】产业链中心真实表名为: {name}")
-            found_chain = True
+    for domain in DOMAINS:
+        domain_name = domain.split("//")[1]
+        for name in CANDIDATES_CHAIN:
+            success, err = probe_table(domain, name, is_stock=False)
+            if success:
+                print(f"    🎯 【成功】在 [{domain_name}] 下探测到产业链表: {name}")
+                found_chain = True
+                break
+            else:
+                if "配置不存在" not in str(err):
+                    print(f"    ⚠️ [{domain_name}] {name} -> {err}")
+        if found_chain:
             break
-        else:
-            print(f"    ❌ {name} -> 失败原因: {err}")
 
-    print("\n" + "="*60)
-    if found_mainbus and found_chain:
-        print("🎉 【探测圆满成功】所有真实表名均已对齐，可直接进行下一步开发！")
+    if not found_chain:
+        print("    ❌ 未能匹配到产业链地图表，我们将继续排查。")
+
+    print("\n" + "="*75)
+    if found_mainbus or found_chain:
+        print("🎉 【联合探测取得突破】请根据控制台输出的成功表名进行后续对接。")
     else:
-        print("⚠️ 探测部分完成，请查看上述输出日志。")
-    print("="*60 + "\n")
+        print("⚠️ 未能探测到目标表名。")
+    print("="*75 + "\n")
 
 if __name__ == "__main__":
     main()
