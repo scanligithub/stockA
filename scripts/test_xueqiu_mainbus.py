@@ -15,12 +15,12 @@ HEADERS = {
 TEST_STOCKS = [
     {"code": "SH600519", "name": "贵州茅台"}, # 沪市主板
     {"code": "SZ300750", "name": "宁德时代"}, # 创业板核心
-    {"code": "SH688111", "name": "金micro"}, # 科创板
+    {"code": "SH688111", "name": "金半导体"}, # 科创板
     {"code": "BJ835181", "name": "德源药业"}, # 北交所
     {"code": "SZ000002", "name": "万科A"},    # 房地产开发
     {"code": "SZ002460", "name": "赣锋锂业"}, # 锂电池上游
     {"code": "SH600104", "name": "上汽集团"}, # 汽车下游
-    {"code": "SH600036", "name": "招商银行"}, # 金融类（测试主营结构差异）
+    {"code": "SH600036", "name": "招商银行"}, # 金融类
     {"code": "SZ300059", "name": "东方财富"}, # 互联网金融
     {"code": "SZ000100", "name": "TCL科技"}   # 面板半导体
 ]
@@ -34,7 +34,7 @@ def ms_to_date_str(ms):
 
 def main():
     print("="*70)
-    print("📡 Actions 环境雪球 V5 财务数据空间连通性与吞吐量测试")
+    print("📡 Actions 环境雪球 V5 财务数据空间连通性与吞吐量测试 (修正版)")
     print("="*70)
     
     session = requests.Session()
@@ -62,7 +62,8 @@ def main():
         code, name = s["code"], s["name"]
         print(f" 📥 正在请求: {name} ({code}) ... ", end="")
         
-        url = f"https://stock.xueqiu.com/v5/stock/f10/cn/business.json?symbol={code}"
+        # 🛡️ 修正点 1：使用测试成功的 finance 空间路径
+        url = f"https://stock.xueqiu.com/v5/stock/finance/cn/business.json?symbol={code}"
         try:
             res = session.get(url, timeout=10)
             if res.status_code != 200:
@@ -74,7 +75,8 @@ def main():
                 print(f"❌ 失败 (API 错误: {data.get('error_description')})")
                 continue
                 
-            records = data["data"].get("business_anal", [])
+            # 🛡️ 修正点 2：主营构成的历史列表根键为 "list"
+            records = data["data"].get("list", [])
             if not records:
                 print("⚠️ 无数据 (可能为极新上市股票)")
                 continue
@@ -94,6 +96,15 @@ def main():
                         
                     bus_list = clazz.get("business_list", [])
                     for bus in bus_list:
+                        # 转换率字段（如 0.747 转换为 74.7%）
+                        ratio = float(bus.get("income_ratio") or 0.0)
+                        if ratio < 1.0: 
+                            ratio = ratio * 100.0
+                            
+                        margin = float(bus.get("gross_profit_rate") or 0.0)
+                        if margin < 1.0 and margin > 0:
+                            margin = margin * 100.0
+
                         all_rows.append({
                             "code": code,
                             "name": name,
@@ -102,8 +113,8 @@ def main():
                             "item_type": int(class_standard),
                             "item_name": str(bus.get("project_announced_name", "")).strip(),
                             "income": float(bus.get("prime_operating_income") or 0.0),
-                            "income_ratio": float(bus.get("income_ratio") or 0.0) * 100.0,
-                            "gross_margin": float(bus.get("gross_profit_rate") or 0.0) * 100.0
+                            "income_ratio": ratio,
+                            "gross_margin": margin
                         })
             # 略作休眠，模拟温和请求
             time.sleep(0.5)
