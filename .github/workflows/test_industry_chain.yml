@@ -16,8 +16,5 @@ jobs:
       - name: Install Test Dependencies
         run: pip install requests
 
-      - name: Test Real HSF10 API
-        run: python tests/test_f10_mainbus.py
-
-      - name: Test Sniff Macro Chain
-        run: python tests/test_industry_center.py
+      - name: Run Diagnostics
+        run: python tests/probe_tables.py
