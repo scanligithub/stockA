@@ -1,62 +1,53 @@
 import requests
-import json
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://quote.eastmoney.com/"
+    "Referer": "https://emweb.securities.eastmoney.com/"
 }
 
 TEST_STOCKS = [
-    {"code": "300750", "name": "宁德时代"},
-    {"code": "002594", "name": "比亚迪"},
-    {"code": "600519", "name": "贵州茅台"}
+    {"code": "SZ300750", "name": "宁德时代"},
+    {"code": "SZ002594", "name": "比亚迪"},
+    {"code": "SH600519", "name": "贵州茅台"}
 ]
 
-def test_single_stock(pure_code, name):
-    print(f"📡 正在测试直连拉取: {name} ({pure_code}) 主营构成...")
-    url = "https://datacenter.eastmoney.com/api/data/v1/get"
-    
-    # 构建针对 RPT_F10_FN_MAINORBCOMP 的过滤条件
-    params = {
-        "sortColumns": "REPORT_DATE,ITEM_TYPE",
-        "sortTypes": "-1,1",
-        "pageSize": "30",  # 测试拉取最近的 30 条明细
-        "pageNumber": "1",
-        "reportName": "RPT_F10_FN_MAINORBCOMP",
-        "columns": "SECURITY_CODE,REPORT_DATE,NOTICE_DATE,ITEM_NAME,ITEM_TYPE,MBI_RATIO,GROSS_RPOFIT_RATIO",
-        "filter": f'(SECURITY_CODE="{pure_code}")',
-        "client": "WEB"
-    }
+def test_real_f10(secucode, name):
+    print(f"📡 正在请求 PC_HSF10 专用主营分析接口: {name} ({secucode})...")
+    url = f"https://emweb.securities.eastmoney.com/PC_HSF10/OperationsAnalysis/OperationsAnalysisAjax?code={secucode}"
     
     try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=10)
+        res = requests.get(url, headers=HEADERS, timeout=8)
         if res.status_code != 200:
-            print(f"❌ 请求失败，状态码: {res.status_code}")
+            print(f"   ❌ 状态码异常: {res.status_code}")
             return False
             
         data = res.json()
-        if data.get("code") == 0 and data.get("result"):
-            records = data["result"]["data"]
-            print(f"✅ 成功捕获 {len(records)} 条产品明细。样例前 3 条:")
+        
+        # 该专用接口返回三大主营口径：zygc (主营构成), zydq (主营地区), zycp (主营产品)
+        zycp_list = data.get("zycp", [])
+        if zycp_list:
+            # 拿到最近一个报告期的主营产品明细
+            latest_date = zycp_list[0].get("REPORT_DATE", "")
+            records = [x for x in zycp_list if x.get("REPORT_DATE") == latest_date]
+            
+            print(f"   ✅ 成功！报告期: {latest_date[:10]} | 捕获产品明细 {len(records)} 条:")
             for item in records[:3]:
-                print(f"   - 报告期: {item.get('REPORT_DATE')[:10]} | 公告日: {item.get('NOTICE_DATE')[:10]} | 产品: {item.get('ITEM_NAME')} | 占比: {item.get('MBI_RATIO')}% | 毛利率: {item.get('GROSS_RPOFIT_RATIO')}%")
+                print(f"      - 产品: {item.get('MAINOP_BUSINESS_ITEM')} | 营收: {float(item.get('MAIN_BUSINESS_INCOME', 0))/1e8:.2f}亿 | 占比: {item.get('MBI_RATIO')}%")
             return True
         else:
-            print(f"❌ 接口返回异常: {data.get('message', '无返回消息')}")
+            print("   ❌ 未能在返回的 JSON 中找到 'zycp' 节点")
             return False
     except Exception as e:
-        print(f"❌ 请求异常: {str(e)}")
+        print(f"   ❌ 请求异常: {str(e)}")
         return False
 
 def main():
-    print("="*60)
-    print("🔬 开始测试: F10 个股主营构成 (微观)")
-    print("="*60)
-    success = 0
-    for stock in TEST_STOCKS:
-        if test_single_stock(stock["code"], stock["name"]):
-            success += 1
-    print(f"\n📊 测试完成: 成功 {success}/{len(TEST_STOCKS)}\n")
+    print("="*70)
+    print("🔬 验证真实 HSF10 经营分析接口")
+    print("="*70)
+    for s in TEST_STOCKS:
+        test_real_f10(s["code"], s["name"])
+    print("="*70 + "\n")
 
 if __name__ == "__main__":
     main()
