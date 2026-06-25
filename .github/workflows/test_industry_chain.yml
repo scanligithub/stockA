@@ -17,7 +17,7 @@ jobs:
       - name: Install Quant Dependencies
         run: |
           pip install --upgrade pip
-          pip install pandas pyarrow lxml html5lib
+          pip install requests pandas pyarrow lxml html5lib
 
       - name: Test Sina HTML Parser
         run: python tests/test_sina_mainbus.py
