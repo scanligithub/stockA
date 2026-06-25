@@ -138,7 +138,6 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      # 🎯 核心修正：全历史构建时，运行不带限制参数的 fetch_index.py，完整拉取 20+ 年指数历史 K 线
       - name: 📈 Fetch Full Historical Index Data
         run: python scripts/fetch_index.py
 
@@ -177,6 +176,13 @@ jobs:
           pip install polars
           python scripts/fetch_f10_all.py
           ls -lh output/all_stocks_f10_raw.parquet
+
+      - name: ❄️ Fetch All Stocks Full Historical Main Operating Business Detail
+        env:
+          XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }}
+        run: |
+          python scripts/fetch_f10_mainbus.py
+          ls -lh output/all_stocks_mainbus_raw.parquet
 
       - name: Merge & Split by Year
         run: |
