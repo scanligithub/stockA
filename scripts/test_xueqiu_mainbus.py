@@ -35,49 +35,33 @@ def ms_to_date_str(ms):
 
 def main():
     print("="*70)
-    print("📡 Actions 环境雪球 V5 财务数据空间连通性测试 (Secrets 安全注入版)")
+    print("📡 Actions 环境雪球 V5 财务数据空间 - 全历史深度抓取测试")
     print("="*70)
     
     session = requests.Session()
     session.headers.update(HEADERS)
     
-    # 🛡️ 核心改变：优先从 GitHub Repository Secrets 读取注入安全 Token
     xq_token = os.getenv("XQ_A_TOKEN", "").strip()
     
     if xq_token:
-        print("🔑 检测到 GitHub Repository Secrets 中的 XQ_A_TOKEN，正在执行安全注入...")
-        # 强制将 Token 绑定到 .xueqiu.com 根域名作用域下
+        print("🔑 检测到 XQ_A_TOKEN，正在执行安全注入...")
         session.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
         print("✅ 安全 Token 注入完成。")
     else:
-        print("⚠️ 未检测到环境变量中的 XQ_A_TOKEN，将使用退化的【访客模式】握手...")
-        try:
-            session.get("https://xueqiu.com/", timeout=8)
-            session.get("https://xueqiu.com/S/SZ300750", timeout=8)
-        except Exception as e:
-            print(f"⚠️ 访客握手发生异常: {e}")
-
-    # 打印最终 Cookie 诊断信息（安全性考量：对 Token 执行部分脱敏）
-    cookies_dict = session.cookies.get_dict()
-    safe_cookies = cookies_dict.copy()
-    if "xq_a_token" in safe_cookies:
-        raw_t = safe_cookies["xq_a_token"]
-        safe_cookies["xq_a_token"] = f"{raw_t[:6]}...{raw_t[-6:]}" if len(raw_t) > 12 else "MASKED"
-        
-    print("\n" + "-"*50)
-    print(f"📡 诊断信息：当前发送请求的 Cookie 状态: \n{json.dumps(safe_cookies, indent=4)}")
-    print("-"*50 + "\n")
+        print("❌ 警告: 未检测到环境变量中的 XQ_A_TOKEN，抓取可能会因 WAF 400 阻断。")
+        return
 
     all_rows = []
     success_count = 0
     
-    # 4. 遍历拉取测试股全部历史
-    print(f"[*] 开始拉取 {len(TEST_STOCKS)} 只代表性个股的全部历史主营业务构成...")
+    # 遍历拉取测试股全量历史
+    print(f"\n[*] 开始拉取 {len(TEST_STOCKS)} 只代表性个股的 [全部历史报告期] 主营业务构成...")
     for s in TEST_STOCKS:
         code, name = s["code"], s["name"]
         print(f" 📥 正在请求: {name} ({code}) ... ", end="")
         
-        url = f"https://stock.xueqiu.com/v5/stock/finance/cn/business.json?symbol={code}"
+        # 🚀 核心改变：追加 &count=100 参数，强行拉回单股多达 25 年的全历史报告期
+        url = f"https://stock.xueqiu.com/v5/stock/finance/cn/business.json?symbol={code}&count=100"
         try:
             res = session.get(url, timeout=10)
             if res.status_code != 200:
@@ -94,6 +78,7 @@ def main():
                 print("⚠️ 无数据")
                 continue
                 
+            # 打印实际拉取到的期数
             print(f"✅ 成功，捕获到 {len(records)} 个历史财务报告期。")
             success_count += 1
             
@@ -150,7 +135,7 @@ def main():
         os.makedirs("output_test", exist_ok=True)
         out_path = "output_test/xueqiu_mainbus_test_sample.parquet"
         df.write_parquet(out_path, compression="zstd")
-        print(f"💾 测试 Parquet 文件已输出至: {out_path} ({os.path.getsize(out_path)/(1024):.2f} KB)")
+        print(f"💾 深度测试 Parquet 文件已输出至: {out_path} ({os.path.getsize(out_path)/(1024):.2f} KB)")
     else:
         print("❌ 未捕获到任何有效数据，测试未通过。")
         exit(1)
