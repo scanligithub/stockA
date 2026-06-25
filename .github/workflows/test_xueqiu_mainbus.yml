@@ -1,7 +1,7 @@
 name: Test Xueqiu F10 Connection
 
 on:
-  workflow_dispatch: # 仅支持在 GitHub Action 页面手动点击运行，不污染日常自动化流
+  workflow_dispatch:
 
 jobs:
   run-test:
@@ -17,9 +17,10 @@ jobs:
         run: pip install polars requests pyarrow
 
       - name: Run Xueqiu F10 Space Test
+        env:
+          XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }} # 🛡️ 安全注入秘钥
         run: python scripts/test_xueqiu_mainbus.py
 
-      # 运行完毕后，将测试 Parquet 压缩并挂载在 Actions 页面供您下载质检
       - name: Upload Test Output to Artifact
         uses: actions/upload-artifact@v4
         with:
