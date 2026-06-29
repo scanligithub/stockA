@@ -23,8 +23,11 @@ It is automatically synchronized from GitHub Releases and updated daily.
 
 ## 产业链（Industry Chain）
 在action中，点击Extract Top 500 Main Products (产业链提纯)
+
 生成top500-products-dictionary
+
 将top500-products-dictionary中的llm_prompt_ready.txt拷贝给大模型
+
 大模型输出的这份两级嵌套 JSON 字典，**其结构完整、清洗彻底，已经完全具备了在 `stockA` 工程中落地并对接 Qlib 的条件**。
 
 有了这份字典，Qlib 就可以通过以下两种方式将其转化为强大的量化交易信号：
