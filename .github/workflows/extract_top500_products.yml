@@ -2,7 +2,7 @@
 name: Extract Top 500 Main Products (产业链提纯)
 
 on:
-  workflow_dispatch: # 支持在 GitHub Actions 页面手动点击触发
+  workflow_dispatch: 
 
 permissions:
   contents: read
@@ -36,7 +36,6 @@ jobs:
         run: |
           go build -o tdx_fetcher scripts/tdx_fetcher.go
           ./tdx_fetcher -mode=list
-          ls -lh stock_list_master.json
           
       - name: ❄️ Fetch Xueqiu Main Business Data
         env:
@@ -44,13 +43,16 @@ jobs:
         run: |
           python scripts/fetch_f10_mainbus.py
           
-      - name: 🧮 Extract Top 500 Products to CSV
+      - name: 🧮 Extract Top 500 Products to CSV & TXT
         run: |
           python scripts/extract_top500_products.py
           
-      - name: 📤 Upload Top 500 CSV Artifact
+      # 👇 这里是关键：将 output 目录下生成的所有文件（CSV 和 TXT）都上传供您下载
+      - name: 📤 Upload Output Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: top500-products-dictionary
-          path: output/top500_main_products.csv
+          path: |
+            output/top500_main_products.csv
+            output/llm_prompt_ready.txt
           retention-days: 7
