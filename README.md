@@ -21,13 +21,12 @@ It is automatically synchronized from GitHub Releases and updated daily.
 - **Zero-History Sync**: The dataset is updated using `git push --force` to keep only the latest version.
 - **Dataset Viewer**: Disabled to prevent duplicate Parquet storage in hidden branches.
 
-
+## 产业链（Industry Chain）
 这确实迈出了最关键的一步！大模型输出的这份两级嵌套 JSON 字典，**其结构完整、清洗彻底，已经完全具备了在 `stockA` 工程中落地并对接 Qlib 的条件**。
 
 有了这份字典，Qlib 就可以通过以下两种方式将其转化为强大的量化交易信号：
 
 ---
-
 ### 第一种方式：直接作为特征输入（Qlib 经典多因子模型）
 
 这是最快见效、也最容易实现的方式。Qlib 的模型（如 LightGBM、ALSTM）可以直接利用数值型的“产业链纯度敞口”进行截面训练。
