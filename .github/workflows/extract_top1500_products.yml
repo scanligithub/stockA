@@ -1,0 +1,59 @@
+# FILE: .github/workflows/extract_top1500_products.yml
+name: Extract Top 1500 Main Products (产业链提纯)
+
+on:
+  workflow_dispatch: 
+
+permissions:
+  contents: read
+
+jobs:
+  extract-products:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: ⚙️ Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          
+      - name: 🐍 Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+
+      - name: 📦 Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          
+      - name: 📡 Build Go Engine & Fetch Master List
+        run: |
+          go build -o tdx_fetcher scripts/tdx_fetcher.go
+          ./tdx_fetcher -mode=list
+          
+      - name: ❄️ Fetch Xueqiu Main Business Data
+        env:
+          XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }}
+        run: |
+          python scripts/fetch_f10_mainbus.py
+          
+      # 🎯 调用更新后的 1500 脚本
+      - name: 🧮 Extract Top 1500 Products to CSV & TXT
+        run: |
+          python scripts/extract_top1500_products.py
+          
+      # 🎯 导出包名变更为 top1500
+      - name: 📤 Upload Output Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: top1500-products-dictionary
+          path: |
+            output/top1500_main_products.csv
+            output/llm_prompt_ready.txt
+          retention-days: 7
