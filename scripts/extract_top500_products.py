@@ -10,17 +10,12 @@ def main():
     input_path = "output/all_stocks_mainbus_raw.parquet"
     if not os.path.exists(input_path):
         print(f"❌ 严重错误: 找不到底层数据文件 {input_path}")
-        print("请确保已先运行 fetch_f10_mainbus.py。")
         return
 
     print(f"📂 正在加载全市场历史主营数据集: {input_path}...")
     df = pl.read_parquet(input_path)
 
     print("🧮 正在清洗并统计全局最高频的 500 个核心产品...")
-    # 核心降维逻辑：
-    # 1. 过滤出纯正的“产品级”分类 (item_type == 2)
-    # 2. 剔除空字符串或无效名称
-    # 3. 按产品名聚合计数，降序排列，取前 500
     top500 = (
         df.filter((pl.col("item_type") == 2) & (pl.col("item_name").str.len_chars() > 0))
         .group_by("item_name")
@@ -31,17 +26,39 @@ def main():
 
     out_dir = "output"
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "top500_main_products.csv")
     
-    top500.write_csv(out_path)
+    # 1. 导出标准 CSV 供本地数据分析和存档
+    csv_path = os.path.join(out_dir, "top500_main_products.csv")
+    top500.write_csv(csv_path)
     
+    # 2. 🤖 为大模型专门生成无缝复制的 Prompt 文本
+    # 提取纯产品名称，用顿号拼接，极度节省 Token
+    product_list = top500["item_name"].to_list()
+    compact_text = "、".join(product_list)
+    
+    llm_prompt = f"""请你作为 A 股量化基本面专家，帮我完成产业链映射字典的构建。
+以下是 A 股出现频次最高的 500 个主营产品名称。请将它们归类到 10 个最核心的宏观产业链中（如：新能源、半导体、消费电子、医药生物、人工智能/算力等）。
+如果某些产品属于非核心的杂项（如“其他”、“加工费”、“贸易”），请将其丢弃，不要纳入字典。
+
+请必须严格以 JSON 格式输出，不要输出任何 Markdown 标记或多余的解释文字，格式范例如下：
+{{
+  "新能源链": ["动力电池系统", "碳酸锂", "太阳能组件"],
+  "半导体链": ["集成电路", "晶圆制造"]
+}}
+
+以下是待分类的 500 个产品名单：
+{compact_text}
+"""
+    
+    txt_path = os.path.join(out_dir, "llm_prompt_ready.txt")
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(llm_prompt)
+
     print("\n✅ 提取成功！")
-    print(f"💾 文件已导出至: {out_path}")
-    print("\n📊 预览 Top 10 核心产品节点:")
-    print(top500.head(10))
-    print("\n💡 下一步行动指南:")
-    print("请下载生成的 top500_main_products.csv，发给 DeepSeek/ChatGPT 并附带以下 Prompt：")
-    print("『这是一份A股最高频的500个主营产品名单，请作为行业基本面专家，将它们归类到 10 个最核心的宏观产业链中（如：新能源、半导体、医药等），输出 JSON 格式。』")
+    print(f"💾 原始数据已导出: {csv_path}")
+    print(f"🤖 大模型专用 Prompt 已生成: {txt_path}")
+    print("\n💡 操作指南:")
+    print("下载 llm_prompt_ready.txt，全选里面的文字，直接粘贴给 DeepSeek 或 ChatGPT 即可！")
 
 if __name__ == "__main__":
     main()
