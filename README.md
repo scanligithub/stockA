@@ -22,11 +22,11 @@ It is automatically synchronized from GitHub Releases and updated daily.
 - **Dataset Viewer**: Disabled to prevent duplicate Parquet storage in hidden branches.
 
 ## 产业链（Industry Chain）
-1. 在action中，点击Extract Top 500 Main Products (产业链提纯)
+1. 在action中，点击Extract Top 1500 Main Products (产业链提纯)
 
-2. 生成top500-products-dictionary
+2. 生成top1500-products-dictionary
 
-3. 将top500-products-dictionary中的llm_prompt_ready.txt拷贝给大模型
+3. 将top1500-products-dictionary中的llm_prompt_ready.txt拷贝给大模型
 
 4. 大模型输出的这份两级嵌套 JSON 字典，**其结构完整、清洗彻底，已经完全具备了在 `stockA` 工程中落地并对接 Qlib 的条件**。
 
