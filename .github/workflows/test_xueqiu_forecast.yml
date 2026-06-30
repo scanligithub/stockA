@@ -22,7 +22,7 @@ jobs:
 
       - name: 📦 Install Testing Dependencies
         run: |
-          pip install requests polars
+          pip install baostock pandas polars
           pip install pandas lxml html5lib bs4
           
       - name: 🧪 Run Xueqiu Forecast Test Script
@@ -30,7 +30,7 @@ jobs:
           # 必须确保仓库 Secrets 中已配置 XQ_A_TOKEN
           XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }}
         run: |
-          python scripts/test_sina_forecast.py
+          python scripts/test_baostock_forecast.pyy
           
       - name: 📤 Upload Test Artifacts
         if: always()
