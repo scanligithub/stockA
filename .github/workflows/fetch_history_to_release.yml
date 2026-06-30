@@ -156,8 +156,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      - run: pip install -r requirements.txt
       
+      - name: Install Finalize Dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install polars baostock
+
       - name: Download Master List (For DuckDB Metadata)
         uses: actions/download-artifact@v4
         with:
@@ -173,7 +177,6 @@ jobs:
           
       - name: 🌐 Download All Stocks 37-Column F10 Financial Data
         run: |
-          pip install polars
           python scripts/fetch_f10_all.py
           ls -lh output/all_stocks_f10_raw.parquet
 
@@ -183,6 +186,12 @@ jobs:
         run: |
           python scripts/fetch_f10_mainbus.py
           ls -lh output/all_stocks_mainbus_raw.parquet
+
+      # 📢 新增：在历史合并发布阶段同步业绩预告事件库
+      - name: 📢 Fetch All Stocks Full Historical Earnings Forecast Events
+        run: |
+          python scripts/fetch_events_forecast.py
+          ls -lh output/event_earnings_forecast.parquet
 
       - name: Merge & Split by Year
         run: |
@@ -195,8 +204,6 @@ jobs:
           gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" --clobber || true
           gh release upload archive output/*.parquet --clobber
           
-# 在 daily_update_to_hf.yml 文件的 finalize 阶段
-
       - name: Publish Consolidated Summaries to Workflow Page
         if: always()
         run: |
@@ -204,7 +211,6 @@ jobs:
             echo "---" >> $GITHUB_STEP_SUMMARY
             cat output/f10_audit_summary.md >> $GITHUB_STEP_SUMMARY
           fi
-          # 🎯 生产对齐：发布雪球主营产业链数据深度审计报告
           if [ -f output/mainbus_audit_summary.md ]; then
             echo "---" >> $GITHUB_STEP_SUMMARY
             cat output/mainbus_audit_summary.md >> $GITHUB_STEP_SUMMARY
@@ -223,5 +229,6 @@ jobs:
             output/qc_report.json
             output/qc_summary.md
             output/f10_audit_summary.md
-            output/mainbus_audit_summary.md  # 🎯 生产对齐：归档主营深度审计报告
+            output/mainbus_audit_summary.md
+            output/event_earnings_forecast.parquet  # 📢 历史归档上传
           retention-days: 7
