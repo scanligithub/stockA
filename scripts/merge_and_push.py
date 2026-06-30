@@ -131,10 +131,14 @@ def main():
     mainbus_raw_path = "output/all_stocks_mainbus_raw.parquet"
     has_mainbus = os.path.exists(mainbus_raw_path)
     
+    # 3. 📢 载入最新的高纯度业绩预告事件数据
+    event_raw_path = "output/event_earnings_forecast.parquet"
+    has_event = os.path.exists(event_raw_path)
+    
     if not f10_ttm_df.empty:
         con.execute("CREATE OR REPLACE VIEW v_f10 AS SELECT * FROM read_parquet('temp_parts/f10_ttm_clean.parquet')")
         
-        # 🛡️ 利用东财 notice_date 给雪球主营业务打上物理公告披露时间戳，去未来化
+        # 利用东财 notice_date 给雪球主营业务打上物理公告披露时间戳，去未来化
         if has_mainbus:
             print("🧱 Building Look-ahead-bias-free Product Mapping View...")
             con.execute(f"CREATE OR REPLACE VIEW v_mainbus_raw AS SELECT * FROM read_parquet('{mainbus_raw_path}')")
@@ -161,10 +165,15 @@ def main():
                 WHERE m.item_type = 2  -- 2 代表产品级明细
                 GROUP BY m.code, map.notice_date;
             """)
+            
+        # 📢 创建事件库 DuckDB 视图
+        if has_event:
+            print("📢 Mounting Performance Forecast Event View...")
+            con.execute(f"CREATE OR REPLACE VIEW v_event_forecast AS SELECT * FROM read_parquet('{event_raw_path}')")
         
         print("⚡ Performing Look-ahead-bias-free ASOF JOIN via DuckDB...")
         
-        # 组装最终带产业链产品暴露因子的 K 线联表
+        # 组装最终带产业链产品暴露因子、业绩公告因子的最终 K 线联表
         join_sql = """
             CREATE OR REPLACE VIEW v_kline AS
             SELECT 
@@ -200,6 +209,15 @@ def main():
         if has_mainbus:
             join_sql += ", COALESCE(mb.product_ratios, '') as product_ratios "
             
+        # 📢 动态向每一年的 K 线中注入业绩预告事件特征列 (One-hot + 数值中枢)
+        if has_event:
+            join_sql += """, 
+                COALESCE(evt.forecast_type, '无') as forecast_type,
+                COALESCE(evt.forecast_yoy_mid, 0.0) as forecast_yoy,
+                CASE WHEN evt.forecast_type IN ('预增', '略增', '扭亏') THEN 1 ELSE 0 END as is_forecast_good,
+                CASE WHEN evt.forecast_type IN ('预减', '略减', '首亏', '增亏') THEN 1 ELSE 0 END as is_forecast_bad
+            """
+            
         join_sql += """
             FROM v_kline_raw k
             ASOF LEFT JOIN v_f10 f
@@ -212,6 +230,14 @@ def main():
             ASOF LEFT JOIN v_mainbus_flat mb
                 ON SUBSTR(k.code, 4) = mb.code
                AND k.date >= mb.notice_date
+            """
+            
+        # 📢 利用 ASOF 将离散业绩公告对齐到交易日历上 (无未来函数)
+        if has_event:
+            join_sql += """
+            ASOF LEFT JOIN v_event_forecast evt
+                ON SUBSTR(k.code, 4) = evt.code
+               AND k.date >= evt.notice_date
             """
             
         con.execute(join_sql)
@@ -229,7 +255,6 @@ def main():
         targets[p] = "stock_list.parquet"
         qc.check_dataframe(df_stocks, "stock_list.parquet", ["code_name"], file_path=p)
 
-# 🎯 调整后：仅校验代码和报告期（结构性主键），避免历史合法财务指标空值触发假阳性报警
     raw_f10_p = "output/all_stocks_f10_raw.parquet"
     if os.path.exists(raw_f10_p):
         targets[raw_f10_p] = "all_stocks_f10_raw.parquet"
@@ -238,13 +263,12 @@ def main():
             qc.check_dataframe(
                 df_f10_raw, 
                 "all_stocks_f10_raw.parquet", 
-                ["code", "report_date"],  # ⚡ 仅做结构主键校验，彻底封杀 13071 个假警报
+                ["code", "report_date"], 
                 file_path=raw_f10_p
             )
         except Exception as e:
             print(f"⚠️ QC check failed for f10 raw: {e}")
         
-    # 🎯 强制注册并执行 QC 校验，使原始主营明细表在“数据产物概览”中显式体现
     raw_mainbus_p = "output/all_stocks_mainbus_raw.parquet"
     if os.path.exists(raw_mainbus_p):
         targets[raw_mainbus_p] = "all_stocks_mainbus_raw.parquet"
@@ -259,13 +283,26 @@ def main():
         except Exception as e:
             print(f"⚠️ QC check failed for mainbus raw: {e}")
 
+    # 📢 注册业绩预告事件库到 QC 和 HF 归档列表中
+    if has_event:
+        targets[event_raw_path] = "event_earnings_forecast.parquet"
+        try:
+            df_evt = pd.read_parquet(event_raw_path)
+            qc.check_dataframe(
+                df_evt,
+                "event_earnings_forecast.parquet",
+                ["code", "notice_date", "forecast_yoy_mid"],
+                file_path=event_raw_path
+            )
+        except Exception as e:
+            print(f"⚠️ QC check failed for event forecast: {e}")
+
     if sec_k_files:
         p = 'output/sector_list.parquet'
         con.execute(f"COPY (SELECT DISTINCT code, name, type FROM v_sec_k ORDER BY type, code) TO '{p}' (FORMAT 'PARQUET')")
         targets[p] = "sector_list.parquet"
         qc.check_dataframe(pd.read_parquet(p), "sector_list.parquet", ["name"], file_path=p)
 
-    # 🎯 严格对齐 fetch_index.py，导出 37 只高冗余稳健核心指数名称元数据表 index_list.parquet
     index_meta = [
         {"code": "sh.000001", "name": "上证指数"}, {"code": "sz.399001", "name": "深证成指"},
         {"code": "sz.399006", "name": "创业板指"}, {"code": "sh.000688", "name": "科创50"},
@@ -304,10 +341,12 @@ def main():
         print(f"🔪 Merging & Splitting Data for Year {y}...")
         start_date, end_date = f"{y}-01-01", f"{y}-12-31"
         
-        # 增加 product_ratios 质量校验列
+        # 📢 动态升级 K 线质检列，增加业绩预告事件因子的完整性检验
         kline_qc_cols = ["close", "volume", "peTTM", "pbMRQ", "total_mv", "turn"]
         if has_mainbus:
             kline_qc_cols.append("product_ratios")
+        if has_event:
+            kline_qc_cols.extend(["forecast_yoy", "is_forecast_good", "is_forecast_bad"])
             
         tasks = [
             ("v_kline", f"stock_kline_{y}.parquet", kline_qc_cols),
