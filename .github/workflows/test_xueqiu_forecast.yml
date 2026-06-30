@@ -23,6 +23,7 @@ jobs:
       - name: 📦 Install Testing Dependencies
         run: |
           pip install requests polars
+          pip install pandas lxml html5lib bs4
           
       - name: 🧪 Run Xueqiu Forecast Test Script
         env:
