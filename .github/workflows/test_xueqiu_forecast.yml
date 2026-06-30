@@ -1,0 +1,40 @@
+# FILE: .github/workflows/test_xueqiu_forecast.yml
+name: Test Xueqiu Forecast Event API
+
+on:
+  workflow_dispatch: # 仅允许手动触发，不干扰主流程
+
+permissions:
+  contents: read
+
+jobs:
+  test-xueqiu-forecast:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+        
+      - name: 🐍 Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+
+      - name: 📦 Install Testing Dependencies
+        run: |
+          pip install requests polars
+          
+      - name: 🧪 Run Xueqiu Forecast Test Script
+        env:
+          # 必须确保仓库 Secrets 中已配置 XQ_A_TOKEN
+          XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }}
+        run: |
+          python scripts/test_xueqiu_forecast.py
+          
+      - name: 📤 Upload Test Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xueqiu-forecast-test-data
+          path: output_test/*.parquet
+          retention-days: 3
