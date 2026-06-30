@@ -7,10 +7,12 @@ import polars as pl
 import io
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from bs4 import BeautifulSoup
 
-# 极简头部，无需任何 Token
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9"
 }
 
 TEST_STOCKS = [
@@ -20,88 +22,82 @@ TEST_STOCKS = [
 ]
 
 def extract_yoy_from_summary(summary):
-    """🧠 智能正则引擎：从新浪长文本摘要中提取同比增速中枢"""
     if not isinstance(summary, str): return 0.0
-    
-    # 提取所有百分比数字，例如 "增长 50%~100%" -> [50.0, 100.0]
     nums = re.findall(r'(-?\d+(?:\.\d+)?)%', summary)
     if not nums: return 0.0
-    
     nums = [float(n) for n in nums]
-    
-    # 根据语境判断正负
     if any(keyword in summary for keyword in ["下降", "亏损", "减少", "降幅"]):
         nums = [-abs(n) for n in nums]
-        
-    # 返回区间的中枢值
     return sum(nums) / len(nums)
 
 def fetch_sina_forecast(raw_code):
-    """直连新浪财经远古 PHP 页面，解析 HTML 表格"""
     pure_code = raw_code[2:]
-    # 新浪业绩预告专属远古路由
-    url = f"https://vip.stock.finance.sina.com.cn/corp/go.php/vCB_Bulletin/wx/PerformanceForecast/displaytype/4/stockid/{pure_code}.phtml"
+    # 💥 核心修改：降级为 http 协议，避免新浪垃圾 CDN 的 HTTPS 重定向
+    url = f"http://vip.stock.finance.sina.com.cn/corp/go.php/vCB_Bulletin/wx/PerformanceForecast/displaytype/4/stockid/{pure_code}.phtml"
     
-    for attempt in range(3):
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=10)
-            res.encoding = 'gbk' # 💥 核心：新浪页面采用 GBK 编码
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        res.encoding = 'gbk' 
+        
+        if res.status_code != 200:
+            return pure_code, [], f"HTTP Status: {res.status_code}"
             
-            if res.status_code != 200:
-                time.sleep(1)
-                continue
-                
-            # 检查页面中是否包含有效表格
-            if "业绩预告类型" not in res.text:
-                return pure_code, [], None # 该股历史上从未发过业绩预告
-                
-            # 利用 pandas 强大的 read_html 瞬间将 HTML 转换为 DataFrame
-            dfs = pd.read_html(io.StringIO(res.text), match="业绩预告类型", header=0)
+        html_text = res.text
+        
+        # 🕵️ X光透视：用 BeautifulSoup 提取网页标题，看看到底是个啥页面
+        soup = BeautifulSoup(html_text, 'lxml')
+        title = soup.title.string.strip() if soup.title else "无标题"
+        
+        # 宽泛匹配：只要表头里有“公告日期”，我们就抓出来
+        if "公告日期" not in html_text:
+            return pure_code, [], f"页面正常，但未找到'公告日期'表格。页面标题: [{title}]"
+            
+        try:
+            dfs = pd.read_html(io.StringIO(html_text), match="公告日期", header=0)
             if not dfs:
-                return pure_code, [], None
+                return pure_code, [], "找到了关键字，但 pandas 解析表格失败"
                 
             df = dfs[0]
             records = []
             
             for _, row in df.iterrows():
-                notice_date = str(row.get('公告日期', '')).strip()
+                # 兼容新浪可能存在的换行符和脏数据
+                row_dict = {str(k).strip(): str(v).strip() for k, v in row.items()}
+                
+                notice_date = row_dict.get('公告日期', '')
                 if not notice_date or notice_date == 'nan': continue
                 
-                f_type = str(row.get('业绩预告类型', '')).strip()
-                summary = str(row.get('业绩预告摘要', '')).strip()
+                f_type = row_dict.get('业绩预告类型', '')
+                summary = row_dict.get('业绩预告摘要', '')
                 
-                # 调用正则提取增速中枢
                 yoy_mid = extract_yoy_from_summary(summary)
                 
                 records.append({
                     "code": pure_code,
-                    "notice_date": notice_date,
+                    "notice_date": notice_date[:10], # 取前10位防脏数据
                     "forecast_type": f_type,
                     "forecast_yoy_mid": yoy_mid,
-                    "summary": summary
+                    "summary": summary[:200]
                 })
             return pure_code, records, None
             
-        except ValueError:
-            # 页面存在但 pd 无法找到匹配表格，静默跳过
-            return pure_code, [], None
-        except Exception as e:
-            print(f"[Debug] {pure_code} HTML Parse Error: {e}")
-            time.sleep(1)
+        except ValueError as ve:
+            return pure_code, [], f"Pandas 解析异常: {ve}"
             
-    return pure_code, [], "Max retries exceeded"
+    except Exception as e:
+        return pure_code, [], f"网络异常: {e}"
 
 def main():
     print("\n" + "="*70)
-    print("🧪 新浪财经 [业绩预告事件] 直连解析测试 (零风控版) | 启动")
+    print("🧪 新浪财经 [业绩预告] X光透视 Debug 版 | 启动")
     print("="*70)
     
     all_events = []
     success_count = 0
     
-    print(f"\n🚀 开始并发拉取 {len(TEST_STOCKS)} 只样本股票的业绩预告...")
+    print(f"\n🚀 开始拉取 {len(TEST_STOCKS)} 只股票...\n")
     
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {executor.submit(fetch_sina_forecast, s): s for s in TEST_STOCKS}
         for future in as_completed(futures):
             pure_code, records, err = future.result()
@@ -109,12 +105,13 @@ def main():
             if records:
                 success_count += 1
                 all_events.extend(records)
+                print(f"✅ {pure_code}: 成功抓取 {len(records)} 条预告")
             elif err:
-                print(f"⚠️ 股票 {pure_code} 抓取失败: {err}")
+                print(f"⚠️ {pure_code} 失败 -> {err}")
 
     print("\n" + "="*70)
-    print(f"✅ 测试完成！成功获取 {success_count}/{len(TEST_STOCKS)} 只股票的数据。")
-    print(f"📊 累计捕获历史业绩预告事件: {len(all_events)} 条")
+    print(f"✅ 测试结束！成功 {success_count}/{len(TEST_STOCKS)}。")
+    print(f"📊 累计捕获预告: {len(all_events)} 条")
     print("="*70 + "\n")
 
     if all_events:
@@ -123,14 +120,9 @@ def main():
             "forecast_type": pl.Utf8, "forecast_yoy_mid": pl.Float64, "summary": pl.Utf8
         }
         df = pl.DataFrame(all_events, schema=schema).sort(["code", "notice_date"])
-        
-        print("👀 数据抽样预览 (截取最后 5 条):")
         print(df.tail(5))
-        
         os.makedirs("output_test", exist_ok=True)
-        out_path = "output_test/sina_forecast_test_sample.parquet"
-        df.write_parquet(out_path, compression="zstd")
-        print(f"\n💾 物理落盘测试成功: {out_path}")
+        df.write_parquet("output_test/sina_forecast_test_sample.parquet", compression="zstd")
 
 if __name__ == "__main__":
     main()
