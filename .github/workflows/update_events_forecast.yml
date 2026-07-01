@@ -1,4 +1,3 @@
-# FILE: .github/workflows/update_events_forecast.yml
 name: Distributed Event Fetcher
 
 on:
@@ -31,14 +30,24 @@ jobs:
           go build -o tdx_fetcher scripts/tdx_fetcher.go
           ./tdx_fetcher -mode=list
           
-          # 利用 Python 将全市场 A 股极速切分为 20 个负载均衡的物理矩阵并写入 GITHUB_OUTPUT
+          # 利用 Python 强制替换点号对齐索引，动态切割为 20 个负载均衡的物理矩阵
           python -c "
           import json, math
           master = json.load(open('stock_list_master.json'))
-          valid = [s['code'] for s in master if s['code'][2:4] in ['60','68','00','30','43','83','87','92']]
+          valid = []
+          for s in master:
+              c = s['code'].replace('.', '').lower()
+              if c.startswith('sh') and c[2:4] in ['60','68']:
+                  valid.append(s['code'])
+              elif c.startswith('sz') and c[2:4] in ['00','30']:
+                  valid.append(s['code'])
+              elif c.startswith('bj') and c[2:4] in ['43','83','87','92']:
+                  valid.append(s['code'])
+          
           NUM = 20
           chunk = math.ceil(len(valid)/NUM)
-          print('matrix=' + json.dumps([{'index': i, 'codes': valid[i*chunk:(i+1)*chunk]} for i in range(NUM) if valid[i*chunk:(i+1)*chunk]]))
+          matrix_data = [{'index': i, 'codes': valid[i*chunk:(i+1)*chunk]} for i in range(NUM) if valid[i*chunk:(i+1)*chunk]]
+          print('matrix=' + json.dumps(matrix_data))
           " >> $GITHUB_OUTPUT
 
   fetch-events-matrix:
@@ -90,7 +99,7 @@ jobs:
       - name: Merge All Parts
         run: python scripts/merge_events.py
         
-      # 💾 将合并好的事件 Parquet 写入 GitHub Actions Cache 中，保存名带唯一 run_id
+      # 💾 将合并好的事件 Parquet 写入 GitHub Actions Cache 中
       - name: Save Event DB to GitHub Actions Cache
         uses: actions/cache/save@v4
         with:
