@@ -190,7 +190,7 @@ jobs:
           python scripts/fetch_f10_mainbus.py
           ls -lh output/all_stocks_mainbus_raw.parquet
 
-      # 💾 极速恢复 Actions 缓存中的业绩预告事件库（免公网，耗时 < 1 秒）
+      # 💾 恢复缓存中的业绩预告事件库（即使是模糊匹配成功也会先落盘）
       - name: 💾 Restore Earnings Forecast Events from GitHub Cache
         uses: actions/cache/restore@v4
         id: restore-event-cache
@@ -200,20 +200,23 @@ jobs:
           restore-keys: |
             event-forecast-cache-
 
-      # 🛡️ 鲁棒兜底：如果全新仓库未曾运行过事件流，自动生成空格式 Parquet，保障 DuckDB 联表不崩溃
+      # 🛡️ 物理防误杀：改用系统物理文件判定。如果检测到磁盘上已经有恢复出来的文件，直接放行，绝不重写覆盖
       - name: 🛡️ Fallback if No Cache Exists
-        if: steps.restore-event-cache.outputs.cache-hit != 'true'
         run: |
-          mkdir -p output
-          python -c "
-          import polars as pl
-          schema = {
-              'code': pl.Utf8, 'notice_date': pl.Utf8, 'report_date': pl.Utf8,
-              'forecast_type': pl.Utf8, 'forecast_yoy_mid': pl.Float64, 'summary': pl.Utf8
-          }
-          pl.DataFrame([], schema=schema).write_parquet('output/event_earnings_forecast.parquet')
-          "
-          echo "⚠️ 未找到历史事件缓存，已自动初始化空事件占位表。"
+          if [ ! -f output/event_earnings_forecast.parquet ]; then
+            echo "⚠️ 未在本地磁盘检测到历史事件文件，启动全新仓库自动初始化..."
+            mkdir -p output
+            python -c "
+            import polars as pl
+            schema = {
+                'code': pl.Utf8, 'notice_date': pl.Utf8, 'report_date': pl.Utf8,
+                'forecast_type': pl.Utf8, 'forecast_yoy_mid': pl.Float64, 'summary': pl.Utf8
+            }
+            pl.DataFrame([], schema=schema).write_parquet('output/event_earnings_forecast.parquet')
+            "
+          else
+            echo "✅ 物理检测通过：已成功加载 Actions 缓存恢复的历史事件数据（大小：$(ls -lh output/event_earnings_forecast.parquet | awk '{print $5}')）。"
+          fi
 
       - name: Merge & Split by Year (HF Mode)
         env:
