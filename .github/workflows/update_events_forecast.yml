@@ -45,8 +45,8 @@ jobs:
               elif c.startswith('bj') and c[2:4] in ['43','83','87','92']:
                   valid.append(s['code'])
           
-          # 🎲 核心：执行随机洗牌，使每个分片均等分摊新股与历史悠久的老大盘股
-          random.seed(42) # 设置固定随机种子，保证每次切割逻辑具有可复现性
+          # 🎲 洗牌
+          random.seed(42)
           random.shuffle(valid)
           
           NUM = 20
@@ -80,7 +80,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: event-part-${{ matrix.task.index }}
-          path: temp_parts/*.parquet
+          # 🛡️ 核心修改：使用通配符 *，同时上载成功分片 parquet 与失败 json 碎片
+          path: temp_parts/*
           retention-days: 1
 
   merge-and-save:
@@ -101,7 +102,7 @@ jobs:
           merge-multiple: true
           path: all_artifacts
           
-      - name: Merge All Parts
+      - name: Merge All Parts & Print Diagnostics
         run: python scripts/merge_events.py
         
       # 💾 将合并好的事件 Parquet 写入 GitHub Actions Cache 中
@@ -110,3 +111,12 @@ jobs:
         with:
           path: output/event_earnings_forecast.parquet
           key: event-forecast-cache-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # 📊 自动在工作流运行页面展示精美的质量审计大屏与诊断名单
+      - name: Publish Event Summary to Workflow Page
+        if: always()
+        run: |
+          if [ -f output/event_audit_summary.md ]; then
+            echo "---" >> $GITHUB_STEP_SUMMARY
+            cat output/event_audit_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
