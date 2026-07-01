@@ -1,4 +1,5 @@
-name: Update_events_forecast
+# FILE: .github/workflows/update_events_forecast.yml
+name: Distributed Event Fetcher
 
 on:
   schedule:
@@ -30,9 +31,9 @@ jobs:
           go build -o tdx_fetcher scripts/tdx_fetcher.go
           ./tdx_fetcher -mode=list
           
-          # 利用 Python 强制替换点号对齐索引，动态切割为 20 个负载均衡的物理矩阵
+          # 利用 Python 强制打乱顺序（洗牌算法）实现 20 节点物理负载完美均衡
           python -c "
-          import json, math
+          import json, math, random
           master = json.load(open('stock_list_master.json'))
           valid = []
           for s in master:
@@ -43,6 +44,10 @@ jobs:
                   valid.append(s['code'])
               elif c.startswith('bj') and c[2:4] in ['43','83','87','92']:
                   valid.append(s['code'])
+          
+          # 🎲 核心：执行随机洗牌，使每个分片均等分摊新股与历史悠久的老大盘股
+          random.seed(42) # 设置固定随机种子，保证每次切割逻辑具有可复现性
+          random.shuffle(valid)
           
           NUM = 20
           chunk = math.ceil(len(valid)/NUM)
