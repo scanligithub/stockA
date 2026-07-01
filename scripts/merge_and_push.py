@@ -10,6 +10,7 @@ import datetime
 import argparse
 import shutil
 import json
+import numpy as np
 import pandas as pd
 from utils.hf_manager import HFManager
 from utils.qc import QualityControl
@@ -29,7 +30,7 @@ def get_stock_list_with_names():
     return pd.DataFrame()
 
 def calculate_ttm_net_profit(f10_parquet_path):
-    print("🧮 Calculating Trailing Twelve Months (TTM) Net Profit...")
+    print("🧮 Calculating Trailing Twelve Months (TTM) Net Profit (Vectorized)...")
     if not os.path.exists(f10_parquet_path):
         print("⚠️ Warning: F10 raw parquet not found! PE/PB will fall back to 0.0.")
         return pd.DataFrame()
@@ -38,14 +39,17 @@ def calculate_ttm_net_profit(f10_parquet_path):
     if df.empty:
         return pd.DataFrame()
 
+    # 1. 基础时序准备与对齐
     df = df.sort_values(['code', 'report_date'])
     df['month_day'] = df['report_date'].str[-5:]
     df['year'] = df['report_date'].str[:4].astype(int)
 
+    # 提取前一年Q4（12-31）的归母利润快照
     df_q4 = df[df['month_day'] == '12-31'][['code', 'year', 'parent_netprofit']].copy()
     df_q4['prev_year'] = df_q4['year']
     df_q4.rename(columns={'parent_netprofit': 'q4_prev_profit'}, inplace=True)
 
+    # 提取前一年同期的累计归母利润
     df_prev = df.copy()
     df_prev['prev_year'] = df_prev['year']
     df_prev.rename(columns={'parent_netprofit': 'prev_cum_profit'}, inplace=True)
@@ -57,32 +61,43 @@ def calculate_ttm_net_profit(f10_parquet_path):
     q_num_map = {'03-31': 1, '06-30': 2, '09-30': 3, '12-31': 4}
     df['q_num'] = df['month_day'].map(q_num_map).fillna(4)
 
-    ttm_vals = []
-    for idx, row in df.iterrows():
-        md = row['month_day']
-        cum = row['parent_netprofit']
-        q4_prev = row['q4_prev_profit']
-        prev_cum = row['prev_cum_profit']
-        q_num = row['q_num']
+    # -------------------------------------------------------------------------
+    # 🚀 极致性能提速：使用 Numpy 矩阵条件判断，彻底干掉 .iterrows() 逐行循环
+    # -------------------------------------------------------------------------
+    cum = df['parent_netprofit'].values
+    q4_prev = df['q4_prev_profit'].values
+    prev_cum = df['prev_cum_profit'].values
+    q_num = df['q_num'].values
 
-        if pd.isnull(cum):
-            ttm_vals.append(None)
-            continue
+    # 定义三种业务场景的并行代数运算公式
+    cond_q4 = (df['month_day'] == '12-31').values
+    cond_fallback = (df_q4['q4_prev_profit'].isnull().reindex(df.index, fill_value=True).values) | \
+                    (df_prev['prev_cum_profit'].isnull().reindex(df.index, fill_value=True).values)
 
-        if md == '12-31':
-            ttm_vals.append(cum)
-        elif pd.isnull(q4_prev) or pd.isnull(prev_cum):
-            ttm_vals.append(cum * 4.0 / q_num)
-        else:
-            ttm_vals.append(cum + q4_prev - prev_cum)
+    # 公式 1: 如果是年报，TTM 直接等于年报累计数值
+    expr_q4 = cum
+    # 公式 2: 如果上年同期或Q4缺失，采用线性估算公式推演
+    expr_fallback = cum * 4.0 / q_num
+    # 公式 3: 标准滚动 TTM 差分计算
+    expr_normal = cum + q4_prev - prev_cum
 
-    df['ttm_net_profit'] = ttm_vals
+    # 矩阵级别条件判定
+    ttm_net_profit = np.select(
+        [cond_q4, cond_fallback],
+        [expr_q4, expr_fallback],
+        default=expr_normal
+    )
+
+    # 将计算结果写回
+    df['ttm_net_profit'] = ttm_net_profit
+    # 如果财务原始归母净利润为空值，强制对齐为空
+    df.loc[df['parent_netprofit'].isnull(), 'ttm_net_profit'] = np.nan
     
     f10_clean = df[['code', 'name', 'report_date', 'notice_date', 'bps', 'ttm_net_profit']].copy()
     os.makedirs("temp_parts", exist_ok=True)
     clean_f10_path = "temp_parts/f10_ttm_clean.parquet"
     f10_clean.to_parquet(clean_f10_path, index=False)
-    print(f"✅ F10 TTM 预处理完毕。")
+    print(f"✅ F10 TTM 矩阵计算完毕，瞬时生成完毕。")
     return f10_clean
 
 def main():
@@ -131,7 +146,7 @@ def main():
     mainbus_raw_path = "output/all_stocks_mainbus_raw.parquet"
     has_mainbus = os.path.exists(mainbus_raw_path)
     
-    # 3. 📢 载入最新的高纯度业绩预告事件数据
+    # 3. 📢 载入最及时的事件预告数据集
     event_raw_path = "output/event_earnings_forecast.parquet"
     has_event = os.path.exists(event_raw_path)
     
@@ -283,7 +298,7 @@ def main():
         except Exception as e:
             print(f"⚠️ QC check failed for mainbus raw: {e}")
 
-    # 📢 注册业绩预告事件库到 QC 和 HF 归档列表中
+    # 📢 注册业绩预告事件库到 QC 审计清单
     if has_event:
         targets[event_raw_path] = "event_earnings_forecast.parquet"
         try:
