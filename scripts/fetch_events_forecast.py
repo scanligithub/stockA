@@ -32,6 +32,7 @@ def main():
     except: pass
 
     all_events = []
+    failed_stocks = [] # 收集失败股票代码
     start_date = "2005-01-01"
     end_date = time.strftime('%Y-%m-%d')
     
@@ -49,20 +50,18 @@ def main():
         stock_success = False
         stock_events = []
 
-        # 🔄 单股整体级 3 次重试闭环（涵盖：接口呼叫 + 数据流逐行拉取）
+        # 🔄 单股整体级 3 次重试闭环
         for attempt in range(3):
             try:
                 rs = bs.query_forecast_report(code, start_date=start_date, end_date=end_date)
                 
                 if rs is None or rs.error_code != '0':
-                    # 若接口响应不正常，强制重建 Socket 链路
                     time.sleep(1.0)
                     try: bs.logout()
                     except: pass
                     bs.login()
-                    continue  # 进入下一次尝试
+                    continue 
 
-                # 逐行读取数据流（若在此发生异常，同样会被 Exception 捕获并重试）
                 temp_records = []
                 while (rs.error_code == '0') & rs.next():
                     row = rs.get_row_data()
@@ -79,13 +78,11 @@ def main():
                         "summary": row[4]
                     })
                 
-                # 数据拉取与解析均无异常，标记成功并跳出重试
                 stock_events = temp_records
                 stock_success = True
                 break
 
             except Exception as e:
-                # 捕获包括超时、网络瞬断在内的所有异常，重建链路后等待下一次重试
                 print(f"\n📡 [Job {args.index} - Socket重试] {code} 在第 {attempt + 1} 次尝试时触发异常: {e}. 正在重建链路...", flush=True)
                 try: bs.logout()
                 except: pass
@@ -93,10 +90,11 @@ def main():
                 try: bs.login()
                 except: pass
 
-        # 判定最终合并状态
+        # 判定最终保存状态
         if stock_success:
             all_events.extend(stock_events)
         else:
+            failed_stocks.append(code) # 写入失败清单
             print(f"\n⚠️ [Job {args.index}] 警告: {code} 连续 3 次下载解析均告失败，已自动越过该股以保护整体流水线。", flush=True)
             
         # 📈 实时进度日志：每处理 50 只股票或到达末尾时，强制打印进度
@@ -106,22 +104,25 @@ def main():
     try: bs.logout()
     except: pass
 
-    print(f"\n✅ [Job {args.index}] 扫描完毕。共计捕获预告公告: {len(all_events)} 条", flush=True)
+    print(f"\n✅ [Job {args.index}] 扫描完毕。共计成功捕获预告: {len(all_events)} 条 | 累计失败: {len(failed_stocks)} 只", flush=True)
 
-    # 3. 强类型 Parquet 分片落盘
+    # 3. 强类型 Parquet 分片与失败 JSON 碎片落盘
+    os.makedirs("temp_parts", exist_ok=True)
     if all_events:
         schema = {
             "code": pl.Utf8, "notice_date": pl.Utf8, "report_date": pl.Utf8,
             "forecast_type": pl.Utf8, "forecast_yoy_mid": pl.Float64, "summary": pl.Utf8
         }
         df = pl.DataFrame(all_events, schema=schema).sort(["code", "notice_date"])
-        
-        os.makedirs("temp_parts", exist_ok=True)
         out_path = f"temp_parts/event_forecast_part_{args.index}.parquet"
         df.write_parquet(out_path, compression="zstd")
-        print(f"💾 分片保存成功: {out_path}", flush=True)
-    else:
-        print(f"⚠️ [Job {args.index}] 未捕获到任何有效事件，跳过落盘。", flush=True)
+        print(f"💾 成功分片保存成功: {out_path}", flush=True)
+        
+    if failed_stocks:
+        failed_path = f"temp_parts/event_failed_part_{args.index}.json"
+        with open(failed_path, "w", encoding="utf-8") as f:
+            json.dump(failed_stocks, f, ensure_ascii=False)
+        print(f"💾 失败分片保存成功: {failed_path}", flush=True)
 
 if __name__ == "__main__":
     main()
