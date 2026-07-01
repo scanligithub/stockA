@@ -1,9 +1,10 @@
-name: Distributed Event Fetcher (业绩预告事件库同步)
+# FILE: .github/workflows/update_events_forecast.yml
+name: Distributed Event Fetcher
 
 on:
   schedule:
-    - cron: '0 12 * * 5' # 每周五晚 20:00 自动跑一次 (北京时间)
-  workflow_dispatch:
+    - cron: '0 12 * * 5' # 每周五晚 20:00 自动执行一次
+  workflow_dispatch:     # 支持随时手动触发
 
 permissions:
   contents: write
@@ -16,9 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
-        with: { go-version: '1.24' }
+        with:
+          go-version: '1.24'
       - uses: actions/setup-python@v5
-        with: { python-version: "3.10" }
+        with:
+          python-version: "3.10"
         
       - name: Build Engine & Split 20 Chunks
         id: set-matrix
@@ -28,29 +31,29 @@ jobs:
           go build -o tdx_fetcher scripts/tdx_fetcher.go
           ./tdx_fetcher -mode=list
           
-          # 利用 Python 动态切割为 20 个 JSON 矩阵
+          # 利用 Python 将全市场 A 股极速切分为 20 个负载均衡的物理矩阵并写入 GITHUB_OUTPUT
           python -c "
-          import json, math;
-          master = json.load(open('stock_list_master.json'));
-          valid = [s['code'] for s in master if s['code'][2:4] in ['60','68','00','30','43','83','87','92']];
-          NUM = 20;
-          chunk = math.ceil(len(valid)/NUM);
-          print(json.dumps([{'index': i, 'codes': valid[i*chunk:(i+1)*chunk]} for i in range(NUM) if valid[i*chunk:(i+1)*chunk]]))
-          " > event_matrix.json
-          
-          echo "matrix=$(cat event_matrix.json)" >> $GITHUB_OUTPUT
+          import json, math
+          master = json.load(open('stock_list_master.json'))
+          valid = [s['code'] for s in master if s['code'][2:4] in ['60','68','00','30','43','83','87','92']]
+          NUM = 20
+          chunk = math.ceil(len(valid)/NUM)
+          print('matrix=' + json.dumps([{'index': i, 'codes': valid[i*chunk:(i+1)*chunk]} for i in range(NUM) if valid[i*chunk:(i+1)*chunk]]))
+          " >> $GITHUB_OUTPUT
 
   fetch-events-matrix:
     needs: prepare-matrix
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        task: ${{ fromJson(needs.prepare.outputs.matrix) }}
+        task: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.10", cache: 'pip' }
+        with:
+          python-version: "3.10"
+          cache: 'pip'
         
       - run: pip install polars baostock
       
@@ -66,15 +69,16 @@ jobs:
           path: temp_parts/*.parquet
           retention-days: 1
 
-  merge-and-upload:
+  merge-and-save:
     needs: fetch-events-matrix
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.10" }
+        with:
+          python-version: "3.10"
         
-      - run: pip install polars huggingface_hub
+      - run: pip install polars
       
       - name: Download Matrix Artifacts
         uses: actions/download-artifact@v4
@@ -86,9 +90,9 @@ jobs:
       - name: Merge All Parts
         run: python scripts/merge_events.py
         
-      - name: Upload to Hugging Face
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: ${{ secrets.HF_REPO }}
-        run: |
-          huggingface-cli upload $HF_REPO output/event_earnings_forecast.parquet event_earnings_forecast.parquet --repo-type dataset
+      # 💾 将合并好的事件 Parquet 写入 GitHub Actions Cache 中，保存名带唯一 run_id
+      - name: Save Event DB to GitHub Actions Cache
+        uses: actions/cache/save@v4
+        with:
+          path: output/event_earnings_forecast.parquet
+          key: event-forecast-cache-${{ github.run_id }}-${{ github.run_attempt }}
