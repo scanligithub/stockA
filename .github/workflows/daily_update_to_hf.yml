@@ -1,9 +1,10 @@
+# FILE: .github/workflows/daily_update_to_hf.yml
 name: Daily Update to Hugging Face
 
 on:
   repository_dispatch:
-    types: [daily_update]       # 允许外部服务通过该事件名称触发
-  workflow_dispatch:             # 保留手动触发选项
+    types: [daily_update]       
+  workflow_dispatch:             
 
 permissions:
   contents: write
@@ -109,7 +110,7 @@ jobs:
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
             --codes '${{ toJson(matrix.task.codes) }}' \
-            --year 0 # 0 代表仅增量同步当前年份的数据
+            --year 0 
             
       - uses: actions/upload-artifact@v4
         with:
@@ -189,11 +190,30 @@ jobs:
           python scripts/fetch_f10_mainbus.py
           ls -lh output/all_stocks_mainbus_raw.parquet
 
-      # 📢 新增步骤：通过底层的 Baostock 获取高纯度业绩预告事件库
-      - name: 📢 Fetch All Stocks Full Historical Earnings Forecast Events
+      # 💾 极速恢复 Actions 缓存中的业绩预告事件库（免公网，耗时 < 1 秒）
+      - name: 💾 Restore Earnings Forecast Events from GitHub Cache
+        uses: actions/cache/restore@v4
+        id: restore-event-cache
+        with:
+          path: output/event_earnings_forecast.parquet
+          key: event-forecast-cache-placeholder
+          restore-keys: |
+            event-forecast-cache-
+
+      # 🛡️ 鲁棒兜底：如果全新仓库未曾运行过事件流，自动生成空格式 Parquet，保障 DuckDB 联表不崩溃
+      - name: 🛡️ Fallback if No Cache Exists
+        if: steps.restore-event-cache.outputs.cache-hit != 'true'
         run: |
-          python scripts/fetch_events_forecast.py
-          ls -lh output/event_earnings_forecast.parquet
+          mkdir -p output
+          python -c "
+          import polars as pl
+          schema = {
+              'code': pl.Utf8, 'notice_date': pl.Utf8, 'report_date': pl.Utf8,
+              'forecast_type': pl.Utf8, 'forecast_yoy_mid': pl.Float64, 'summary': pl.Utf8
+          }
+          pl.DataFrame([], schema=schema).write_parquet('output/event_earnings_forecast.parquet')
+          "
+          echo "⚠️ 未找到历史事件缓存，已自动初始化空事件占位表。"
 
       - name: Merge & Split by Year (HF Mode)
         env:
@@ -228,5 +248,4 @@ jobs:
             output/qc_summary.md
             output/f10_audit_summary.md
             output/mainbus_audit_summary.md
-            output/event_earnings_forecast.parquet  # 📢 新增：将生成的事件 Parquet 归档备份
           retention-days: 7
