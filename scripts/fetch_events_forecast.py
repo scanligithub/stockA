@@ -1,5 +1,6 @@
 # FILE: scripts/fetch_events_forecast.py
 import socket
+# 强制设置全局 TCP 连接与接收超时为 15 秒，彻底封杀 Baostock 底层死锁卡死
 socket.setdefaulttimeout(15.0)
 
 import baostock as bs
@@ -23,9 +24,9 @@ def main():
     codes = json.loads(args.codes)
     total_stocks = len(codes)
     
-    print(f"\n" + "="*50, flush=True)
-    print(f"🚀 [Job {args.index}] 分布式节点启动 | 负责标的: {total_stocks} 只", flush=True)
-    print("="*50, flush=True)
+    print(f"\n" + "="*70, flush=True)
+    print(f"🚀 [Job {args.index}] 分布式事件抓取节点启动 | 负责标的: {total_stocks} 只", flush=True)
+    print("="*70, flush=True)
 
     try: bs.login()
     except: pass
@@ -37,7 +38,7 @@ def main():
     for idx, code in enumerate(codes):
         pure_code = code.split('.')[1]
         
-        # 防卡死：每 100 只股强制重置连接
+        # 2. 防卡死：每 100 只股强制重置连接
         if idx > 0 and idx % 100 == 0:
             try: bs.logout()
             except: pass
@@ -49,7 +50,8 @@ def main():
         for attempt in range(3):
             try:
                 rs = bs.query_forecast_report(code, start_date=start_date, end_date=end_date)
-                if rs is not None and rs.error_code == '0': break
+                if rs is not None and rs.error_code == '0': 
+                    break
                 time.sleep(1.0)
                 try: bs.logout()
                 except: pass
@@ -85,9 +87,9 @@ def main():
     try: bs.logout()
     except: pass
 
-    print(f"\n✅ [Job {args.index}] 扫描完毕。捕获预告公告: {len(all_events)} 条", flush=True)
+    print(f"\n✅ [Job {args.index}] 扫描完毕。共计捕获预告公告: {len(all_events)} 条", flush=True)
 
-    # 落盘为该节点的专属小分片
+    # 3. 强类型 Parquet 分片落盘
     if all_events:
         schema = {
             "code": pl.Utf8, "notice_date": pl.Utf8, "report_date": pl.Utf8,
@@ -98,7 +100,7 @@ def main():
         os.makedirs("temp_parts", exist_ok=True)
         out_path = f"temp_parts/event_forecast_part_{args.index}.parquet"
         df.write_parquet(out_path, compression="zstd")
-        print(f"💾 分片已保存: {out_path}")
+        print(f"💾 分片保存成功: {out_path}", flush=True)
 
 if __name__ == "__main__":
     main()
