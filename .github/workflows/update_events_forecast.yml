@@ -1,4 +1,3 @@
-# FILE: .github/workflows/update_events_forecast.yml
 name: Distributed Event Fetcher (业绩预告事件库同步)
 
 on:
