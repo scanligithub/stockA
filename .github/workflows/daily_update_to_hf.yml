@@ -129,7 +129,7 @@ jobs:
       - name: Install Runtime Dependencies
         run: |
           pip install -r requirements.txt
-          pip install polars pytdx pandas pyarrow
+          pip install polars pytdx pandas pyarrow requests
 
       - name: Download Latest Healed Sectors
         env:
@@ -140,13 +140,14 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      - name: 📈 Fetch Full Historical Index Data (Yahoo Primary + Sina Backup)
+      - name: 📈 Fetch Daily Incremental Index Data (Xueqiu Paginated + Sina)
         run: |
           python -c '
           import os
           import sys
           import requests
           import pandas as pd
+          import time
           from datetime import datetime
           
           INDEX_LIST = {
@@ -161,46 +162,56 @@ jobs:
               "sz.399998": "中证有色", "sz.399974": "国证国企"
           }
           
-          def fetch_yahoo(code):
-              # 每日更新工作流也采用 range=max，实现全量覆盖写入
-              parts = code.split(".")
-              suffix = "SS" if parts[0] == "sh" else ("SZ" if parts[0] == "sz" else "BJ")
-              yahoo_code = f"{parts[1]}.{suffix}"
+          # 1. 建立带有 Cookie 的全局雪球会话，完美绕过屏蔽
+          XQ_SESSION = requests.Session()
+          XQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+          for _ in range(3):
+              try:
+                  XQ_SESSION.get("https://xueqiu.com/", timeout=5)
+                  break
+              except:
+                  time.sleep(1)
+                  
+          def fetch_xueqiu_paginated(code):
+              # 雪球分页拉取，完美提取上市以来的所有数据
+              symbol = code.replace(".", "").upper()
+              all_bars = []
+              current_ts = int(time.time() * 1000)
               
-              url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_code}?range=max&interval=1d"
-              headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-              res = requests.get(url, headers=headers, timeout=15)
-              res.raise_for_status()
-              
-              chart_data = res.json().get("chart", {}).get("result", [None])[0]
-              if not chart_data:
-                  raise ValueError("No result in response")
-              
-              timestamps = chart_data.get("timestamp", [])
-              indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
-              
-              opens = indicators.get("open", [])
-              closes = indicators.get("close", [])
-              highs = indicators.get("high", [])
-              lows = indicators.get("low", [])
-              volumes = indicators.get("volume", [])
-              
-              records = []
-              for i in range(len(timestamps)):
-                  if opens[i] is None or closes[i] is None:
-                      continue
-                  date_str = datetime.fromtimestamp(timestamps[i]).strftime("%Y-%m-%d")
-                  records.append({
-                      "date": date_str, "code": code, "open": float(opens[i]),
-                      "high": float(highs[i]), "low": float(lows[i]), "close": float(closes[i]),
-                      "volume": float(volumes[i] or 0), "amount": float(volumes[i] or 0) * float(closes[i])
-                  })
-              return records
+              while True:
+                  url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={current_ts}&period=day&type=before&count=-2000&indicator=kline"
+                  res = XQ_SESSION.get(url, timeout=10).json()
+                  
+                  if not res or not res.get("data") or not res["data"].get("item"):
+                      break
+                      
+                  items = res["data"]["item"]
+                  if not items:
+                      break
+                      
+                  chunk_bars = []
+                  for item in items:
+                      dt = datetime.fromtimestamp(item[0]/1000).strftime("%Y-%m-%d")
+                      chunk_bars.append({
+                          "date": dt, "code": code,
+                          "open": float(item[2]), "high": float(item[3]),
+                          "low": float(item[4]), "close": float(item[5]),
+                          "volume": float(item[1]), "amount": float(item[9] or 0.0)
+                      })
+                  
+                  all_bars = chunk_bars + all_bars
+                  oldest_ts = items[0][0]
+                  current_ts = oldest_ts - 1
+                  
+                  if len(items) < 2000:
+                      break
+                  time.sleep(0.3)
+                  
+              return all_bars
           
           def fetch_sina(code):
-              # 新浪财经备用接口，最多获取物理极限 1023 条记录
               sina_code = code.replace(".", "")
-              url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=10000"
+              url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=1023"
               res = requests.get(url, timeout=15)
               res.raise_for_status()
               data = res.json()
@@ -223,14 +234,13 @@ jobs:
               bars = []
               engine_used = ""
               
-              # 每日更新亦采用：雅虎主用（全历史不截断），新浪备用兜底
               try:
-                  bars = fetch_yahoo(code_str)
-                  engine_used = "Yahoo HTTP (Full History)"
-              except Exception as e_yahoo:
+                  bars = fetch_xueqiu_paginated(code_str)
+                  engine_used = "Xueqiu HTTP (Paginated Full History)"
+              except Exception as e_xq:
                   try:
                       bars = fetch_sina(code_str)
-                      engine_used = "Sina HTTP Fallback (Max 1000)"
+                      engine_used = "Sina HTTP Fallback (Max 1023)"
                   except Exception as e_sina:
                       pass
                       
