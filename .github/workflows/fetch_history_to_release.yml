@@ -127,7 +127,7 @@ jobs:
       - name: Install Runtime Dependencies
         run: |
           pip install -r requirements.txt
-          pip install polars pytdx pandas pyarrow
+          pip install polars pytdx pandas pyarrow baostock
 
       - name: Download Latest Healed Sectors
         env:
@@ -138,14 +138,11 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      - name: 📈 Fetch Full Historical Index Data (Yahoo Primary + Sina Backup)
+      - name: 📈 Fetch Full Historical Index Data (BaoStock Pure)
         run: |
           python -c '
-          import os
-          import sys
-          import requests
-          import pandas as pd
-          from datetime import datetime
+          import os, sys, pandas as pd, time
+          import baostock as bs
           
           INDEX_LIST = {
               "sh.000001": "上证指数", "sz.399001": "深证成指", "sz.399006": "创业板指", "sh.000688": "科创50", "bj.899050": "北证50",
@@ -159,90 +156,44 @@ jobs:
               "sz.399998": "中证有色", "sz.399974": "国证国企"
           }
           
-          def fetch_yahoo(code):
-              # 雅虎历史 K 线接口（无行数限制，传入 range=max 即可拉取上市以来完整几千至上万条历史记录）
-              parts = code.split(".")
-              suffix = "SS" if parts[0] == "sh" else ("SZ" if parts[0] == "sz" else "BJ")
-              yahoo_code = f"{parts[1]}.{suffix}"
-              
-              url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_code}?range=max&interval=1d"
-              headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-              res = requests.get(url, headers=headers, timeout=15)
-              res.raise_for_status()
-              
-              chart_data = res.json().get("chart", {}).get("result", [None])[0]
-              if not chart_data:
-                  raise ValueError("No result in response")
-              
-              timestamps = chart_data.get("timestamp", [])
-              indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
-              
-              opens = indicators.get("open", [])
-              closes = indicators.get("close", [])
-              highs = indicators.get("high", [])
-              lows = indicators.get("low", [])
-              volumes = indicators.get("volume", [])
-              
-              records = []
-              for i in range(len(timestamps)):
-                  if opens[i] is None or closes[i] is None:
-                      continue
-                  date_str = datetime.fromtimestamp(timestamps[i]).strftime("%Y-%m-%d")
-                  records.append({
-                      "date": date_str, "code": code, "open": float(opens[i]),
-                      "high": float(highs[i]), "low": float(lows[i]), "close": float(closes[i]),
-                      "volume": float(volumes[i] or 0), "amount": float(volumes[i] or 0) * float(closes[i])
-                  })
-              return records
+          bs.login()
           
-          def fetch_sina(code):
-              # 新浪备用接口，最多只能拉取服务端的物理极限 1023 条
-              sina_code = code.replace(".", "")
-              url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=10000"
-              res = requests.get(url, timeout=15)
-              res.raise_for_status()
-              data = res.json()
-              if not data:
-                  raise ValueError("Empty response")
-              records = []
-              for item in data:
-                  records.append({
-                      "date": item["day"][:10], "code": code, "open": float(item["open"]),
-                      "high": float(item["high"]), "low": float(item["low"]), "close": float(item["close"]),
-                      "volume": float(item["volume"]), "amount": float(item["volume"]) * float(item["close"])
-                  })
-              return records
+          # === 纯净版 BaoStock 引擎 (自带 3 次指数退避重试) ===
+          def fetch_baostock(code, retries=3):
+              for attempt in range(retries):
+                  try:
+                      rs = bs.query_history_k_data_plus(code, "date,code,open,high,low,close,volume,amount", start_date="1990-01-01", frequency="d")
+                      if rs.error_code != "0": raise ValueError(f"BS Error: {rs.error_msg}")
+                      data_list = []
+                      while (rs.error_code == "0") & rs.next():
+                          data_list.append(rs.get_row_data())
+                      if not data_list: raise ValueError("BS returned empty")
+                      
+                      df = pd.DataFrame(data_list, columns=rs.fields)
+                      for col in ["open", "high", "low", "close", "volume", "amount"]:
+                          df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+                      return df.to_dict("records")
+                  except Exception as e:
+                      if attempt == retries - 1: raise e
+                      time.sleep(1 + attempt)  # 发生错误时阶梯式休眠等待 1秒, 2秒...
           
           all_rows = []
           success_count = 0
           
           for code_str, name in INDEX_LIST.items():
               print(f"📊 Pulling: {code_str} ({name}) ...", end="")
-              bars = []
-              engine_used = ""
-              
-              # 历史全量获取时：雅虎优先（无硬性条数截断限制），新浪降级为备用兜底
               try:
-                  bars = fetch_yahoo(code_str)
-                  engine_used = "Yahoo HTTP (Full History)"
-              except Exception as e_yahoo:
-                  try:
-                      bars = fetch_sina(code_str)
-                      engine_used = "Sina HTTP Fallback (Max 1000)"
-                  except Exception as e_sina:
-                      pass
-                      
-              if bars:
+                  bars = fetch_baostock(code_str)
                   all_rows.extend(bars)
                   success_count += 1
-                  print(f" ✅ Success ({engine_used}, {len(bars)} rows)")
-              else:
-                  print(" ❌ Failed.")
+                  print(f" ✅ Success (BaoStock, {len(bars)} rows)")
+              except Exception as e_bs:
+                  print(f" ❌ Failed! Error: {e_bs}")
                   
+          bs.logout()
           print(f"\n📋 INDEX DOWNLOAD SUMMARY: {success_count} / {len(INDEX_LIST)} SUCCESS")
           
-          if not all_rows:
-              sys.exit(1)
+          if not all_rows: sys.exit(1)
               
           df = pd.DataFrame(all_rows)
           df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
@@ -256,10 +207,8 @@ jobs:
           df["pctChg"] = df.groupby("code")["close"].pct_change() * 100
           df["pctChg"] = df["pctChg"].fillna(0.0)
           
-          for col in ["open", "high", "low", "close", "pctChg"]: 
-              df[col] = df[col].astype("float32")
-          for col in ["volume", "amount"]: 
-              df[col] = df[col].astype("float64")
+          for col in ["open", "high", "low", "close", "pctChg"]: df[col] = df[col].astype("float32")
+          for col in ["volume", "amount"]: df[col] = df[col].astype("float64")
               
           os.makedirs("temp_parts", exist_ok=True)
           out_path = "temp_parts/index_kline_all.parquet"
