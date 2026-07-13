@@ -1,4 +1,3 @@
-# FILE: .github/workflows/daily_update_to_hf.yml
 name: Daily Update to Hugging Face
 
 on:
@@ -130,7 +129,7 @@ jobs:
       - name: Install Runtime Dependencies
         run: |
           pip install -r requirements.txt
-          pip install polars pytdx
+          pip install polars pytdx pandas pyarrow
 
       - name: Download Latest Healed Sectors
         env:
@@ -141,8 +140,67 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      - name: 📈 Fetch Daily Incremental Index Data
-        run: python scripts/fetch_index.py --incremental
+      - name: 📈 Fetch Daily Incremental Index Data (HTTP API Fallback)
+        run: |
+          python -c '
+          import os
+          import requests
+          import pandas as pd
+          
+          # 创建输出目录
+          os.makedirs("temp_parts", exist_ok=True)
+          
+          # 定义需要拉取的指数及其对应的东财secid
+          indexes = {
+              "sh.000001": "1.000001",  # 上证指数
+              "sz.399001": "0.399001",  # 深证成指
+              "sz.399006": "0.399006",  # 创业板指
+              "sh.000068": "1.000068",  # 科创50
+              "bj.899050": "0.899050",  # 北证50
+              "sh.000016": "1.000016",  # 上证50
+              "sh.000300": "1.000300"   # 沪深300
+          }
+          
+          headers = {
+              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+          }
+          
+          for code, secid in indexes.items():
+              try:
+                  print(f"Pulling {code} via Eastmoney HTTP API...")
+                  # 获取日K线数据，限制获取最近 1000 条以实现增量/历史覆盖
+                  url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=1000"
+                  res = requests.get(url, headers=headers, timeout=15)
+                  res.raise_for_status()
+                  
+                  data = res.json()
+                  klines = data.get("data", {}).get("klines", [])
+                  if not klines:
+                      print(f"⚠️ {code} 未返回有效数据")
+                      continue
+                      
+                  records = []
+                  for kl in klines:
+                      p = kl.split(",")
+                      # 对应东财返回字段: 日期,开盘,收盘,最高,最低,成交量(手),成交额
+                      records.append({
+                          "date": p[0],
+                          "code": code,
+                          "open": float(p[1]),
+                          "close": float(p[2]),
+                          "high": float(p[3]),
+                          "low": float(p[4]),
+                          "volume": float(p[5]),
+                          "amount": float(p[6])
+                      })
+                      
+                  df = pd.DataFrame(records)
+                  output_path = f"temp_parts/index_{code}.parquet"
+                  df.to_parquet(output_path, index=False)
+                  print(f"✅ Successfully saved {code} ({len(df)} rows) -> {output_path}")
+              except Exception as e:
+                  print(f"❌ Failed to fetch {code}: {str(e)}")
+          '
 
       - name: Upload Sector Parquet
         uses: actions/upload-artifact@v4
@@ -190,7 +248,6 @@ jobs:
           python scripts/fetch_f10_mainbus.py
           ls -lh output/all_stocks_mainbus_raw.parquet
 
-      # 💾 恢复缓存中的业绩预告事件库（即使是模糊匹配成功也会先落盘）
       - name: 💾 Restore Earnings Forecast Events from GitHub Cache
         uses: actions/cache/restore@v4
         id: restore-event-cache
@@ -200,7 +257,6 @@ jobs:
           restore-keys: |
             event-forecast-cache-
 
-      # 🛡️ 物理防误杀：改用系统物理文件判定。如果检测到磁盘上已经有恢复出来的文件，直接放行，绝不重写覆盖
       - name: 🛡️ Fallback if No Cache Exists
         run: |
           if [ ! -f output/event_earnings_forecast.parquet ]; then
