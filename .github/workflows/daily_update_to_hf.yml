@@ -140,14 +140,13 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      - name: 📈 Fetch Daily Incremental Index Data (Xueqiu Paginated + Sina)
+      - name: 📈 Fetch Incremental Index Data (Triple Engine)
+        env:
+          # 🔑 注入雪球 Token，彻底解决 Azure IP 被拦截问题
+          XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }}
         run: |
           python -c '
-          import os
-          import sys
-          import requests
-          import pandas as pd
-          import time
+          import os, sys, requests, pandas as pd, time
           from datetime import datetime
           
           INDEX_LIST = {
@@ -162,69 +161,79 @@ jobs:
               "sz.399998": "中证有色", "sz.399974": "国证国企"
           }
           
-          # 1. 建立带有 Cookie 的全局雪球会话，完美绕过屏蔽
+          # === 引擎配置 ===
           XQ_SESSION = requests.Session()
-          XQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-          for _ in range(3):
-              try:
-                  XQ_SESSION.get("https://xueqiu.com/", timeout=5)
-                  break
-              except:
-                  time.sleep(1)
-                  
-          def fetch_xueqiu_paginated(code):
-              # 雪球分页拉取，完美提取上市以来的所有数据
+          XQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+          xq_token = os.environ.get("XQ_A_TOKEN", "")
+          if xq_token:
+              XQ_SESSION.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
+          else:
+              for _ in range(3):
+                  try:
+                      XQ_SESSION.get("https://xueqiu.com/", timeout=5)
+                      break
+                  except:
+                      time.sleep(1)
+                      
+          def fetch_xueqiu(code):
               symbol = code.replace(".", "").upper()
               all_bars = []
               current_ts = int(time.time() * 1000)
-              
               while True:
                   url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={current_ts}&period=day&type=before&count=-2000&indicator=kline"
-                  res = XQ_SESSION.get(url, timeout=10).json()
-                  
-                  if not res or not res.get("data") or not res["data"].get("item"):
-                      break
-                      
-                  items = res["data"]["item"]
-                  if not items:
-                      break
-                      
-                  chunk_bars = []
+                  res = XQ_SESSION.get(url, timeout=10)
+                  res.raise_for_status()
+                  data = res.json()
+                  if not data or not data.get("data") or not data["data"].get("item"): break
+                  items = data["data"]["item"]
+                  if not items: break
+                  chunk = []
                   for item in items:
                       dt = datetime.fromtimestamp(item[0]/1000).strftime("%Y-%m-%d")
-                      chunk_bars.append({
-                          "date": dt, "code": code,
-                          "open": float(item[2]), "high": float(item[3]),
+                      chunk.append({
+                          "date": dt, "code": code, "open": float(item[2]), "high": float(item[3]),
                           "low": float(item[4]), "close": float(item[5]),
                           "volume": float(item[1]), "amount": float(item[9] or 0.0)
                       })
-                  
-                  all_bars = chunk_bars + all_bars
-                  oldest_ts = items[0][0]
-                  current_ts = oldest_ts - 1
-                  
-                  if len(items) < 2000:
-                      break
+                  all_bars = chunk + all_bars
+                  current_ts = items[0][0] - 1
+                  if len(items) < 2000: break
                   time.sleep(0.3)
-                  
+              if not all_bars: raise ValueError("Xueqiu returned empty data")
               return all_bars
-          
+              
+          def fetch_tencent(code):
+              symbol = code.replace(".", "")
+              url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={symbol},day,,,2000,qfq"
+              res = requests.get(url, headers={"Referer": "https://gu.qq.com/"}, timeout=10)
+              res.raise_for_status()
+              data = res.json()
+              if not data or not data.get("data") or not data["data"].get(symbol): raise ValueError("Tencent returned empty")
+              days = data["data"][symbol].get("day", [])
+              if not days: raise ValueError("Tencent no day data")
+              bars = []
+              for k in days:
+                  bars.append({
+                      "date": k[0], "code": code, "open": float(k[1]), "close": float(k[2]),
+                      "high": float(k[3]), "low": float(k[4]), "volume": float(k[5])*100 if len(k)>5 else 0.0, "amount": 0.0
+                  })
+              return bars
+              
           def fetch_sina(code):
               sina_code = code.replace(".", "")
               url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=1023"
-              res = requests.get(url, timeout=15)
+              res = requests.get(url, timeout=10)
               res.raise_for_status()
               data = res.json()
-              if not data:
-                  raise ValueError("Empty response")
-              records = []
+              if not data: raise ValueError("Sina returned empty")
+              bars = []
               for item in data:
-                  records.append({
+                  bars.append({
                       "date": item["day"][:10], "code": code, "open": float(item["open"]),
                       "high": float(item["high"]), "low": float(item["low"]), "close": float(item["close"]),
                       "volume": float(item["volume"]), "amount": float(item["volume"]) * float(item["close"])
                   })
-              return records
+              return bars
           
           all_rows = []
           success_count = 0
@@ -235,21 +244,24 @@ jobs:
               engine_used = ""
               
               try:
-                  bars = fetch_xueqiu_paginated(code_str)
-                  engine_used = "Xueqiu HTTP (Paginated Full History)"
+                  bars = fetch_xueqiu(code_str)
+                  engine_used = "Xueqiu (Token Auth)"
               except Exception as e_xq:
                   try:
-                      bars = fetch_sina(code_str)
-                      engine_used = "Sina HTTP Fallback (Max 1023)"
-                  except Exception as e_sina:
-                      pass
-                      
+                      bars = fetch_tencent(code_str)
+                      engine_used = "Tencent (Fallback)"
+                  except Exception as e_tc:
+                      try:
+                          bars = fetch_sina(code_str)
+                          engine_used = "Sina (Fallback)"
+                      except Exception as e_sn:
+                          print(f" ❌ All failed! XQ: {e_xq} | TC: {e_tc} | Sina: {e_sn}")
+                          continue
+                          
               if bars:
                   all_rows.extend(bars)
                   success_count += 1
                   print(f" ✅ Success ({engine_used}, {len(bars)} rows)")
-              else:
-                  print(" ❌ Failed.")
                   
           print(f"\n📋 INDEX DOWNLOAD SUMMARY: {success_count} / {len(INDEX_LIST)} SUCCESS")
           
@@ -268,10 +280,8 @@ jobs:
           df["pctChg"] = df.groupby("code")["close"].pct_change() * 100
           df["pctChg"] = df["pctChg"].fillna(0.0)
           
-          for col in ["open", "high", "low", "close", "pctChg"]: 
-              df[col] = df[col].astype("float32")
-          for col in ["volume", "amount"]: 
-              df[col] = df[col].astype("float64")
+          for col in ["open", "high", "low", "close", "pctChg"]: df[col] = df[col].astype("float32")
+          for col in ["volume", "amount"]: df[col] = df[col].astype("float64")
               
           os.makedirs("temp_parts", exist_ok=True)
           out_path = "temp_parts/index_kline_all.parquet"
