@@ -129,7 +129,7 @@ jobs:
       - name: Install Runtime Dependencies
         run: |
           pip install -r requirements.txt
-          pip install polars pytdx pandas pyarrow requests baostock
+          pip install polars pytdx pandas pyarrow baostock
 
       - name: Download Latest Healed Sectors
         env:
@@ -140,13 +140,10 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      - name: 📈 Fetch Full Historical Index Data (BaoStock Primary)
-        env:
-          XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }}
+      - name: 📈 Fetch Full Historical Index Data (BaoStock Pure)
         run: |
           python -c '
-          import os, sys, requests, pandas as pd, time
-          from datetime import datetime
+          import os, sys, pandas as pd, time
           import baostock as bs
           
           INDEX_LIST = {
@@ -161,101 +158,39 @@ jobs:
               "sz.399998": "中证有色", "sz.399974": "国证国企"
           }
           
-          # === 引擎 1: BaoStock (量化专用，无封锁全历史) ===
           bs.login()
           
-          def fetch_baostock(code):
-              rs = bs.query_history_k_data_plus(code, "date,code,open,high,low,close,volume,amount", start_date="1990-01-01", frequency="d")
-              if rs.error_code != "0": raise ValueError(f"BS Error: {rs.error_msg}")
-              data_list = []
-              while (rs.error_code == "0") & rs.next():
-                  data_list.append(rs.get_row_data())
-              if not data_list: raise ValueError("BS returned empty")
-              
-              df = pd.DataFrame(data_list, columns=rs.fields)
-              for col in ["open", "high", "low", "close", "volume", "amount"]:
-                  df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
-              return df.to_dict("records")
-              
-          # === 引擎 2: Xueqiu 分页 (备用) ===
-          XQ_SESSION = requests.Session()
-          XQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-          if os.environ.get("XQ_A_TOKEN"):
-              XQ_SESSION.cookies.set("xq_a_token", os.environ.get("XQ_A_TOKEN"), domain=".xueqiu.com")
-          else:
-              try: XQ_SESSION.get("https://xueqiu.com/", timeout=5)
-              except: pass
-              
-          def fetch_xueqiu(code):
-              symbol = code.replace(".", "").upper()
-              all_bars = []
-              current_ts = int(time.time() * 1000)
-              while True:
-                  url = f"https://stock.xueqiu.com/v5/stock/chart/kline.json?symbol={symbol}&begin={current_ts}&period=day&type=before&count=-2000&indicator=kline"
-                  res = XQ_SESSION.get(url, timeout=10)
-                  res.raise_for_status()
-                  data = res.json()
-                  if not data or not data.get("data") or not data["data"].get("item"): break
-                  items = data["data"]["item"]
-                  if not items: break
-                  chunk = []
-                  for item in items:
-                      dt = datetime.fromtimestamp(item[0]/1000).strftime("%Y-%m-%d")
-                      chunk.append({
-                          "date": dt, "code": code, "open": float(item[2]), "high": float(item[3]),
-                          "low": float(item[4]), "close": float(item[5]), "volume": float(item[1]), "amount": float(item[9] or 0.0)
-                      })
-                  all_bars = chunk + all_bars
-                  current_ts = items[0][0] - 1
-                  if len(items) < 2000: break
-                  time.sleep(0.3)
-              if not all_bars: raise ValueError("Xueqiu returned empty")
-              return all_bars
-              
-          # === 引擎 3: Sina (兜底) ===
-          def fetch_sina(code):
-              sina_code = code.replace(".", "")
-              url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=1023"
-              res = requests.get(url, timeout=10)
-              res.raise_for_status()
-              data = res.json()
-              if not data: raise ValueError("Sina returned empty")
-              bars = []
-              for item in data:
-                  bars.append({
-                      "date": item["day"][:10], "code": code, "open": float(item["open"]),
-                      "high": float(item["high"]), "low": float(item["low"]), "close": float(item["close"]),
-                      "volume": float(item["volume"]), "amount": float(item["volume"]) * float(item["close"])
-                  })
-              return bars
+          # === 纯净版 BaoStock 引擎 (自带 3 次指数退避重试) ===
+          def fetch_baostock(code, retries=3):
+              for attempt in range(retries):
+                  try:
+                      rs = bs.query_history_k_data_plus(code, "date,code,open,high,low,close,volume,amount", start_date="1990-01-01", frequency="d")
+                      if rs.error_code != "0": raise ValueError(f"BS Error: {rs.error_msg}")
+                      data_list = []
+                      while (rs.error_code == "0") & rs.next():
+                          data_list.append(rs.get_row_data())
+                      if not data_list: raise ValueError("BS returned empty")
+                      
+                      df = pd.DataFrame(data_list, columns=rs.fields)
+                      for col in ["open", "high", "low", "close", "volume", "amount"]:
+                          df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+                      return df.to_dict("records")
+                  except Exception as e:
+                      if attempt == retries - 1: raise e
+                      time.sleep(1 + attempt)  # 发生错误时阶梯式休眠等待 1秒, 2秒...
           
           all_rows = []
           success_count = 0
           
           for code_str, name in INDEX_LIST.items():
               print(f"📊 Pulling: {code_str} ({name}) ...", end="")
-              bars = []
-              engine_used = ""
-              
               try:
                   bars = fetch_baostock(code_str)
-                  engine_used = "BaoStock (Full History)"
-              except Exception as e_bs:
-                  try:
-                      bars = fetch_xueqiu(code_str)
-                      engine_used = "Xueqiu (Full History)"
-                  except Exception as e_xq:
-                      try:
-                          bars = fetch_sina(code_str)
-                          engine_used = "Sina (Fallback 1023)"
-                      except Exception as e_sn:
-                          print(f" ❌ All failed!")
-                          continue
-                          
-              if bars:
                   all_rows.extend(bars)
                   success_count += 1
-                  print(f" ✅ Success ({engine_used}, {len(bars)} rows)")
+                  print(f" ✅ Success (BaoStock, {len(bars)} rows)")
+              except Exception as e_bs:
+                  print(f" ❌ Failed! Error: {e_bs}")
                   
           bs.logout()
           print(f"\n📋 INDEX DOWNLOAD SUMMARY: {success_count} / {len(INDEX_LIST)} SUCCESS")
