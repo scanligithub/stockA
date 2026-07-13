@@ -140,7 +140,7 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      - name: 📈 Fetch Daily Incremental Index Data (Sina + Yahoo Hybrid)
+      - name: 📈 Fetch Full Historical Index Data (Yahoo Primary + Sina Backup)
         run: |
           python -c '
           import os
@@ -161,29 +161,13 @@ jobs:
               "sz.399998": "中证有色", "sz.399974": "国证国企"
           }
           
-          def fetch_sina(code):
-              sina_code = code.replace(".", "")
-              url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=1000"
-              res = requests.get(url, timeout=15)
-              res.raise_for_status()
-              data = res.json()
-              if not data:
-                  raise ValueError("Empty response")
-              records = []
-              for item in data:
-                  records.append({
-                      "date": item["day"][:10], "code": code, "open": float(item["open"]),
-                      "high": float(item["high"]), "low": float(item["low"]), "close": float(item["close"]),
-                      "volume": float(item["volume"]), "amount": float(item["volume"]) * float(item["close"])
-                  })
-              return records
-          
           def fetch_yahoo(code):
+              # 每日更新工作流也采用 range=max，实现全量覆盖写入
               parts = code.split(".")
               suffix = "SS" if parts[0] == "sh" else ("SZ" if parts[0] == "sz" else "BJ")
               yahoo_code = f"{parts[1]}.{suffix}"
               
-              url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_code}?range=2y&interval=1d"
+              url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_code}?range=max&interval=1d"
               headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
               res = requests.get(url, headers=headers, timeout=15)
               res.raise_for_status()
@@ -213,6 +197,24 @@ jobs:
                   })
               return records
           
+          def fetch_sina(code):
+              # 新浪财经备用接口，最多获取物理极限 1023 条记录
+              sina_code = code.replace(".", "")
+              url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=10000"
+              res = requests.get(url, timeout=15)
+              res.raise_for_status()
+              data = res.json()
+              if not data:
+                  raise ValueError("Empty response")
+              records = []
+              for item in data:
+                  records.append({
+                      "date": item["day"][:10], "code": code, "open": float(item["open"]),
+                      "high": float(item["high"]), "low": float(item["low"]), "close": float(item["close"]),
+                      "volume": float(item["volume"]), "amount": float(item["volume"]) * float(item["close"])
+                  })
+              return records
+          
           all_rows = []
           success_count = 0
           
@@ -221,14 +223,15 @@ jobs:
               bars = []
               engine_used = ""
               
+              # 每日更新亦采用：雅虎主用（全历史不截断），新浪备用兜底
               try:
-                  bars = fetch_sina(code_str)
-                  engine_used = "Sina HTTP"
-              except Exception as e_sina:
+                  bars = fetch_yahoo(code_str)
+                  engine_used = "Yahoo HTTP (Full History)"
+              except Exception as e_yahoo:
                   try:
-                      bars = fetch_yahoo(code_str)
-                      engine_used = "Yahoo HTTP Fallback"
-                  except Exception as e_yahoo:
+                      bars = fetch_sina(code_str)
+                      engine_used = "Sina HTTP Fallback (Max 1000)"
+                  except Exception as e_sina:
                       pass
                       
               if bars:
@@ -243,7 +246,6 @@ jobs:
           if not all_rows:
               sys.exit(1)
               
-          # 保留您原 fetch_index.py 中的清洗、排序、降噪和格式化逻辑
           df = pd.DataFrame(all_rows)
           df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
           df = df.dropna(subset=["date_dt"])
