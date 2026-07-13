@@ -140,66 +140,99 @@ jobs:
       - name: Transform JSON to Clean Parquet
         run: python scripts/import_healed_sectors.py
 
-      - name: 📈 Fetch Daily Incremental Index Data (HTTP API Fallback)
+      - name: 📈 Fetch Daily Incremental Index Data (Sina + Yahoo Hybrid)
         run: |
           python -c '
           import os
           import requests
           import pandas as pd
+          from datetime import datetime
           
-          # 创建输出目录
           os.makedirs("temp_parts", exist_ok=True)
           
-          # 定义需要拉取的指数及其对应的东财secid
-          indexes = {
-              "sh.000001": "1.000001",  # 上证指数
-              "sz.399001": "0.399001",  # 深证成指
-              "sz.399006": "0.399006",  # 创业板指
-              "sh.000068": "1.000068",  # 科创50
-              "bj.899050": "0.899050",  # 北证50
-              "sh.000016": "1.000016",  # 上证50
-              "sh.000300": "1.000300"   # 沪深300
-          }
+          symbols = ["sh.000001", "sz.399001", "sz.399006", "sh.000068", "bj.899050", "sh.000016", "sh.000300"]
           
-          headers = {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-          }
+          def fetch_sina(code):
+              # 新浪代码格式: sh000001, sz399001
+              sina_code = code.replace(".", "")
+              url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=1000"
+              res = requests.get(url, timeout=15)
+              res.raise_for_status()
+              data = res.json()
+              if not data:
+                  raise ValueError("No data returned")
+              records = []
+              for item in data:
+                  records.append({
+                      "date": item["day"][:10],
+                      "code": code,
+                      "open": float(item["open"]),
+                      "close": float(item["close"]),
+                      "high": float(item["high"]),
+                      "low": float(item["low"]),
+                      "volume": float(item["volume"]),
+                      "amount": float(item["volume"]) * float(item["close"])  # 近似估算成交额
+                  })
+              return pd.DataFrame(records)
           
-          for code, secid in indexes.items():
-              try:
-                  print(f"Pulling {code} via Eastmoney HTTP API...")
-                  # 获取日K线数据，限制获取最近 1000 条以实现增量/历史覆盖
-                  url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={secid}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20500101&lmt=1000"
-                  res = requests.get(url, headers=headers, timeout=15)
-                  res.raise_for_status()
-                  
-                  data = res.json()
-                  klines = data.get("data", {}).get("klines", [])
-                  if not klines:
-                      print(f"⚠️ {code} 未返回有效数据")
+          def fetch_yahoo(code):
+              # 雅虎代码格式: sh.000001 -> 000001.SS, sz.399001 -> 399001.SZ, bj.899050 -> 899050.BJ
+              parts = code.split(".")
+              suffix = "SS" if parts[0] == "sh" else ("SZ" if parts[0] == "sz" else "BJ")
+              yahoo_code = f"{parts[1]}.{suffix}"
+              
+              url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_code}?range=2y&interval=1d"
+              headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+              res = requests.get(url, headers=headers, timeout=15)
+              res.raise_for_status()
+              
+              chart_data = res.json().get("chart", {}).get("result", [None])[0]
+              if not chart_data:
+                  raise ValueError("No chart result found")
+              
+              timestamps = chart_data.get("timestamp", [])
+              indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
+              
+              opens = indicators.get("open", [])
+              closes = indicators.get("close", [])
+              highs = indicators.get("high", [])
+              lows = indicators.get("low", [])
+              volumes = indicators.get("volume", [])
+              
+              records = []
+              for i in range(len(timestamps)):
+                  if opens[i] is None or closes[i] is None:
                       continue
-                      
-                  records = []
-                  for kl in klines:
-                      p = kl.split(",")
-                      # 对应东财返回字段: 日期,开盘,收盘,最高,最低,成交量(手),成交额
-                      records.append({
-                          "date": p[0],
-                          "code": code,
-                          "open": float(p[1]),
-                          "close": float(p[2]),
-                          "high": float(p[3]),
-                          "low": float(p[4]),
-                          "volume": float(p[5]),
-                          "amount": float(p[6])
-                      })
-                      
-                  df = pd.DataFrame(records)
+                  date_str = datetime.fromtimestamp(timestamps[i]).strftime("%Y-%m-%d")
+                  records.append({
+                      "date": date_str,
+                      "code": code,
+                      "open": float(opens[i]),
+                      "close": float(closes[i]),
+                      "high": float(highs[i]),
+                      "low": float(lows[i]),
+                      "volume": float(volumes[i] or 0),
+                      "amount": float(volumes[i] or 0) * float(closes[i])
+                  })
+              return pd.DataFrame(records)
+          
+          for code in symbols:
+              df = None
+              try:
+                  print(f"Pulling {code} via Sina Finance...")
+                  df = fetch_sina(code)
+                  print(f"✅ Successfully fetched {code} from Sina Finance ({len(df)} rows)")
+              except Exception as e:
+                  print(f"⚠️ Sina failed for {code}: {e}. Retrying with Yahoo Finance...")
+                  try:
+                      df = fetch_yahoo(code)
+                      print(f"✅ Successfully fetched {code} from Yahoo Finance ({len(df)} rows)")
+                  except Exception as ey:
+                      print(f"❌ Both Sina and Yahoo failed for {code}: {ey}")
+              
+              if df is not None and not df.empty:
                   output_path = f"temp_parts/index_{code}.parquet"
                   df.to_parquet(output_path, index=False)
-                  print(f"✅ Successfully saved {code} ({len(df)} rows) -> {output_path}")
-              except Exception as e:
-                  print(f"❌ Failed to fetch {code}: {str(e)}")
           '
 
       - name: Upload Sector Parquet
