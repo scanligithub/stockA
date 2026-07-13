@@ -142,43 +142,47 @@ jobs:
         run: |
           python -c '
           import os
+          import sys
           import requests
           import pandas as pd
           from datetime import datetime
           
-          os.makedirs("temp_parts", exist_ok=True)
-          
-          symbols = ["sh.000001", "sz.399001", "sz.399006", "sh.000068", "bj.899050", "sh.000016", "sh.000300"]
+          INDEX_LIST = {
+              "sh.000001": "上证指数", "sz.399001": "深证成指", "sz.399006": "创业板指", "sh.000688": "科创50", "bj.899050": "北证50",
+              "sh.000016": "上证50", "sh.000300": "沪深300", "sh.000905": "中证500", "sh.000852": "中证1000", "sh.000851": "中证2000",
+              "sz.399303": "国证2000", "sz.399330": "深证100", "sh.000090": "上证180", "sz.399324": "深证红利", "sh.000015": "红利指数", 
+              "sh.000827": "中证中盘", "sz.399317": "国证1000", "sz.399807": "中证人工智能", "sz.399812": "国证芯片", 
+              "sz.399354": "国证人工智能", "sz.399673": "创业板50", "sz.399285": "国证新能源", "sz.399008": "中小100", 
+              "sz.399993": "中证信息安全", "sz.399975": "证券公司", "sz.399986": "中证银行", "sz.399932": "中证消费", 
+              "sz.399933": "中证医药", "sz.399967": "中证军工", "sz.399989": "中证医疗", "sz.399971": "中证传媒", 
+              "sz.399997": "中证白酒", "sh.000934": "中证能源", "sh.000935": "中证原材料", "sz.399990": "煤炭等权", 
+              "sz.399998": "中证有色", "sz.399974": "国证国企"
+          }
           
           def fetch_sina(code):
-              # 新浪历史 K 线接口 (对于全历史获取，我们将 datalen 设置为 10000)
               sina_code = code.replace(".", "")
+              # 历史全量获取时，Sina 数据长度设为 10000 (约 40 年)
               url = f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_MarketData.getKLineData?symbol={sina_code}&scale=240&ma=no&datalen=10000"
               res = requests.get(url, timeout=15)
               res.raise_for_status()
               data = res.json()
               if not data:
-                  raise ValueError("No data returned")
+                  raise ValueError("Empty response")
               records = []
               for item in data:
                   records.append({
-                      "date": item["day"][:10],
-                      "code": code,
-                      "open": float(item["open"]),
-                      "close": float(item["close"]),
-                      "high": float(item["high"]),
-                      "low": float(item["low"]),
-                      "volume": float(item["volume"]),
-                      "amount": float(item["volume"]) * float(item["close"])  # 近似估算成交额
+                      "date": item["day"][:10], "code": code, "open": float(item["open"]),
+                      "high": float(item["high"]), "low": float(item["low"]), "close": float(item["close"]),
+                      "volume": float(item["volume"]), "amount": float(item["volume"]) * float(item["close"])
                   })
-              return pd.DataFrame(records)
+              return records
           
           def fetch_yahoo(code):
-              # 雅虎历史 K 线接口 (全历史设置为 20y，即 20 年历史)
               parts = code.split(".")
               suffix = "SS" if parts[0] == "sh" else ("SZ" if parts[0] == "sz" else "BJ")
               yahoo_code = f"{parts[1]}.{suffix}"
               
+              # 历史全量获取时，Yahoo 数据范围设为 20 年 (20y)
               url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_code}?range=20y&interval=1d"
               headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
               res = requests.get(url, headers=headers, timeout=15)
@@ -186,7 +190,7 @@ jobs:
               
               chart_data = res.json().get("chart", {}).get("result", [None])[0]
               if not chart_data:
-                  raise ValueError("No chart result found")
+                  raise ValueError("No result in response")
               
               timestamps = chart_data.get("timestamp", [])
               indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
@@ -203,34 +207,64 @@ jobs:
                       continue
                   date_str = datetime.fromtimestamp(timestamps[i]).strftime("%Y-%m-%d")
                   records.append({
-                      "date": date_str,
-                      "code": code,
-                      "open": float(opens[i]),
-                      "close": float(closes[i]),
-                      "high": float(highs[i]),
-                      "low": float(lows[i]),
-                      "volume": float(volumes[i] or 0),
-                      "amount": float(volumes[i] or 0) * float(closes[i])
+                      "date": date_str, "code": code, "open": float(opens[i]),
+                      "high": float(highs[i]), "low": float(lows[i]), "close": float(closes[i]),
+                      "volume": float(volumes[i] or 0), "amount": float(volumes[i] or 0) * float(closes[i])
                   })
-              return pd.DataFrame(records)
+              return records
           
-          for code in symbols:
-              df = None
-              try:
-                  print(f"Pulling {code} via Sina Finance...")
-                  df = fetch_sina(code)
-                  print(f"✅ Successfully fetched {code} from Sina Finance ({len(df)} rows)")
-              except Exception as e:
-                  print(f"⚠️ Sina failed for {code}: {e}. Retrying with Yahoo Finance...")
-                  try:
-                      df = fetch_yahoo(code)
-                      print(f"✅ Successfully fetched {code} from Yahoo Finance ({len(df)} rows)")
-                  except Exception as ey:
-                      print(f"❌ Both Sina and Yahoo failed for {code}: {ey}")
+          all_rows = []
+          success_count = 0
+          
+          for code_str, name in INDEX_LIST.items():
+              print(f"📊 Pulling: {code_str} ({name}) ...", end="")
+              bars = []
+              engine_used = ""
               
-              if df is not None and not df.empty:
-                  output_path = f"temp_parts/index_{code}.parquet"
-                  df.to_parquet(output_path, index=False)
+              try:
+                  bars = fetch_sina(code_str)
+                  engine_used = "Sina HTTP"
+              except Exception as e_sina:
+                  try:
+                      bars = fetch_yahoo(code_str)
+                      engine_used = "Yahoo HTTP Fallback"
+                  except Exception as e_yahoo:
+                      pass
+                      
+              if bars:
+                  all_rows.extend(bars)
+                  success_count += 1
+                  print(f" ✅ Success ({engine_used}, {len(bars)} rows)")
+              else:
+                  print(" ❌ Failed.")
+                  
+          print(f"\n📋 INDEX DOWNLOAD SUMMARY: {success_count} / {len(INDEX_LIST)} SUCCESS")
+          
+          if not all_rows:
+              sys.exit(1)
+              
+          # 保留您原 fetch_index.py 中的清洗、排序、降噪和格式化逻辑
+          df = pd.DataFrame(all_rows)
+          df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
+          df = df.dropna(subset=["date_dt"])
+          df["date"] = df["date_dt"].dt.strftime("%Y-%m-%d")
+          df = df.drop(columns=["date_dt"])
+          
+          df = df.drop_duplicates(subset=["date", "code"], keep="last")
+          df = df.sort_values(["code", "date"])
+          
+          df["pctChg"] = df.groupby("code")["close"].pct_change() * 100
+          df["pctChg"] = df["pctChg"].fillna(0.0)
+          
+          for col in ["open", "high", "low", "close", "pctChg"]: 
+              df[col] = df[col].astype("float32")
+          for col in ["volume", "amount"]: 
+              df[col] = df[col].astype("float64")
+              
+          os.makedirs("temp_parts", exist_ok=True)
+          out_path = "temp_parts/index_kline_all.parquet"
+          df.to_parquet(out_path, index=False)
+          print(f"🎉 物理落盘成功至 {out_path} ({len(df)} rows)!")
           '
 
       - name: Upload Sector Parquet
