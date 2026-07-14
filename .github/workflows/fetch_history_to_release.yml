@@ -15,11 +15,11 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -51,14 +51,14 @@ jobs:
           go mod init stockA || true
           go get github.com/injoyai/tdx
           go mod tidy
-          
+
       - id: set-matrix
         name: Build Engine & Generate Matrix
         run: |
           go build -o tdx_fetcher scripts/tdx_fetcher.go
           python scripts/prepare_matrix.py
           echo "matrix=$(cat stock_matrix.json)" >> $GITHUB_OUTPUT
-          
+
       - name: Upload Master Metadata (List & GBBQ)
         uses: actions/upload-artifact@v4
         with:
@@ -77,11 +77,11 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
-      
+
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-          
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -92,24 +92,24 @@ jobs:
         with:
           name: master-metadata
           path: .
-          
+
       - name: Install Python & Go Dependencies
         run: |
           pip install -r requirements.txt
           go mod init stockA || true
           go get github.com/injoyai/tdx
           go mod tidy
-          
+
       - name: Build TDX Go Engine
         run: go build -o tdx_fetcher scripts/tdx_fetcher.go
-      
+
       - name: Fetch Full History (Local gbbq_clean.csv + Sina Flow)
         run: |
           python scripts/fetch_worker.py \
             --index ${{ matrix.task.index }} \
             --codes '${{ toJson(matrix.task.codes) }}' \
             --year 9999
-            
+
       - uses: actions/upload-artifact@v4
         with:
           name: history-part-${{ matrix.task.index }}
@@ -125,12 +125,6 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
-      - name: Install Playwright
-        run: |
-          pip install playwright
-          playwright install chromium
-
-      # ===== 新增：Go 引擎编译 =====
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
@@ -141,12 +135,14 @@ jobs:
           go get github.com/injoyai/tdx
           go mod tidy
           go build -o tdx_fetcher scripts/tdx_fetcher.go
-      # ===== 新增结束 =====
-          
+
       - name: Install Runtime Dependencies
         run: |
           pip install -r requirements.txt
           pip install polars pytdx
+
+      - name: Install Playwright
+        run: playwright install chromium
 
       - name: Download Latest Healed Sectors
         env:
@@ -175,11 +171,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      
+
       - name: Install Finalize Dependencies
         run: |
           pip install -r requirements.txt
           pip install polars baostock
+
+      - name: Install Playwright
+        run: playwright install chromium
+
+      - name: Restore XQ Token Cache
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/xq_token.json
+          key: xq-token-cache-${{ github.run_id }}
+          restore-keys: |
+            xq-token-cache-
 
       - name: Download Master List (For DuckDB Metadata)
         uses: actions/download-artifact@v4
@@ -193,18 +200,23 @@ jobs:
           pattern: '*-part*'
           merge-multiple: true
           path: all_artifacts
-          
+
       - name: 🌐 Download All Stocks 37-Column F10 Financial Data
         run: |
           python scripts/fetch_f10_all.py
           ls -lh output/all_stocks_f10_raw.parquet
 
       - name: ❄️ Fetch All Stocks Full Historical Main Operating Business Detail
-        env:
-          XQ_A_TOKEN: ${{ secrets.XQ_A_TOKEN }}
         run: |
           python scripts/fetch_f10_mainbus.py
           ls -lh output/all_stocks_mainbus_raw.parquet
+
+      - name: Save XQ Token Cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: cache/xq_token.json
+          key: xq-token-cache-${{ github.run_id }}
 
       - name: 💾 Restore Earnings Forecast Events from GitHub Cache
         uses: actions/cache/restore@v4
@@ -235,14 +247,14 @@ jobs:
       - name: Merge & Split by Year
         run: |
           python scripts/merge_and_push.py --mode release --year 9999
-          
+
       - name: Upload to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" --clobber || true
           gh release upload archive output/*.parquet --clobber
-          
+
       - name: Publish Consolidated Summaries to Workflow Page
         if: always()
         run: |
