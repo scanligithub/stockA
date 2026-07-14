@@ -43,33 +43,54 @@ def save_token_to_cache(token):
     print(f"💾 Token 已保存到缓存: {CACHE_TOKEN_PATH}")
 
 
-def get_anonymous_token():
-    """通过 Playwright 无头浏览器访问雪球首页，自动获取匿名 xq_a_token"""
+def _fetch_token_once(user_agent):
+    """单次 Playwright 获取 token"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("⚠️ playwright 未安装")
+        return None
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=user_agent)
+        page = context.new_page()
+        try:
+            page.goto("https://xueqiu.com", wait_until="networkidle", timeout=20000)
+            cookies = context.cookies()
+            return next((c["value"] for c in cookies if c["name"] == "xq_a_token"), None)
+        except Exception as e:
+            print(f"   ❌ 错误: {e}")
+            return None
+        finally:
+            browser.close()
+
+
+def get_anonymous_token(max_retries=3):
+    """Playwright 获取 token，带重试和随机 User-Agent"""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("⚠️ playwright 未安装，跳过自动获取 Token")
         return None
 
-    print("🌐 启动无头浏览器获取雪球 Token...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=HEADERS["User-Agent"])
-        page = context.new_page()
-        try:
-            page.goto("https://xueqiu.com", wait_until="networkidle", timeout=20000)
-            cookies = context.cookies()
-            token = next((c["value"] for c in cookies if c["name"] == "xq_a_token"), None)
-            if token:
-                print(f"✅ 浏览器获取 Token 成功: {token[:16]}...")
-            else:
-                print("❌ 浏览器未返回 xq_a_token")
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+    ]
+
+    for attempt in range(max_retries):
+        ua = user_agents[attempt % len(user_agents)]
+        print(f"🌐 Playwright 尝试 {attempt+1}/{max_retries}...")
+        token = _fetch_token_once(ua)
+        if token:
+            print(f"✅ 浏览器获取 Token 成功: {token[:16]}...")
             return token
-        except Exception as e:
-            print(f"❌ 浏览器获取 Token 失败: {e}")
-            return None
-        finally:
-            browser.close()
+        if attempt < max_retries - 1:
+            time.sleep(2)
+
+    return None
 
 
 def validate_token(session):
@@ -133,42 +154,33 @@ def main():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # Token 获取优先级：Secret 环境变量 > 缓存文件 > Playwright 自动获取
-    xq_token = os.getenv("XQ_A_TOKEN", "").strip()
+    # Token 获取逻辑：Playwright 优先，缓存 fallback
+    xq_token = None
+
+    # 优先级 1：Playwright 获取最新 token
+    print("🔑 [策略] Playwright 优先获取最新 Token...")
+    xq_token = get_anonymous_token(max_retries=3)
+    if xq_token:
+        save_token_to_cache(xq_token)
+
+    # 优先级 2：缓存 fallback（上次运行的 token，几小时内有效）
+    if not xq_token:
+        print("🔑 [策略] Playwright 失败，尝试缓存 Token...")
+        xq_token = load_cached_token()
 
     if xq_token:
-        print("🔑 检测到 XQ_A_TOKEN 环境变量，正在注入 Session...")
         session.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
     else:
-        xq_token = load_cached_token()
-        if xq_token:
-            print("🔑 使用缓存 Token...")
-            session.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
+        print("❌ 无法获取雪球 Token，任务终止")
+        print("   请安装 playwright: pip install playwright && playwright install chromium")
+        sys.exit(1)
 
-    # 验证 token 有效性
-    if xq_token:
-        print("🔍 预检 Token 有效性...")
-        if validate_token(session):
-            print("✅ Token 预检通过")
-        else:
-            print("⚠️ Token 已失效，尝试 Playwright 获取新 Token...")
-            xq_token = None
-
-    if not xq_token:
-        xq_token = get_anonymous_token()
-        if xq_token:
-            session.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
-            print("🔍 验证新 Token...")
-            if validate_token(session):
-                save_token_to_cache(xq_token)
-                print("✅ 新 Token 验证通过")
-            else:
-                print("❌ 新 Token 验证失败，任务终止")
-                sys.exit(1)
-        else:
-            print("❌ 无法获取雪球 Token，任务终止")
-            print("   请安装 playwright: pip install playwright && playwright install chromium")
-            sys.exit(1)
+    # Token 预检
+    print("🔍 预检 Token 有效性...")
+    if not validate_token(session):
+        print("❌ Token 无效，任务终止")
+        sys.exit(1)
+    print("✅ Token 预检通过")
 
     master_json_path = "stock_list_master.json"
     if not os.path.exists(master_json_path):
