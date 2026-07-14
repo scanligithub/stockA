@@ -35,26 +35,26 @@ type EquityEventOrdered struct {
 }
 
 func main() {
-	modeFlag := flag.String("mode", "fetch", "Mode: 'list' (fetch master list) or 'fetch' (download klines)")
-	codesFlag := flag.String("codes", "", "Comma separated stock codes")
+	modeFlag := flag.String("mode", "fetch", "Mode: 'list', 'fetch', or 'index'")
+	codesFlag := flag.String("codes", "", "Comma separated stock/index codes")
 	gbbqPath := flag.String("gbbq", "gbbq_clean.csv", "Local clean GBBQ CSV file path")
 	outFlag := flag.String("out", "temp_kline.csv", "Output CSV path")
 	flag.Parse()
 
-	if *modeFlag == "list" {
+	switch *modeFlag {
+	case "list":
 		runFetchList()
-		return
-	}
-
-	if *modeFlag == "fetch" {
+	case "fetch":
 		runFetchKlinesWithLocalCSV(*codesFlag, *gbbqPath, *outFlag)
-		return
+	case "index":
+		runFetchIndex(*codesFlag, *outFlag)
+	default:
+		fmt.Println("Unknown mode. Use: list, fetch, or index")
+		os.Exit(1)
 	}
-
-	fmt.Println("Unknown mode.")
 }
 
-// isIndex 🛡️ 高性能无冲突前缀匹配。满足上海000/930/931/932，深圳399，北京899特征的一律判定为指数
+// isIndex 判断是否为指数代码
 func isIndex(code string) bool {
 	return strings.HasPrefix(code, "sh000") || 
 		strings.HasPrefix(code, "sh9") || 
@@ -62,7 +62,7 @@ func isIndex(code string) bool {
 		strings.HasPrefix(code, "bj899")
 }
 
-// LoadGbbqCSV 🛡️ 严格按 PyTDX 标准 CSV 列索引和“万股”单位对齐读取 GBBQ
+// LoadGbbqCSV 加载 GBBQ 数据
 func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]EquityEventOrdered, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -132,6 +132,7 @@ func LoadGbbqCSV(filePath string) (map[string]map[int]GbbqEvent, map[string][]Eq
 	return gbbqMap, equityMap, nil
 }
 
+// runFetchList 获取股票列表
 func runFetchList() {
 	fmt.Println("[Go Engine] Mode: LIST - Fetching A-shares list...")
 	cli, err := tdx.DialDefault()
@@ -182,6 +183,7 @@ func runFetchList() {
 	fmt.Printf("[Go Engine] Master stock list resolved: %d stocks.\n", len(masterList))
 }
 
+// runFetchKlinesWithLocalCSV 获取个股K线（含复权、股本计算）
 func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 	if codesStr == "" {
 		return
@@ -250,7 +252,6 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 				adjustFactor := 1.0
 				var prevClose float64 = -1.0
 
-				// 股本初始化
 				var lastFloatShares float64 = 0.0
 				var lastTotalShares float64 = 0.0
 				if len(equities) > 0 {
@@ -275,7 +276,6 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 					var totalMV, floatMV, turn float64 = 0.0, 0.0, 0.0
 
 					if !isIdx {
-						// 🚀 A. [个股逻辑] 计算复权因子 adjustFactor
 						if ev, ok := events[dateInt]; ok && prevClose > 0 {
 							fh := ev.FenHong / 10.0
 							sg := ev.SongGu / 10.0
@@ -288,7 +288,6 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 							}
 						}
 
-						// 🚀 B. [个股逻辑] ASOF 时序非等值关联：对齐当日最新的股本快照
 						for _, eq := range equities {
 							if eq.Date <= dateInt {
 								lastFloatShares = eq.FloatShares
@@ -304,7 +303,6 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 							turn = (pVolume * 10000.0 / lastFloatShares)
 						}
 					} else {
-						// 📈 [指数逻辑] 免复权，指标安全置零
 						adjustFactor = 1.0
 						lastTotalShares = 0.0
 						lastFloatShares = 0.0
@@ -339,4 +337,102 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 	wg.Wait()
 	csvWriter.Flush()
 	fmt.Println("[Go Engine] Download completed.")
+}
+
+// runFetchIndex 获取指数K线（无复权、无股本计算）
+func runFetchIndex(codesStr, outPath string) {
+	if codesStr == "" {
+		fmt.Println("[Go Engine] No index codes provided.")
+		return
+	}
+
+	rawCodes := strings.Split(codesStr, ",")
+	var tdxCodes []string
+	codeMap := make(map[string]string)
+
+	for _, c := range rawCodes {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		// 支持 sh000001 和 sh.000001 两种格式
+		tdxCode := strings.ReplaceAll(c, ".", "")
+		tdxCodes = append(tdxCodes, tdxCode)
+		codeMap[tdxCode] = c
+	}
+
+	fmt.Printf("[Go Engine] Mode: INDEX - Fetching %d indices...\n", len(tdxCodes))
+
+	outFile, err := os.Create(outPath)
+	if err != nil {
+		panic(err)
+	}
+	defer outFile.Close()
+
+	csvWriter := csv.NewWriter(outFile)
+	// 指数输出简化列：不含股本、市值、换手率
+	csvWriter.Write([]string{
+		"code", "date", "open", "high", "low", "close", "volume", "amount",
+	})
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	jobChan := make(chan string, len(tdxCodes))
+	for _, c := range tdxCodes {
+		jobChan <- c
+	}
+	close(jobChan)
+
+	concurrency := 8
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			workerCli, err := tdx.DialDefault()
+			if err != nil {
+				return
+			}
+			defer workerCli.Close()
+
+			for tcode := range jobChan {
+				resp, err := workerCli.GetKlineDayAll(tcode)
+				if err != nil || resp == nil || len(resp.List) == 0 {
+					fmt.Printf("[Go Engine] Warning: Failed to fetch %s\n", tcode)
+					continue
+				}
+
+				var records [][]string
+
+				for _, bar := range resp.List {
+					dateStr := bar.Time.Format("2006-01-02")
+					pOpen := float64(bar.Open) / 1000.0
+					pHigh := float64(bar.High) / 1000.0
+					pLow := float64(bar.Low) / 1000.0
+					pClose := float64(bar.Close) / 1000.0
+					pVolume := float64(bar.Volume)
+					pAmount := float64(bar.Amount) / 1000.0
+
+					records = append(records, []string{
+						codeMap[tcode],
+						dateStr,
+						fmt.Sprintf("%.3f", pOpen),
+						fmt.Sprintf("%.3f", pHigh),
+						fmt.Sprintf("%.3f", pLow),
+						fmt.Sprintf("%.3f", pClose),
+						fmt.Sprintf("%.0f", pVolume),
+						fmt.Sprintf("%.3f", pAmount),
+					})
+				}
+
+				mu.Lock()
+				csvWriter.WriteAll(records)
+				mu.Unlock()
+			}
+		}()
+	}
+
+	wg.Wait()
+	csvWriter.Flush()
+	fmt.Printf("[Go Engine] Index download completed: %d codes.\n", len(tdxCodes))
 }
