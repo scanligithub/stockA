@@ -1,3 +1,4 @@
+# FILE: scripts/fetch_index.py
 import os
 import sys
 import pandas as pd
@@ -5,7 +6,7 @@ import requests
 import json
 import datetime
 import time
-from pytdx.hq import TdxHq_API
+import subprocess
 
 # 已剔除 19 只不稳定指数，保留 37 只高冗余稳健核心指数
 INDEX_LIST = {
@@ -20,15 +21,11 @@ INDEX_LIST = {
     "sz.399998": "中证有色", "sz.399974": "国证国企"
 }
 
-TDX_SERVERS = [
-    {"ip": "119.147.171.115", "port": 7709, "desc": "深圳招商"},
-    {"ip": "124.71.187.122", "port": 7709, "desc": "华为云节点"},
-    {"ip": "119.29.25.16", "port": 7709, "desc": "腾讯云节点"}
-]
-
-# 全局雪球 Session（增加 3 次容错握手）
+# 雪球 Session（保留作为可选 fallback）
 XQ_SESSION = requests.Session()
-XQ_SESSION.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"})
+XQ_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+})
 for _ in range(3):
     try:
         XQ_SESSION.get("https://xueqiu.com/", timeout=5)
@@ -36,33 +33,40 @@ for _ in range(3):
     except:
         time.sleep(1)
 
-# [Engine 1] TDX 
-def fetch_from_tdx(api, code_str, is_incremental=False):
-    prefix, pure_code = code_str.split('.')
-    market = 1 if prefix == "sh" else 0 if prefix == "sz" else 2
-    
-    aliases = [pure_code]
-    if pure_code.startswith("3999"): aliases.append("H309" + pure_code[4:])
-        
-    for alias in aliases:
-        all_bars = []
-        max_bars = 500 if is_incremental else 5600
-        step = 800
-        for start_idx in range(0, max_bars, step):
-            count = min(step, max_bars - start_idx)
-            try:
-                bars = api.get_index_bars(9, market, alias, start_idx, count)
-                if not bars: break
-                all_bars.extend(bars)
-                if len(bars) < count: break
-            except:
-                break
-        if all_bars:
-            return all_bars, "TDX"
-    return [], None
 
-# [Engine 2] Xueqiu (安全边界版：硬性截断单次上限至 2000 行，绝不触发 400 报错)
+def fetch_from_go_engine(codes_str, is_incremental=False):
+    """使用 Go 版 TDX 引擎获取指数K线"""
+    csv_out = "temp_index_kline.csv"
+    go_cmd = ["./tdx_fetcher", "-mode=index", f"-codes={codes_str}", f"-out={csv_out}"]
+    
+    try:
+        result = subprocess.run(go_cmd, check=True, capture_output=True, text=True, timeout=120)
+        if not os.path.exists(csv_out):
+            return [], None
+        
+        df = pd.read_csv(csv_out)
+        if df.empty:
+            return [], None
+        
+        bars = []
+        for _, row in df.iterrows():
+            bars.append({
+                "datetime": row["date"],
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "vol": float(row["volume"]),
+                "amount": float(row["amount"])
+            })
+        return bars, "🚀 Go-TDX"
+    except Exception as e:
+        print(f"⚠️ Go engine failed: {e}")
+        return [], None
+
+
 def fetch_from_xueqiu(code_str, is_incremental=False):
+    """雪球 API（可选 fallback）"""
     symbol = code_str.replace('.', '').upper()
     limit = 500 if is_incremental else 2000
     ts = int(time.time() * 1000)
@@ -84,8 +88,9 @@ def fetch_from_xueqiu(code_str, is_incremental=False):
         pass
     return [], None
 
-# [Engine 3] Tencent (安全边界版：硬性截断单次上限至 1000 行)
+
 def fetch_from_tencent(code_str, is_incremental=False):
+    """腾讯财经 API（可选 fallback）"""
     symbol = code_str.replace('.', '')
     limit = 500 if is_incremental else 1000
     url = f"https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newiqkline/get?param={symbol},day,,,{limit},qfq"
@@ -101,73 +106,67 @@ def fetch_from_tencent(code_str, is_incremental=False):
         pass
     return [], None
 
+
 def main():
     is_incremental = "--incremental" in sys.argv or "-i" in sys.argv
-    print(f"📥 Starting Tri-Core Sniper (三擎智能狙击) Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
+    print(f"📥 Starting Index Fetcher (Mode: {'Incremental' if is_incremental else 'Full History'})...")
     
-    api = TdxHq_API()
-    connected = False
-    for s in TDX_SERVERS:
-        try:
-            print(f"🔌 Trying to connect TDX Server: {s['desc']} ({s['ip']})...")
-            if api.connect(s['ip'], s['port']):
-                connected = True
-                print(f"✅ TDX Engine Online: {s['desc']}")
-                break
-        except:
-            continue
-
-    if not connected:
-        print("⚠️ TDX Engine offline. Using Web Engines fallback.")
-
+    # 构建指数代码字符串（逗号分隔，去除点号）
+    all_codes = list(INDEX_LIST.keys())
+    codes_str = ",".join([c.replace(".", "") for c in all_codes])
+    
     all_rows = []
     success_records = []
     failed_records = []
     
-    for code_str, name in INDEX_LIST.items():
-        print(f"📊 Pulling: {code_str} ({name}) ...", end="")
-        
-        bars, engine_used = [], None
-        
-        # 宽基与核心指数顺序：优先 TDX，其次腾讯，最后雪球兜底
-        engines_to_try = [
-            lambda c: fetch_from_tdx(api, c, is_incremental) if connected else ([], None),
-            lambda c: fetch_from_tencent(c, is_incremental),
-            lambda c: fetch_from_xueqiu(c, is_incremental)
-        ]
-
-        # 顺序探测
-        for func in engines_to_try:
-            bars, engine_used = func(code_str)
-            if bars: 
-                break
-
-        # 无脑兜底
-        if not bars:
-            bars, engine_used = fetch_from_xueqiu(code_str, is_incremental)
-
-        if not bars:
-            print(" ❌ Failed.")
-            failed_records.append(code_str)
-            continue
-            
-        print(f" ✅ Success ({engine_used}, {len(bars)} rows)")
-        success_records.append(code_str)
-        
+    # 主引擎：Go TDX
+    print("🔌 Primary Engine: Go-TDX")
+    bars, engine_used = fetch_from_go_engine(codes_str, is_incremental)
+    
+    if bars:
+        print(f"✅ Go-TDX Success: {len(bars)} rows")
         for b in bars:
+            # 需要反查 code，Go 输出的 CSV 包含 code 列
             all_rows.append({
-                "date": b['datetime'][:10], "code": code_str, "open": float(b['open']),
+                "date": b['datetime'][:10], "code": b.get('code', ''), "open": float(b['open']),
                 "high": float(b['high']), "low": float(b['low']), "close": float(b['close']),
                 "volume": float(b['vol']), "amount": float(b['amount']),
             })
-            
-    if connected: api.disconnect()
+        success_records = list(INDEX_LIST.keys())
+    else:
+        print("⚠️ Go-TDX failed, falling back to HTTP engines...")
         
-    print(f"\n📋 INDEX SNIPER DOWNLOAD SUMMARY: {len(success_records)} / {len(INDEX_LIST)} SUCCESS")
+        # Fallback：逐个指数尝试 HTTP 引擎
+        for code_str, name in INDEX_LIST.items():
+            print(f"📊 Pulling: {code_str} ({name}) ...", end="")
+            
+            bars, engine_used = [], None
+            for func in [fetch_from_xueqiu, fetch_from_tencent]:
+                bars, engine_used = func(code_str, is_incremental)
+                if bars:
+                    break
+            
+            if not bars:
+                print(" ❌ Failed.")
+                failed_records.append(code_str)
+                continue
+                
+            print(f" ✅ Success ({engine_used}, {len(bars)} rows)")
+            success_records.append(code_str)
+            
+            for b in bars:
+                all_rows.append({
+                    "date": b['datetime'][:10], "code": code_str, "open": float(b['open']),
+                    "high": float(b['high']), "low": float(b['low']), "close": float(b['close']),
+                    "volume": float(b['vol']), "amount": float(b['amount']),
+                })
+    
+    print(f"\n📋 INDEX DOWNLOAD SUMMARY: {len(success_records)} / {len(INDEX_LIST)} SUCCESS")
     if failed_records:
         print(f"❌ FAILED: {failed_records}")
         
     if not all_rows: 
+        print("❌ No data fetched. Exiting.")
         sys.exit(1)
         
     df = pd.DataFrame(all_rows)
@@ -188,7 +187,8 @@ def main():
     os.makedirs("temp_parts", exist_ok=True)
     out_path = "temp_parts/index_kline_all.parquet"
     df.to_parquet(out_path, index=False)
-    print(f"🎉 物理落盘成功至 {out_path}!")
+    print(f"🎉 Index data saved to {out_path}!")
+
 
 if __name__ == "__main__":
     main()
