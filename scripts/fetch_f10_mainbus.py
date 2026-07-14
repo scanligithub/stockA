@@ -16,6 +16,32 @@ HEADERS = {
     "Connection": "keep-alive"
 }
 
+CACHE_DIR = "cache"
+CACHE_TOKEN_PATH = os.path.join(CACHE_DIR, "xq_token.json")
+
+
+def load_cached_token():
+    """从缓存文件读取 token"""
+    if not os.path.exists(CACHE_TOKEN_PATH):
+        return None
+    try:
+        with open(CACHE_TOKEN_PATH, "r") as f:
+            data = json.load(f)
+        token = data.get("xq_a_token")
+        if token:
+            print(f"📦 从缓存读取 Token: {token[:16]}...")
+        return token
+    except Exception:
+        return None
+
+
+def save_token_to_cache(token):
+    """保存 token 到缓存文件"""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    with open(CACHE_TOKEN_PATH, "w") as f:
+        json.dump({"xq_a_token": token}, f)
+    print(f"💾 Token 已保存到缓存: {CACHE_TOKEN_PATH}")
+
 
 def get_anonymous_token():
     """通过 Playwright 无头浏览器访问雪球首页，自动获取匿名 xq_a_token"""
@@ -53,7 +79,7 @@ def validate_token(session):
         res = session.get(test_url, timeout=10)
         data = res.json()
         return data.get("error_code") == 0
-    except:
+    except Exception:
         return False
 
 
@@ -107,27 +133,42 @@ def main():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # Token 获取优先级：环境变量 > Playwright 自动获取
+    # Token 获取优先级：Secret 环境变量 > 缓存文件 > Playwright 自动获取
     xq_token = os.getenv("XQ_A_TOKEN", "").strip()
+
     if xq_token:
         print("🔑 检测到 XQ_A_TOKEN 环境变量，正在注入 Session...")
         session.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
     else:
-        print("🔑 未检测到 XQ_A_TOKEN 环境变量，尝试 Playwright 自动获取...")
+        xq_token = load_cached_token()
+        if xq_token:
+            print("🔑 使用缓存 Token...")
+            session.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
+
+    # 验证 token 有效性
+    if xq_token:
+        print("🔍 预检 Token 有效性...")
+        if validate_token(session):
+            print("✅ Token 预检通过")
+        else:
+            print("⚠️ Token 已失效，尝试 Playwright 获取新 Token...")
+            xq_token = None
+
+    if not xq_token:
         xq_token = get_anonymous_token()
         if xq_token:
             session.cookies.set("xq_a_token", xq_token, domain=".xueqiu.com")
+            print("🔍 验证新 Token...")
+            if validate_token(session):
+                save_token_to_cache(xq_token)
+                print("✅ 新 Token 验证通过")
+            else:
+                print("❌ 新 Token 验证失败，任务终止")
+                sys.exit(1)
         else:
-            print("❌ 无法获取雪球 Token，任务终止。")
-            print("   请设置环境变量 XQ_A_TOKEN 或安装 playwright: pip install playwright && playwright install chromium")
+            print("❌ 无法获取雪球 Token，任务终止")
+            print("   请安装 playwright: pip install playwright && playwright install chromium")
             sys.exit(1)
-
-    # Token 预检
-    print("🔍 预检 Token 有效性...")
-    if not validate_token(session):
-        print("❌ Token 无效或已过期，任务终止。")
-        sys.exit(1)
-    print("✅ Token 预检通过")
 
     master_json_path = "stock_list_master.json"
     if not os.path.exists(master_json_path):
@@ -224,9 +265,7 @@ def main():
         unique_stocks = df["code"].n_unique()
         min_rep, max_rep = df["report_date"].min(), df["report_date"].max()
 
-        # 统计行业分类 (Type 1) 与产品分类 (Type 2) 行数
         type_counts = df.group_by("item_type").agg(pl.len().alias("count"))
-
         type_1_cnt = 0
         type_2_cnt = 0
         for r in type_counts.iter_rows():
@@ -235,7 +274,6 @@ def main():
             elif r[0] == 2:
                 type_2_cnt = r[1]
 
-        # 过滤出产品级明细（item_type == 2），统计常见产品名
         df_product = df.filter(pl.col("item_type") == 2)
         top5_products = (
             df_product.group_by("item_name")
@@ -244,21 +282,17 @@ def main():
             .head(5)
         )
 
-        # 计算单只股票拥有的平均历史报告期数
         reports_per_stock = df.group_by("code").agg(pl.col("report_date").n_unique().alias("rep_cnt"))
         avg_reps = reports_per_stock["rep_cnt"].mean()
         max_reps = reports_per_stock["rep_cnt"].max()
         min_reps = reports_per_stock["rep_cnt"].min()
 
-        # 寻找历史跨度最长的 Top 5 股票
         top5_history = reports_per_stock.sort("rep_cnt", descending=True).head(5)
 
-        # 行业及板块中文名称对齐
         stock_name_map = {}
         for row in df.select(["code", "name"]).unique().iter_rows():
             stock_name_map[row[0]] = row[1]
 
-        # 编写 Markdown 审计总结
         md = [
             "# ❄️ A-Share 主营业务构成及产品占比深度审计报告",
             f"生成时间: `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n",
@@ -272,11 +306,11 @@ def main():
             "## 2. 覆盖跨度与时间线",
             f"- **历史报告期最远追溯:** `{min_rep}`",
             f"- **历史报告期最近更新:** `{max_rep}`",
-            f"- **平均单股历史报告期数:** `{avg_reps:.1f}` 个季度 (主要为半年报/年报切片)",
+            f"- **平均单股历史报告期数:** `{avg_reps:.1f}` 个季度",
             f"- **单股最长季度跨度:** `{max_reps}` 个报告期",
             f"- **单股最短季度跨度:** `{min_reps}` 个报告期\n",
             "## 3. 最常见 A 股主营产品明细 Top 5",
-            "| 排名 | 产品/业务明细名称 | 累计出现次数 | 占比 (占所有产品级行数) |",
+            "| 排名 | 产品/业务明细名称 | 累计出现次数 | 占比 |",
             "| :--- | :--- | :--- | :--- |",
         ]
 
