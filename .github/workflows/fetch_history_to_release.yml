@@ -125,6 +125,11 @@ jobs:
           python-version: "3.10"
           cache: 'pip'
 
+      - name: Install Playwright
+        run: |
+          pip install playwright
+          playwright install chromium
+
       # ===== 新增：Go 引擎编译 =====
       - uses: actions/setup-go@v5
         with:
