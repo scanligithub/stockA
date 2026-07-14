@@ -1,0 +1,25 @@
+name: Get Xueqiu Token
+
+on:
+  workflow_dispatch: # 允许手动触发
+  schedule:
+    - cron: '0 1 * * 1-5' # 示例：工作日定时运行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install chromium
+          
+      - name: Run script
+        run: python get_token_playwright.py
