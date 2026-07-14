@@ -126,6 +126,19 @@ jobs:
         with:
           python-version: "3.10"
           cache: 'pip'
+
+      # ===== 新增：Go 引擎编译 =====
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: Install Go Dependencies & Build Engine
+        run: |
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+          go build -o tdx_fetcher scripts/tdx_fetcher.go
+      # ===== 新增结束 =====
           
       - name: Install Runtime Dependencies
         run: |
@@ -190,7 +203,6 @@ jobs:
           python scripts/fetch_f10_mainbus.py
           ls -lh output/all_stocks_mainbus_raw.parquet
 
-      # 💾 恢复缓存中的业绩预告事件库（即使是模糊匹配成功也会先落盘）
       - name: 💾 Restore Earnings Forecast Events from GitHub Cache
         uses: actions/cache/restore@v4
         id: restore-event-cache
@@ -200,7 +212,6 @@ jobs:
           restore-keys: |
             event-forecast-cache-
 
-      # 🛡️ 物理防误杀：改用系统物理文件判定。如果检测到磁盘上已经有恢复出来的文件，直接放行，绝不重写覆盖
       - name: 🛡️ Fallback if No Cache Exists
         run: |
           if [ ! -f output/event_earnings_forecast.parquet ]; then
