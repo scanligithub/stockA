@@ -1,4 +1,3 @@
-// FILE: scripts/verify_transaction.go
 package main
 
 import (
@@ -13,6 +12,7 @@ import (
 	"github.com/injoyai/tdx"
 )
 
+// getRecentTradingDay 计算最近一个交易日 (格式 YYYYMMDD)
 func getRecentTradingDay() int {
 	now := time.Now()
 	if now.Weekday() == time.Saturday {
@@ -31,6 +31,7 @@ func getRecentTradingDay() int {
 	return val
 }
 
+// dumpTypeFields 递归自省并打印结构体或切片的字段定义
 func dumpTypeFields(t reflect.Type, indent string) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
@@ -48,6 +49,7 @@ func dumpTypeFields(t reflect.Type, indent string) {
 	fmt.Printf("%s结构体定义: %s {\n", indent, t.String())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
+		// 略过私有字段
 		if f.PkgPath != "" {
 			continue
 		}
@@ -57,6 +59,7 @@ func dumpTypeFields(t reflect.Type, indent string) {
 		}
 		fmt.Printf("%s  %-15s %-12s (json: %q)\n", indent, f.Name, f.Type.String(), jsonTag)
 		
+		// 对嵌套结构体（非原生基础类型且非 time.Time）进行二级展开
 		ft := f.Type
 		if ft.Kind() == reflect.Ptr {
 			ft = ft.Elem()
@@ -83,7 +86,10 @@ func main() {
 	val := reflect.ValueOf(cli)
 	typ := val.Type()
 
+	// 优先探查核心接口
 	targetMethods := []string{"GetTrade", "GetTradeAll"}
+	
+	// 扫描其他包含 "Trade" 的方法
 	for i := 0; i < typ.NumMethod(); i++ {
 		m := typ.Method(i)
 		nameLower := strings.ToLower(m.Name)
@@ -105,16 +111,31 @@ func main() {
 		mType := mVal.Type()
 		numIn := mType.NumIn()
 
+		// 统计当前方法的 string 参数个数
+		stringCount := 0
+		for idx := 0; idx < numIn; idx++ {
+			if mType.In(idx).Kind() == reflect.String {
+				stringCount++
+			}
+		}
+
 		args := make([]reflect.Value, numIn)
+		strIdx := 0
 		for i := 0; i < numIn; i++ {
 			argType := mType.In(i)
 			switch argType.Kind() {
 			case reflect.String:
-				if i == 1 {
-					args[i] = reflect.ValueOf(strconv.Itoa(tradingDay)) // 如果是第二个参数且为 string，通常代表日期
+				if stringCount >= 2 {
+					// 🚀 核心对齐：历史接口首个 string 绑定日期，第二个 string 绑定大写代码
+					if strIdx == 0 {
+						args[i] = reflect.ValueOf(strconv.Itoa(tradingDay))
+					} else {
+						args[i] = reflect.ValueOf("SZ000001")
+					}
 				} else {
-					args[i] = reflect.ValueOf("sz000001")
+					args[i] = reflect.ValueOf("SZ000001")
 				}
+				strIdx++
 			case reflect.Uint32:
 				args[i] = reflect.ValueOf(uint32(tradingDay))
 			case reflect.Int32:
@@ -152,6 +173,7 @@ func callAndDump(methodName string, mVal reflect.Value, args []reflect.Value) (e
 	}
 
 	for _, res := range results {
+		// 忽略 error 返回值
 		if res.Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
 			if !res.IsNil() {
 				return fmt.Errorf("API 级返回错误: %v", res.Interface())
@@ -159,6 +181,7 @@ func callAndDump(methodName string, mVal reflect.Value, args []reflect.Value) (e
 			continue
 		}
 
+		// 指针解引用
 		if res.Kind() == reflect.Ptr {
 			if res.IsNil() {
 				fmt.Printf("   📝 返回空指针类型: %s\n", res.Type())
