@@ -24,31 +24,34 @@ jobs:
           go get github.com/injoyai/tdx
           go mod tidy
 
-      - name: Run Verification Script
+      - name: Run Schema Introspection
         run: |
-          go run scripts/verify_transaction.go > output_log.txt
-          cat output_log.txt
+          go run scripts/verify_transaction.go > introspection_log.txt
+          cat introspection_log.txt
+
+      - name: Run Multi-Stock Multi-Day Live Test
+        run: |
+          go run scripts/test_fetch_trades.go > test_run_log.txt
+          cat test_run_log.txt
 
       - name: Generate Summary Report
         if: always()
         run: |
-          echo "## 📊 TDX Trade Data Field Audit" > summary.md
-          echo "### 🖥️ Run Logs" >> summary.md
-          echo "\`\`\`txt" >> summary.md
-          cat output_log.txt >> summary.md
-          echo "\`\`\`" >> summary.md
+          echo "## 📊 TDX Intraday Trade Data Quality Audit" > summary.md
           
-          for f in structure_*.json; do
-            if [ -f "$f" ]; then
-              echo "### 📦 File: $f" >> summary.md
-              echo "\`\`\`json" >> summary.md
-              cat "$f" | head -n 80 >> summary.md
-              if [ $(cat "$f" | wc -l) -gt 80 ]; then
-                echo -e "\n  ... (Remaining lines omitted inside summary. Please download artifacts for details)" >> summary.md
-              fi
-              echo "\`\`\`" >> summary.md
-            fi
-          done
+          if [ -f test_run_log.txt ]; then
+            echo "### 📈 Multi-Stock Multi-Day Trade Test Console Logs" >> summary.md
+            echo "\`\`\`txt" >> summary.md
+            cat test_run_log.txt >> summary.md
+            echo "\`\`\`" >> summary.md
+          fi
+          
+          if [ -f introspection_log.txt ]; then
+            echo "### 🖥️ API Type Introspection Metadata" >> summary.md
+            echo "\`\`\`txt" >> summary.md
+            cat introspection_log.txt | grep -E "结构体定义|检测到返回类型|集合成员类型|Price|Volume|Time|Status" -A 10 >> summary.md
+            echo "\`\`\`" >> summary.md
+          fi
           
           cat summary.md >> $GITHUB_STEP_SUMMARY
 
@@ -56,8 +59,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: tdx-trade-spec
+          name: tdx-trade-test-spec
           path: |
-            output_log.txt
+            *.txt
             structure_*.json
           retention-days: 7
