@@ -13,19 +13,15 @@ import (
 	"github.com/injoyai/tdx"
 )
 
-// getRecentTradingDay 计算最近一个可能已收盘的交易日 (格式 YYYYMMDD)
+// getRecentTradingDay 计算最近一个交易日 (格式 YYYYMMDD)
 func getRecentTradingDay() int {
 	now := time.Now()
-	// 如果是周六，退到周五
 	if now.Weekday() == time.Saturday {
 		now = now.AddDate(0, 0, -1)
 	} else if now.Weekday() == time.Sunday {
-		// 如果是周日，退到周五
 		now = now.AddDate(0, 0, -2)
 	} else if now.Hour() < 15 {
-		// 如果是周一至周五但未收盘，使用前一天
 		now = now.AddDate(0, 0, -1)
-		// 如果退回后变成了周末，继续退到周五
 		if now.Weekday() == time.Saturday {
 			now = now.AddDate(0, 0, -1)
 		} else if now.Weekday() == time.Sunday {
@@ -36,8 +32,48 @@ func getRecentTradingDay() int {
 	return val
 }
 
+// dumpTypeFields 递归自省并打印结构体或切片的字段定义
+func dumpTypeFields(t reflect.Type, indent string) {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
+		fmt.Printf("%s[ ]集合成员类型:\n", indent)
+		dumpTypeFields(t.Elem(), indent+"  ")
+		return
+	}
+	if t.Kind() != reflect.Struct {
+		fmt.Printf("%s%s\n", indent, t.String())
+		return
+	}
+	
+	fmt.Printf("%s结构体定义: %s {\n", indent, t.String())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		// 略过私有字段
+		if f.PkgPath != "" {
+			continue
+		}
+		jsonTag := f.Tag.Get("json")
+		if jsonTag == "" {
+			jsonTag = "-"
+		}
+		fmt.Printf("%s  %-15s %-12s (json: %q)\n", indent, f.Name, f.Type.String(), jsonTag)
+		
+		// 对嵌套结构体（非原生基础类型）进行二级展开
+		ft := f.Type
+		if ft.Kind() == reflect.Ptr {
+			ft = ft.Elem()
+		}
+		if ft.Kind() == reflect.Struct && !strings.HasPrefix(ft.String(), "time.Time") {
+			dumpTypeFields(ft, indent+"    ")
+		}
+	}
+	fmt.Printf("%s}\n", indent)
+}
+
 func main() {
-	fmt.Println("============ 📡 TDX 分笔成交 (Trade) 接口探测引擎 ============")
+	fmt.Println("============ 📡 TDX 分笔成交 (Trade) 接口类型自省引擎 ============")
 	fmt.Println("正在连接通达信行情服务器...")
 
 	cli, err := tdx.DialDefault()
@@ -51,24 +87,21 @@ func main() {
 	val := reflect.ValueOf(cli)
 	typ := val.Type()
 
-	// 1. 过滤获取包含 "Trade" 且不含外部市场/底层通讯相关的候选方法
-	var targetMethods []string
+	// 优先探查核心接口
+	targetMethods := []string{"GetTrade", "GetTradeAll"}
+	
+	// 扫描其他包含 "Trade" 的方法
 	for i := 0; i < typ.NumMethod(); i++ {
 		m := typ.Method(i)
 		nameLower := strings.ToLower(m.Name)
-		// 排除 Ex 协议头（通常用于外盘/扩展行情）以及非数据请求函数
 		if strings.Contains(nameLower, "trade") && !strings.HasPrefix(m.Name, "Ex") && m.Name != "GetTrade" && m.Name != "GetTradeAll" {
-			// 将 GetTrade 与 GetTradeAll 放在最前面优先执行
 			targetMethods = append(targetMethods, m.Name)
 		}
 	}
-	// 优先加入核心 Tick 接口
-	targetMethods = append([]string{"GetTrade", "GetTradeAll"}, targetMethods...)
 
 	tradingDay := getRecentTradingDay()
 	fmt.Printf("📅 自动推导测试交易日: %d\n", tradingDay)
 
-	// 2. 依次测试候选方法
 	for _, methodName := range targetMethods {
 		mVal := val.MethodByName(methodName)
 		if !mVal.IsValid() {
@@ -79,31 +112,30 @@ func main() {
 		mType := mVal.Type()
 		numIn := mType.NumIn()
 
-		// 动态构建参数
+		// 动态匹配参数
 		args := make([]reflect.Value, numIn)
 		for i := 0; i < numIn; i++ {
 			argType := mType.In(i)
 			switch argType.Kind() {
 			case reflect.String:
-				args[i] = reflect.ValueOf("sz000001") // 以平安银行为测试标的
+				args[i] = reflect.ValueOf("sz000001") // 测试个股
 			case reflect.Uint32:
-				args[i] = reflect.ValueOf(uint32(tradingDay)) // 历史交易日
+				args[i] = reflect.ValueOf(uint32(tradingDay))
 			case reflect.Int32:
 				args[i] = reflect.ValueOf(int32(tradingDay))
 			case reflect.Int:
 				args[i] = reflect.ValueOf(tradingDay)
 			case reflect.Uint16:
 				if i == 1 {
-					args[i] = reflect.ValueOf(uint16(0)) // start
+					args[i] = reflect.ValueOf(uint16(0))
 				} else {
-					args[i] = reflect.ValueOf(uint16(30)) // count (提取30条样本)
+					args[i] = reflect.ValueOf(uint16(30))
 				}
 			default:
 				args[i] = reflect.Zero(argType)
 			}
 		}
 
-		// 安全执行调用，防止底层解析畸变字段导致 panic
 		err := callAndDump(methodName, mVal, args)
 		if err != nil {
 			fmt.Printf("   ⚠️ 调用执行未成功: %v\n", err)
@@ -111,7 +143,6 @@ func main() {
 	}
 }
 
-// callAndDump 执行反射调用并输出 JSON
 func callAndDump(methodName string, mVal reflect.Value, args []reflect.Value) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -124,8 +155,8 @@ func callAndDump(methodName string, mVal reflect.Value, args []reflect.Value) (e
 		return fmt.Errorf("无返回值")
 	}
 
-	for idx, res := range results {
-		// 检查是否为 error 返回值
+	for _, res := range results {
+		// 忽略 error 返回值
 		if res.Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
 			if !res.IsNil() {
 				return fmt.Errorf("API 级返回错误: %v", res.Interface())
@@ -133,41 +164,53 @@ func callAndDump(methodName string, mVal reflect.Value, args []reflect.Value) (e
 			continue
 		}
 
-		// 穿透指针
+		// 指针解引用
 		if res.Kind() == reflect.Ptr {
 			if res.IsNil() {
-				fmt.Printf("   📝 返回空指针: %s\n", res.Type())
+				fmt.Printf("   📝 返回空指针类型: %s\n", res.Type())
 				continue
 			}
 			res = res.Elem()
 		}
 
 		if res.IsValid() {
-			// 若为 struct 或 slice 且非空，则进行 JSON 序列化并存储
-			if (res.Kind() == reflect.Struct || res.Kind() == reflect.Slice) && res.Len() > 0 {
+			resType := res.Type()
+			fmt.Printf("   🧬 检测到返回类型: %s\n", resType.String())
+
+			// 🌟 1. 无论数据是否为空，使用 reflect.Type 打印静态结构体/切片定义
+			fmt.Println("   📋 [类型自省] 物理字段结构如下:")
+			dumpTypeFields(resType, "      ")
+
+			// 🌟 2. 尝试提取具体的值
+			isSlice := res.Kind() == reflect.Slice
+			isStruct := res.Kind() == reflect.Struct
+
+			if isSlice || isStruct {
+				// 若为 Slice 且长度为 0，不进行 JSON 序列化，直接返回
+				if isSlice && res.Len() == 0 {
+					fmt.Println("   📝 [当前值] 空数据集 (当前非交易时段或无成交数据)。")
+					return nil
+				}
+
 				jsonData, jsonErr := json.MarshalIndent(res.Interface(), "", "  ")
 				if jsonErr == nil {
-					fmt.Printf("   📥 [%s] 成功获取物理行 %d 行数据结构:\n", methodName, res.Len())
-					
-					// 仅控制台打印前 50 行，避免超出终端缓冲区
+					fmt.Println("   📥 [当前值] 成功捕获实体数据:")
 					lines := strings.Split(string(jsonData), "\n")
-					limit := 50
+					limit := 40
 					if len(lines) < limit {
 						limit = len(lines)
 					}
 					fmt.Println(strings.Join(lines[:limit], "\n"))
 					if len(lines) > limit {
-						fmt.Println("   ... (后文已省略)")
+						fmt.Println("      ... (后文已省略)")
 					}
 
-					// 物理落盘完整数据供 GitHub Artifacts 收集
+					// 写入本地 json 文件
 					filename := fmt.Sprintf("structure_%s.json", methodName)
 					_ = os.WriteFile(filename, jsonData, 0644)
-					fmt.Printf("   💾 完整数据结构已输出至: %s\n", filename)
+					fmt.Printf("   💾 实体数据已保存到: %s\n", filename)
 					return nil
 				}
-			} else {
-				fmt.Printf("   📝 返回非空基本值/空切片 (索引 %d) 类型: %s | 值: %v\n", idx, res.Type(), res.Interface())
 			}
 		}
 	}
