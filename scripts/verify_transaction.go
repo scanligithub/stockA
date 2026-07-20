@@ -1,11 +1,10 @@
-// FILE: scripts/verify_transaction.go
+// FILE: scripts/test_fetch_trades.go
 package main
 
 import (
-	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -13,206 +12,136 @@ import (
 	"github.com/injoyai/tdx"
 )
 
-// getRecentTradingDay 计算最近一个交易日 (格式 YYYYMMDD)
-func getRecentTradingDay() int {
-	now := time.Now()
-	if now.Weekday() == time.Saturday {
-		now = now.AddDate(0, 0, -1)
-	} else if now.Weekday() == time.Sunday {
-		now = now.AddDate(0, 0, -2)
-	} else if now.Hour() < 15 {
-		now = now.AddDate(0, 0, -1)
-		if now.Weekday() == time.Saturday {
-			now = now.AddDate(0, 0, -1)
-		} else if now.Weekday() == time.Sunday {
-			now = now.AddDate(0, 0, -2)
+// getTrueBeijingTime 穿透系统本地虚拟时钟，获取真实的北京时间
+func getTrueBeijingTime() time.Time {
+	client := &http.Client{Timeout: 3 * time.Second}
+	// 通过公共服务器的 Date 响应头获取真实世界的时间
+	resp, err := client.Head("https://www.baidu.com")
+	if err == nil && resp.Header.Get("Date") != "" {
+		t, err := time.Parse(time.RFC1123, resp.Header.Get("Date"))
+		if err == nil {
+			return t.In(time.FixedZone("CST", 8*3600)) // 强制转换为北京时间 (UTC+8)
 		}
 	}
-	val, _ := strconv.Atoi(now.Format("20060102"))
-	return val
+	fmt.Println("⚠️ 无法获取网络时间，降级使用系统本地时钟。")
+	return time.Now()
 }
 
-// dumpTypeFields 递归自省并打印结构体或切片的字段定义
-func dumpTypeFields(t reflect.Type, indent string) {
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
+// getRecentTradingDays 获取最近的 N 个真实交易日 (排除周末)
+func getRecentTradingDays(targetTime time.Time, n int) []int {
+	var days []int
+	curr := targetTime
+
+	// 如果当前时间还未收盘(15:00前)，不包含今天，从昨天开始算
+	if curr.Hour() < 15 {
+		curr = curr.AddDate(0, 0, -1)
 	}
-	if t.Kind() == reflect.Slice || t.Kind() == reflect.Array {
-		fmt.Printf("%s[ ]集合成员类型:\n", indent)
-		dumpTypeFields(t.Elem(), indent+"  ")
-		return
+
+	for len(days) < n {
+		if curr.Weekday() != time.Saturday && curr.Weekday() != time.Sunday {
+			val, _ := strconv.Atoi(curr.Format("20060102"))
+			days = append(days, val)
+		}
+		curr = curr.AddDate(0, 0, -1)
 	}
-	if t.Kind() != reflect.Struct {
-		fmt.Printf("%s%s\n", indent, t.String())
-		return
-	}
-	
-	fmt.Printf("%s结构体定义: %s {\n", indent, t.String())
-	for i := 0; i < t.NumField(); i++ {
-		f := t.Field(i)
-		// 略过私有字段
-		if f.PkgPath != "" {
-			continue
-		}
-		jsonTag := f.Tag.Get("json")
-		if jsonTag == "" {
-			jsonTag = "-"
-		}
-		fmt.Printf("%s  %-15s %-12s (json: %q)\n", indent, f.Name, f.Type.String(), jsonTag)
-		
-		// 对嵌套结构体（非原生基础类型）进行二级展开
-		ft := f.Type
-		if ft.Kind() == reflect.Ptr {
-			ft = ft.Elem()
-		}
-		if ft.Kind() == reflect.Struct && !strings.HasPrefix(ft.String(), "time.Time") {
-			dumpTypeFields(ft, indent+"    ")
-		}
-	}
-	fmt.Printf("%s}\n", indent)
+	return days
 }
 
 func main() {
-	fmt.Println("============ 📡 TDX 分笔成交 (Trade) 接口类型自省引擎 ============")
-	fmt.Println("正在连接通达信行情服务器...")
+	fmt.Println("============ 📊 TDX 多股多日分笔成交实测引擎 ============")
+	
+	// 1. 获取真实世界的交易日期线
+	trueTime := getTrueBeijingTime()
+	recentDays := getRecentTradingDays(trueTime, 3)
+	
+	fmt.Printf("⏰ 真实北京时间: %s\n", trueTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("📅 探测提取的最近 3 个真实交易日: %v\n", recentDays)
 
+	// 2. 连接通达信行情服务器
 	cli, err := tdx.DialDefault()
 	if err != nil {
-		fmt.Printf("❌ 连接失败: %v\n", err)
+		fmt.Printf("❌ 建立服务器连接失败: %v\n", err)
 		os.Exit(1)
 	}
 	defer cli.Close()
-	fmt.Println("✅ 成功建立连接。")
+	fmt.Println("✅ 成功连接通达信行情服务。")
 
-	val := reflect.ValueOf(cli)
-	typ := val.Type()
-
-	// 优先探查核心接口
-	targetMethods := []string{"GetTrade", "GetTradeAll"}
-	
-	// 扫描其他包含 "Trade" 的方法
-	for i := 0; i < typ.NumMethod(); i++ {
-		m := typ.Method(i)
-		nameLower := strings.ToLower(m.Name)
-		if strings.Contains(nameLower, "trade") && !strings.HasPrefix(m.Name, "Ex") && m.Name != "GetTrade" && m.Name != "GetTradeAll" {
-			targetMethods = append(targetMethods, m.Name)
-		}
+	// 3. 定义测试股票列表
+	testStocks := []struct {
+		Code string
+		Name string
+	}{
+		{"sh600519", "贵州茅台"},
+		{"sz000001", "平安银行"},
+		{"sz300750", "宁德时代"},
 	}
 
-	tradingDay := getRecentTradingDay()
-	fmt.Printf("📅 自动推导测试交易日: %d\n", tradingDay)
-
-	for _, methodName := range targetMethods {
-		mVal := val.MethodByName(methodName)
-		if !mVal.IsValid() {
-			continue
-		}
-
-		fmt.Printf("\n⚡ 正在探测方法 [%s]...\n", methodName)
-		mType := mVal.Type()
-		numIn := mType.NumIn()
-
-		// 动态匹配参数
-		args := make([]reflect.Value, numIn)
-		for i := 0; i < numIn; i++ {
-			argType := mType.In(i)
-			switch argType.Kind() {
-			case reflect.String:
-				args[i] = reflect.ValueOf("sz000001") // 测试个股
-			case reflect.Uint32:
-				args[i] = reflect.ValueOf(uint32(tradingDay))
-			case reflect.Int32:
-				args[i] = reflect.ValueOf(int32(tradingDay))
-			case reflect.Int:
-				args[i] = reflect.ValueOf(tradingDay)
-			case reflect.Uint16:
-				if i == 1 {
-					args[i] = reflect.ValueOf(uint16(0))
-				} else {
-					args[i] = reflect.ValueOf(uint16(30))
-				}
-			default:
-				args[i] = reflect.Zero(argType)
-			}
-		}
-
-		err := callAndDump(methodName, mVal, args)
-		if err != nil {
-			fmt.Printf("   ⚠️ 调用执行未成功: %v\n", err)
-		}
-	}
-}
-
-func callAndDump(methodName string, mVal reflect.Value, args []reflect.Value) (err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			err = fmt.Errorf("触发 Panic 保护: %v", r)
-		}
-	}()
-
-	results := mVal.Call(args)
-	if len(results) == 0 {
-		return fmt.Errorf("无返回值")
-	}
-
-	for _, res := range results {
-		// 忽略 error 返回值
-		if res.Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
-			if !res.IsNil() {
-				return fmt.Errorf("API 级返回错误: %v", res.Interface())
-			}
-			continue
-		}
-
-		// 指针解引用
-		if res.Kind() == reflect.Ptr {
-			if res.IsNil() {
-				fmt.Printf("   📝 返回空指针类型: %s\n", res.Type())
+	// 4. 执行数据抓取
+	for _, stock := range testStocks {
+		fmt.Printf("\n==================== 📈 股票: %s (%s) ====================\n", stock.Name, stock.Code)
+		
+		for _, dateInt := range recentDays {
+			fmt.Printf("🔎 正在提取 %d 的分笔成交数据...\n", dateInt)
+			
+			// 转换代码格式：sz000001 -> 000001
+			pureCode := stock.Code[2:]
+			
+			// 调用 GetHistoryTrade 提取单日历史 Tick (参数：代码, 日期, 起始索引, 数量)
+			// 注意：部分历史节点需要指定对应的具体市场代码前缀，或通过接口自适应
+			resp, err := cli.GetHistoryTrade(stock.Code, uint32(dateInt), 0, 50)
+			if err != nil {
+				fmt.Printf("   ❌ 获取失败: %v\n", err)
 				continue
 			}
-			res = res.Elem()
-		}
 
-		if res.IsValid() {
-			resType := res.Type()
-			fmt.Printf("   🧬 检测到返回类型: %s\n", resType.String())
-
-			// 🌟 1. 无论数据是否为空，使用 reflect.Type 打印静态结构体/切片定义
-			fmt.Println("   📋 [类型自省] 物理字段结构如下:")
-			dumpTypeFields(resType, "      ")
-
-			// 🌟 2. 尝试提取具体的值
-			isSlice := res.Kind() == reflect.Slice
-			isStruct := res.Kind() == reflect.Struct
-
-			if isSlice || isStruct {
-				// 若为 Slice 且长度为 0，不进行 JSON 序列化，直接返回
-				if isSlice && res.Len() == 0 {
-					fmt.Println("   📝 [当前值] 空数据集 (当前非交易时段或无成交数据)。")
-					return nil
+			if resp == nil || len(resp.List) == 0 {
+				// 尝试备用接口或不带前缀格式
+				resp, err = cli.GetHistoryTrade(pureCode, uint32(dateInt), 0, 50)
+				if err != nil || resp == nil || len(resp.List) == 0 {
+					fmt.Println("   ⚠️ 该交易日无分笔数据（可能服务器该节点未缓存此历史分笔，或当天停牌）。")
+					continue
 				}
+			}
 
-				jsonData, jsonErr := json.MarshalIndent(res.Interface(), "", "  ")
-				if jsonErr == nil {
-					fmt.Println("   📥 [当前值] 成功捕获实体数据:")
-					lines := strings.Split(string(jsonData), "\n")
-					limit := 40
-					if len(lines) < limit {
-						limit = len(lines)
-					}
-					fmt.Println(strings.Join(lines[:limit], "\n"))
-					if len(lines) > limit {
-						fmt.Println("      ... (后文已省略)")
-					}
-
-					// 写入本地 json 文件
-					filename := fmt.Sprintf("structure_%s.json", methodName)
-					_ = os.WriteFile(filename, jsonData, 0644)
-					fmt.Printf("   💾 实体数据已保存到: %s\n", filename)
-					return nil
+			fmt.Printf("   ✅ 成功捕获分笔。当天总笔数(片区): %d, 提取样本数: %d\n", resp.Count, len(resp.List))
+			
+			// 打印前 5 条分笔成交明细
+			limit := 5
+			if len(resp.List) < limit {
+				limit = len(resp.List)
+			}
+			
+			fmt.Println("   📝 前 5 条交易明细:")
+			fmt.Printf("      %-10s | %-10s | %-10s | %-10s | %-10s\n", "时间", "成交价", "成交量(手)", "笔数/单号", "方向(0:买/1:卖/2:中)")
+			fmt.Println("      " + strings.Repeat("-", 65))
+			
+			for i := 0; i < limit; i++ {
+				t := resp.List[i]
+				
+				// 格式化时间
+				timeStr := t.Time.Format("15:04:05")
+				if timeStr == "00:00:00" {
+					timeStr = t.Time.String()
 				}
+				
+				// 转换成交方向符号
+				dirStr := "中性"
+				if t.Status == 0 {
+					dirStr = "🔴 主买"
+				} else if t.Status == 1 {
+					dirStr = "🟢 主卖"
+				}
+				
+				fmt.Printf("      %-10s | %-10v | %-10d | %-10d | %-10s\n", 
+					timeStr, 
+					t.Price, 
+					t.Volume, 
+					t.Number, 
+					dirStr,
+				)
 			}
 		}
 	}
-	return nil
+	fmt.Println("\n=======================================================")
+	fmt.Println("🎉 实测任务结束。")
 }
