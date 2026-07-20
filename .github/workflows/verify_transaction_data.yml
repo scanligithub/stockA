@@ -1,0 +1,63 @@
+# FILE: .github/workflows/verify_transaction_data.yml
+name: Verify TDX Transaction Data
+
+on:
+  workflow_dispatch: # 支持随时手动触发
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Go Environment
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+
+      - name: 📦 Initialize and Install Dependencies
+        run: |
+          go mod init stockA || true
+          go get github.com/injoyai/tdx
+          go mod tidy
+
+      - name: 🚀 Run Verification Script
+        run: |
+          go run scripts/verify_transaction.go > output_log.txt
+          cat output_log.txt
+
+      - name: 📊 Generate Summary Report
+        if: always()
+        run: |
+          echo "## 📊 TDX Transaction Data Exploration Report" > summary.md
+          echo "### 🖥️ Go Execution Console Log" >> summary.md
+          echo "\`\`\`txt" >> summary.md
+          cat output_log.txt >> summary.md
+          echo "\`\`\`" >> summary.md
+          
+          if [ -f transaction_structure.json ]; then
+            echo "### 📦 Decoded Data Schema Structure" >> summary.md
+            echo "\`\`\`json" >> summary.md
+            cat transaction_structure.json | head -n 120 >> summary.md
+            if [ $(cat transaction_structure.json | wc -l) -gt 120 ]; then
+              echo "..." >> summary.md
+              echo "// Remaining outputs truncated. Please download the artifact for complete details." >> summary.md
+            fi
+            echo "\`\`\`" >> summary.md
+          fi
+          
+          cat summary.md >> $GITHUB_STEP_SUMMARY
+
+      - name: 📤 Upload Verification Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdx-transaction-spec
+          path: |
+            output_log.txt
+            transaction_structure.json
+          retention-days: 7
