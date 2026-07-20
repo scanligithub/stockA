@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/injoyai/tdx"
 )
@@ -24,7 +23,7 @@ func main() {
 	defer cli.Close()
 	fmt.Println("✅ 成功连接行情服务。")
 
-	// 定义测试回溯检查点 (均排除周末，确保为历史上有效工作日/交易日)
+	// 定义测试回溯检查点
 	checkpoints := []Checkpoint{
 		{"1 年前  (2024-01-15 星期一)", "20240115"},
 		{"2 年前  (2023-01-16 星期一)", "20230116"},
@@ -38,13 +37,12 @@ func main() {
 		{"20 年前 (2005-01-14 星期五)", "20050114"},
 	}
 
-	testStock := "SZ000001" // 平安银行 (1991年上市，具有最长完整生命周期)
+	testStock := "SZ000001" // 平安银行 (1991年上市)
 	fmt.Printf("🎯 探测标的: %s\n\n", testStock)
 
 	for _, cp := range checkpoints {
 		fmt.Printf("🔎 正在尝试探测 [%s] 的成交分笔...\n", cp.Label)
 		
-		// 通达信 GetHistoryTrade 的入参顺序为 (date, code, start, count)
 		resp, err := cli.GetHistoryTrade(cp.Date, testStock, 0, 5)
 		if err != nil {
 			fmt.Printf("   ❌ 失败 (接口报错): %v\n", err)
