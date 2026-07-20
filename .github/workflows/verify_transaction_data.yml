@@ -1,4 +1,3 @@
-# FILE: .github/workflows/verify_transaction_data.yml
 name: Verify TDX Transaction Data
 
 on:
@@ -11,26 +10,26 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - name: 📥 Checkout Repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: ⚙️ Setup Go Environment
+      - name: Setup Go Environment
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
 
-      - name: 📦 Initialize and Install Dependencies
+      - name: Initialize and Install Dependencies
         run: |
           go mod init stockA || true
           go get github.com/injoyai/tdx
           go mod tidy
 
-      - name: 🚀 Run Verification Script
+      - name: Run Verification Script
         run: |
           go run scripts/verify_transaction.go > output_log.txt
           cat output_log.txt
 
-      - name: 📊 Generate Summary Report
+      - name: Generate Summary Report
         if: always()
         run: |
           echo "## 📊 TDX Trade Data Field Audit" > summary.md
@@ -39,7 +38,6 @@ jobs:
           cat output_log.txt >> summary.md
           echo "\`\`\`" >> summary.md
           
-          # 动态检索并追加生成的结构数据样本至 Step Summary
           for f in structure_*.json; do
             if [ -f "$f" ]; then
               echo "### 📦 File: $f" >> summary.md
@@ -54,7 +52,7 @@ jobs:
           
           cat summary.md >> $GITHUB_STEP_SUMMARY
 
-      - name: 📤 Upload Verification Artifacts
+      - name: Upload Verification Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
