@@ -28,6 +28,11 @@ type GbbqEvent struct {
 	PeiGu   float64
 }
 
+type GbbqEventDated struct {
+	Date  int
+	Event GbbqEvent
+}
+
 type EquityEventOrdered struct {
 	Date        int
 	FloatShares float64
@@ -245,12 +250,26 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 					continue
 				}
 
-				events := gbbqMap[tcode]
 				equities := equityMap[tcode]
-				
+				isIdx := isIndex(tcode)
+
+				// 将该股票的所有 GBBQ 除权息事件按日期正序排列，用于区间穿透匹配
+				var stockEvents []GbbqEventDated
+				if !isIdx {
+					if evMap, ok := gbbqMap[tcode]; ok {
+						for d, ev := range evMap {
+							stockEvents = append(stockEvents, GbbqEventDated{Date: d, Event: ev})
+						}
+						sort.Slice(stockEvents, func(i, j int) bool {
+							return stockEvents[i].Date < stockEvents[j].Date
+						})
+					}
+				}
+
 				var records [][]string
 				adjustFactor := 1.0
 				var prevClose float64 = -1.0
+				var prevDateInt int = 0
 
 				var lastFloatShares float64 = 0.0
 				var lastTotalShares float64 = 0.0
@@ -258,8 +277,6 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 					lastFloatShares = equities[0].FloatShares
 					lastTotalShares = equities[0].TotalShares
 				}
-
-				isIdx := isIndex(tcode)
 
 				for _, bar := range resp.List {
 					dateStr := bar.Time.Format("2006-01-02")
@@ -276,18 +293,35 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 					var totalMV, floatMV, turn float64 = 0.0, 0.0, 0.0
 
 					if !isIdx {
-						if ev, ok := events[dateInt]; ok && prevClose > 0 {
-							fh := ev.FenHong / 10.0
-							sg := ev.SongGu / 10.0
-							pg := ev.PeiGu / 10.0
-							pj := ev.PeiJia
+						// 区间事件穿透：(prevDateInt, dateInt] 内的所有除权息事件按时间顺序链式扣减
+						if prevDateInt > 0 && len(stockEvents) > 0 {
+							for _, evt := range stockEvents {
+								if evt.Date > prevDateInt && evt.Date <= dateInt {
+									if prevClose > 0 {
+										fh := evt.Event.FenHong / 10.0
+										sg := evt.Event.SongGu / 10.0
+										pg := evt.Event.PeiGu / 10.0
+										pj := evt.Event.PeiJia
 
-							pEx := (prevClose - fh + pg*pj) / (1.0 + sg + pg)
-							if pEx > 0 {
-								adjustFactor *= (prevClose / pEx)
+										pEx := (prevClose - fh + pg*pj) / (1.0 + sg + pg)
+
+										// 防爆熔断：基准价必须为有效正数
+										if pEx > 0.001 {
+											ratio := prevClose / pEx
+											// 防爆熔断：限制单次复权变动幅度在 (0.05, 20.0) 之间，拦截脏数据
+											if ratio > 0.05 && ratio < 20.0 {
+												adjustFactor *= ratio
+												prevClose = pEx
+											} else {
+												fmt.Printf("⚠️ [GBBQ 异常熔断] %s @ %d 异常复权比 %.4f，已跳过\n", tcode, dateInt, ratio)
+											}
+										}
+									}
+								}
 							}
 						}
 
+						// 股本变迁更新
 						for _, eq := range equities {
 							if eq.Date <= dateInt {
 								lastFloatShares = eq.FloatShares
@@ -324,7 +358,9 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 						fmt.Sprintf("%.3f", floatMV),
 						fmt.Sprintf("%.4f", turn),
 					})
+
 					prevClose = pClose
+					prevDateInt = dateInt
 				}
 
 				mu.Lock()
