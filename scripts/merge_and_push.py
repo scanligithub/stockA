@@ -100,6 +100,67 @@ def calculate_ttm_net_profit(f10_parquet_path):
     print(f"✅ F10 TTM 矩阵计算完毕，瞬时生成完毕。")
     return f10_clean
 
+def validate_adjust_factors(con, qc):
+    """复权因子深度审计 (A/B/C 三条规则, DuckDB 全量窗口扫描)"""
+    print("🔍 Validating Adjust Factors via DuckDB Window Functions...")
+    audit = {}
+
+    # --- Rule A1: 物理边界检查 ---
+    audit["A1_invalid_values"] = con.execute("""
+        SELECT count(*) FROM v_kline
+        WHERE adjustFactor <= 0
+           OR adjustFactor IS NULL
+           OR isnan(adjustFactor)
+           OR isinf(adjustFactor)
+    """).fetchone()[0]
+
+    # --- Rule A2: 单日暴跳熔断 (>5x 或 <0.2x) ---
+    audit["A2_surge_events"] = con.execute("""
+        SELECT count(*) FROM (
+            SELECT code, date, adjustFactor,
+                   LAG(adjustFactor) OVER (PARTITION BY code ORDER BY date) as prev_factor
+            FROM v_kline
+        ) sub
+        WHERE prev_factor IS NOT NULL
+          AND prev_factor > 0
+          AND (adjustFactor / prev_factor > 5.0 OR adjustFactor / prev_factor < 0.2)
+    """).fetchone()[0]
+
+    # --- Rule B: 单调性违规 (后复权因子应非递减) ---
+    audit["B_monotonicity_violations"] = con.execute("""
+        SELECT count(*) FROM (
+            SELECT code, date, adjustFactor,
+                   LAG(adjustFactor) OVER (PARTITION BY code ORDER BY date) as prev_factor
+            FROM v_kline
+        ) sub
+        WHERE prev_factor IS NOT NULL
+          AND adjustFactor < prev_factor - 0.0001
+    """).fetchone()[0]
+
+    # --- Rule C: 除权日复权收益率一致性校验 ---
+    audit["C_ex_div_inconsistencies"] = con.execute("""
+        SELECT count(*) FROM (
+            SELECT code, date, close, pctChg, adjustFactor,
+                   LAG(close) OVER w AS prev_close,
+                   LAG(adjustFactor) OVER w AS prev_factor
+            FROM v_kline
+            WINDOW w AS (PARTITION BY code ORDER BY date)
+        ) sub
+        WHERE prev_factor IS NOT NULL
+          AND adjustFactor != prev_factor
+          AND prev_close > 0
+          AND prev_factor > 0
+          AND close > 0
+          AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1 - pctChg / 100) > 0.01
+    """).fetchone()[0]
+
+    qc.report["adjust_factor_audit"] = audit
+    print(f"  ✅ A1 invalid values:         {audit['A1_invalid_values']}")
+    print(f"  ✅ A2 surge events (>5x/<0.2x): {audit['A2_surge_events']}")
+    print(f"  ✅ B monotonicity violations:  {audit['B_monotonicity_violations']}")
+    print(f"  ✅ C ex-div inconsistencies:   {audit['C_ex_div_inconsistencies']}")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", type=str, default="hf", choices=["hf", "release", "local"])
@@ -259,6 +320,10 @@ def main():
     else:
         print("⚠️ Warning: F10 TTM View could not be created. PE/PB remains 0.0.")
         con.execute("CREATE OR REPLACE VIEW v_kline AS SELECT * FROM v_kline_raw")
+
+    # 🔍 在全量 v_kline 视图上执行复权因子深度审计（DuckDB 窗口函数，零数据搬运）
+    if k_files:
+        validate_adjust_factors(con, qc)
 
     os.makedirs("output", exist_ok=True)
     targets = {}

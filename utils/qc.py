@@ -82,4 +82,17 @@ class QualityControl:
             fields_str = ", ".join(stat.get("columns", []))
             md += f"| {name} | {stat['total_rows']:,} | {stat.get('unique_codes','-')} | {range_str} | {stat['file_size_mb']} | {stat['anomaly_count']} | {fields_str} |\n"
         
+        # 🔍 复权因子深度审计
+        if "adjust_factor_audit" in self.report and self.report["adjust_factor_audit"]:
+            aud = self.report["adjust_factor_audit"]
+            md += "\n## 🔍 复权因子深度审计\n\n"
+            md += "| 规则 | 说明 | 异常数 |\n"
+            md += "| :--- | :--- | ---: |\n"
+            md += f"| A1 | 物理边界 (<=0/NaN/Inf) | {aud.get('A1_invalid_values', 'N/A')} |\n"
+            md += f"| A2 | 单日暴跳 (>5x/<0.2x) | {aud.get('A2_surge_events', 'N/A')} |\n"
+            md += f"| B  | 单调性违规 (非递减) | {aud.get('B_monotonicity_violations', 'N/A')} |\n"
+            md += f"| C  | 除权日收益不一致 (>1%) | {aud.get('C_ex_div_inconsistencies', 'N/A')} |\n"
+            total = sum(v for v in aud.values() if isinstance(v, (int, float)))
+            md += f"\n**复权因子异常总计: {int(total)}**\n"
+        
         return md
