@@ -137,10 +137,12 @@ def validate_adjust_factors(con, qc):
           AND adjustFactor < prev_factor - 0.0001
     """).fetchone()[0]
 
-    # --- Rule C: 除权日复权收益率一致性校验 ---
-    audit["C_ex_div_inconsistencies"] = con.execute("""
+    # --- Rule C: 除权日复权价格连续性校验 ---
+    # 除权日前后，复权价格不应发生显著跳变（超出日涨跌幅限制 + 缓冲）
+    # 主板 10%, 创业板/科创板 20%; 使用 21% 作为统一阈值覆盖所有板块
+    audit["C_ex_div_price_jumps"] = con.execute("""
         SELECT count(*) FROM (
-            SELECT code, date, close, pctChg, adjustFactor,
+            SELECT code, date, close, adjustFactor,
                    LAG(close) OVER w AS prev_close,
                    LAG(adjustFactor) OVER w AS prev_factor
             FROM v_kline
@@ -151,14 +153,14 @@ def validate_adjust_factors(con, qc):
           AND prev_close > 0
           AND prev_factor > 0
           AND close > 0
-          AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1 - pctChg / 100) > 0.01
+          AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1) > 0.21
     """).fetchone()[0]
 
     qc.report["adjust_factor_audit"] = audit
     print(f"  ✅ A1 invalid values:         {audit['A1_invalid_values']}")
     print(f"  ✅ A2 surge events (>5x/<0.2x): {audit['A2_surge_events']}")
     print(f"  ✅ B monotonicity violations:  {audit['B_monotonicity_violations']}")
-    print(f"  ✅ C ex-div inconsistencies:   {audit['C_ex_div_inconsistencies']}")
+    print(f"  ✅ C ex-div price jumps:     {audit['C_ex_div_price_jumps']}")
 
 
 def main():

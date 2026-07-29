@@ -91,7 +91,7 @@ class QualityControl:
             md += f"| A1 | 物理边界 (<=0/NaN/Inf) | {aud.get('A1_invalid_values', 'N/A')} |\n"
             md += f"| A2 | 单日暴跳 (>5x/<0.2x) | {aud.get('A2_surge_events', 'N/A')} |\n"
             md += f"| B  | 单调性违规 (非递减) | {aud.get('B_monotonicity_violations', 'N/A')} |\n"
-            md += f"| C  | 除权日收益不一致 (>1%) | {aud.get('C_ex_div_inconsistencies', 'N/A')} |\n"
+            md += f"| C  | 除权日复权价跳变 (>21%) | {aud.get('C_ex_div_price_jumps', 'N/A')} |\n"
             total = sum(v for v in aud.values() if isinstance(v, (int, float)))
             md += f"\n**复权因子异常总计: {int(total)}**\n"
         
