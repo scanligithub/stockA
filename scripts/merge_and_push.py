@@ -154,8 +154,9 @@ def validate_adjust_factors(con, qc):
           AND adjustFactor != prev_factor
           AND prev_close > 0 AND prev_factor > 0 AND close > 0
           AND ABS(close / prev_close - 1) < 0.21  -- 跳过复牌/重组
-          AND adjustFactor / prev_factor < 5.0    -- 跳过极端送转
-          AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1) > 0.21
+           AND adjustFactor / prev_factor < 5.0    -- 跳过极端送转
+           AND adjustFactor / prev_factor <= 1.21  -- 跳过因子自身跳变>21%(股改/大送转, 复权价跳变是预期的)
+           AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1) > 0.21
     """).fetchone()[0]
 
     qc.report["adjust_factor_audit"] = audit
@@ -200,6 +201,7 @@ def validate_adjust_factors(con, qc):
               AND prev_close > 0 AND prev_factor > 0 AND close > 0
               AND ABS(close / prev_close - 1) < 0.21
               AND adjustFactor / prev_factor < 5.0
+              AND adjustFactor / prev_factor <= 1.21
               AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1) > 0.21
             ORDER BY jump_pct DESC
             LIMIT 200
