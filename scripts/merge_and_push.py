@@ -160,7 +160,56 @@ def validate_adjust_factors(con, qc):
     print(f"  ✅ A1 invalid values:         {audit['A1_invalid_values']}")
     print(f"  ✅ A2 surge events (>5x/<0.2x): {audit['A2_surge_events']}")
     print(f"  ✅ B monotonicity violations:  {audit['B_monotonicity_violations']}")
-    print(f"  ✅ C ex-div price jumps:     {audit['C_ex_div_price_jumps']}")
+    print(f"  ✅ C ex-div price jumps:       {audit['C_ex_div_price_jumps']}")
+
+    # --- 输出详细异常清单供排查 ---
+    violations = []
+    if audit["A2_surge_events"] > 0:
+        rows = con.execute("""
+            SELECT code, date,
+                   ROUND(adjustFactor::FLOAT, 6) as factor,
+                   ROUND(prev_factor::FLOAT, 6) as prev_factor,
+                   ROUND((adjustFactor / prev_factor)::FLOAT, 4) as ratio
+            FROM (SELECT code, date, adjustFactor,
+                         LAG(adjustFactor) OVER (PARTITION BY code ORDER BY date) as prev_factor
+                  FROM v_kline)
+            WHERE prev_factor IS NOT NULL AND prev_factor > 0
+              AND (adjustFactor / prev_factor > 5.0 OR adjustFactor / prev_factor < 0.2)
+            ORDER BY ratio
+        """).fetchall()
+        violations.append("=== A2: 单日暴跳 (>5x/<0.2x) ===")
+        for r in rows:
+            violations.append(f"  {r[0]} @ {r[1]}  factor: {r[2]} <- {r[3]}  ratio: {r[4]}x")
+
+    if audit["C_ex_div_price_jumps"] > 0:
+        rows = con.execute("""
+            SELECT code, date,
+                   ROUND(close::FLOAT, 2) as close,
+                   ROUND(prev_close::FLOAT, 2) as prev_close,
+                   ROUND(adjustFactor::FLOAT, 6) as factor,
+                   ROUND(prev_factor::FLOAT, 6) as prev_factor,
+                   ROUND((ABS((close * adjustFactor) / (prev_close * prev_factor) - 1) * 100)::FLOAT, 2) as jump_pct
+            FROM (SELECT code, date, close, adjustFactor,
+                         LAG(close) OVER w AS prev_close,
+                         LAG(adjustFactor) OVER w AS prev_factor
+                  FROM v_kline
+                  WINDOW w AS (PARTITION BY code ORDER BY date))
+            WHERE prev_factor IS NOT NULL AND adjustFactor != prev_factor
+              AND prev_close > 0 AND prev_factor > 0 AND close > 0
+              AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1) > 0.21
+            ORDER BY jump_pct DESC
+            LIMIT 200
+        """).fetchall()
+        violations.append(f"\n=== C: 除权日复权价跳变 >21% (Top {len(rows)}) ===")
+        for r in rows:
+            violations.append(f"  {r[0]} @ {r[1]}  close: {r[2]}<-{r[3]}  factor: {r[4]}<-{r[5]}  jump: {r[6]}%")
+
+    if violations:
+        os.makedirs("output", exist_ok=True)
+        out_path = "output/adjust_factor_violations.txt"
+        with open(out_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(violations))
+        print(f"  📄 详细异常清单已写入: {out_path}")
 
 
 def main():
