@@ -138,8 +138,10 @@ def validate_adjust_factors(con, qc):
     """).fetchone()[0]
 
     # --- Rule C: 除权日复权价格连续性校验 ---
-    # 除权日前后，复权价格不应发生显著跳变（超出日涨跌幅限制 + 缓冲）
-    # 主板 10%, 创业板/科创板 20%; 使用 21% 作为统一阈值覆盖所有板块
+    # 过滤规则：
+    #   1) 跳过 raw close 自身已超涨跌停限制的交易日（复牌/重组，非除权事件）
+    #   2) 跳过因子跳变 >5x 的极端送转（GBBQ 正确但超出 21% 阈值）
+    #   只捕获：除权日因子计算错误导致的异常价格跳变
     audit["C_ex_div_price_jumps"] = con.execute("""
         SELECT count(*) FROM (
             SELECT code, date, close, adjustFactor,
@@ -150,9 +152,9 @@ def validate_adjust_factors(con, qc):
         ) sub
         WHERE prev_factor IS NOT NULL
           AND adjustFactor != prev_factor
-          AND prev_close > 0
-          AND prev_factor > 0
-          AND close > 0
+          AND prev_close > 0 AND prev_factor > 0 AND close > 0
+          AND ABS(close / prev_close - 1) < 0.21  -- 跳过复牌/重组
+          AND adjustFactor / prev_factor < 5.0    -- 跳过极端送转
           AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1) > 0.21
     """).fetchone()[0]
 
@@ -196,11 +198,13 @@ def validate_adjust_factors(con, qc):
                   WINDOW w AS (PARTITION BY code ORDER BY date))
             WHERE prev_factor IS NOT NULL AND adjustFactor != prev_factor
               AND prev_close > 0 AND prev_factor > 0 AND close > 0
+              AND ABS(close / prev_close - 1) < 0.21
+              AND adjustFactor / prev_factor < 5.0
               AND ABS((close * adjustFactor) / (prev_close * prev_factor) - 1) > 0.21
             ORDER BY jump_pct DESC
             LIMIT 200
         """).fetchall()
-        violations.append(f"\n=== C: 除权日复权价跳变 >21% (Top {len(rows)}) ===")
+        violations.append(f"\n=== C: 除权日复权价跳变 >21% (剩余 {len(rows)} 条, 已过滤复牌/极端送转) ===")
         for r in rows:
             violations.append(f"  {r[0]} @ {r[1]}  close: {r[2]}<-{r[3]}  factor: {r[4]}<-{r[5]}  jump: {r[6]}%")
 
