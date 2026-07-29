@@ -205,11 +205,14 @@ def validate_adjust_factors(con, qc):
             violations.append(f"  {r[0]} @ {r[1]}  close: {r[2]}<-{r[3]}  factor: {r[4]}<-{r[5]}  jump: {r[6]}%")
 
     if violations:
+        detail = "\n".join(violations)
         os.makedirs("output", exist_ok=True)
         out_path = "output/adjust_factor_violations.txt"
         with open(out_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(violations))
+            f.write(detail)
         print(f"  📄 详细异常清单已写入: {out_path}")
+        # 同时打印到 stdout，方便 GitHub Actions 日志直接查看
+        print("\n" + detail)
 
 
 def main():
