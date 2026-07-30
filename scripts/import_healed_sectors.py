@@ -140,6 +140,13 @@ def main():
         except Exception as e:
             print(f"⚠️ 转换成分股数据失败: {e}")
 
+    # 保留 metadata 目录到输出目录
+    metadata_src = os.path.join(extract_dir, "metadata")
+    metadata_dst = os.path.join(output_dir, "metadata")
+    if os.path.isdir(metadata_src):
+        shutil.copytree(metadata_src, metadata_dst, dirs_exist_ok=True)
+        print(f"✅ 板块元数据目录已保留至 {metadata_dst}")
+
     # 清理临时解压目录
     try:
         shutil.rmtree(extract_dir)

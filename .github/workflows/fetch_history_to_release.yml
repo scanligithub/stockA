@@ -160,7 +160,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sector-parts
-          path: temp_parts/*.parquet
+          path: |
+            temp_parts/*.parquet
+            temp_parts/metadata/
           retention-days: 1
 
   finalize:
@@ -200,6 +202,11 @@ jobs:
           pattern: '*-part*'
           merge-multiple: true
           path: all_artifacts
+
+      - name: Copy Sector Metadata to Output
+        run: |
+          mkdir -p output/metadata
+          cp all_artifacts/metadata/* output/metadata/ 2>/dev/null || true
 
       - name: 🌐 Download All Stocks 37-Column F10 Financial Data
         run: |
@@ -254,6 +261,7 @@ jobs:
         run: |
           gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" --clobber || true
           gh release upload archive output/*.parquet --clobber
+          gh release upload archive output/metadata/* --clobber
 
       - name: Publish Consolidated Summaries to Workflow Page
         if: always()

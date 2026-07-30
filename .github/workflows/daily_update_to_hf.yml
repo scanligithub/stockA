@@ -162,7 +162,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sector-parts
-          path: temp_parts/*.parquet
+          path: |
+            temp_parts/*.parquet
+            temp_parts/metadata/
           retention-days: 1
 
   finalize:
@@ -202,6 +204,11 @@ jobs:
           pattern: '*-part*'
           merge-multiple: true
           path: all_artifacts
+
+      - name: Copy Sector Metadata to Output
+        run: |
+          mkdir -p output/metadata
+          cp all_artifacts/metadata/* output/metadata/ 2>/dev/null || true
 
       - name: 🌐 Sync All Stocks 37-Column F10 Financial Data
         run: |
@@ -252,6 +259,20 @@ jobs:
           HF_REPO: ${{ secrets.HF_REPO }}
         run: |
           python scripts/merge_and_push.py --mode hf --year 0
+
+      - name: Upload Sector Metadata to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ secrets.HF_REPO }}
+        run: |
+          python -c "
+          from utils.hf_manager import HFManager
+          import glob, os
+          hf = HFManager(os.environ['HF_TOKEN'], os.environ['HF_REPO'])
+          for f in glob.glob('output/metadata/*'):
+              hf.upload_file(f, f'metadata/{os.path.basename(f)}')
+          print('✅ Sector metadata uploaded to HF.')
+          "
 
       - name: Publish Consolidated Summaries to Workflow Page
         if: always()
