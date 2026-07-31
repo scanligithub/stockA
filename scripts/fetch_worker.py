@@ -100,14 +100,24 @@ def main():
                 if col in df_k_all.columns:
                     df_k_all[col] = pd.to_numeric(df_k_all[col], errors='coerce')
 
-            # 过滤年份
-            df_k_all = df_k_all[(df_k_all['date'] >= start) & (df_k_all['date'] <= end)].copy()
-            
-            # 计算衍生指标
+            # =========================================================================
+            # 🚀 修复 Bug：必须先在全历史/未切片数据上，用【后复权价格】计算真实的 pctChg
+            # =========================================================================
             df_k_all = df_k_all.sort_values(['code', 'date'])
-            df_k_all['pctChg'] = df_k_all.groupby('code')['close'].pct_change() * 100
+
+            # 1. 计算后复权价格 hfq_close
+            df_k_all['hfq_close'] = df_k_all['close'] * df_k_all['adjustFactor']
+
+            # 2. 基于后复权价格计算真实的经济涨跌幅（自动消除除权缺口的干扰）
+            df_k_all['pctChg'] = df_k_all.groupby('code')['hfq_close'].pct_change() * 100
             df_k_all['pctChg'] = df_k_all['pctChg'].fillna(0.0)
-            
+
+            # 3. 删除临时列
+            df_k_all = df_k_all.drop(columns=['hfq_close'])
+
+            # 4. 最后再执行年份时间段切片（此时第一天依然保留了跨年正确算的 pctChg）
+            df_k_all = df_k_all[(df_k_all['date'] >= start) & (df_k_all['date'] <= end)].copy()
+
             # 🚀 降维占位：peTTM 与 pbMRQ 属于基本面，留在 finalize 阶段通过 DuckDB 结合东财财报全量 ASOF 注入
             df_k_all['peTTM'] = 0.0
             df_k_all['pbMRQ'] = 0.0
