@@ -2,11 +2,11 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"runtime/debug"
+	"runtime"
 	"time"
 
 	"github.com/injoyai/tdx"
+	"github.com/injoyai/tdx/protocol"
 )
 
 type TestCase struct {
@@ -28,16 +28,19 @@ func main() {
 	fmt.Println("==============================================================")
 	fmt.Println("stockA TDX Index API Comparison Test")
 	fmt.Println("==============================================================")
-	fmt.Printf("Go version: %s\n", runtimeVersion())
+	fmt.Printf("Go version: %s\n", runtime.Version())
 	fmt.Printf("Time: %s\n", time.Now().Format(time.RFC3339))
 	fmt.Println()
 
-	// 使用默认 TDX Client。
-	client := tdx.NewClient()
+	fmt.Println("Connecting to TDX...")
+	client, err := tdx.DialDefault()
+	if err != nil {
+		fmt.Printf("ERROR: TDX connection failed: %v\n", err)
+		return
+	}
+	defer client.Close()
 
-	fmt.Println("Testing APIs:")
-	fmt.Println("  1. GetKlineDayAll(code)")
-	fmt.Println("  2. GetIndexDayAll(code)")
+	fmt.Println("TDX connection OK")
 	fmt.Println()
 
 	for _, tc := range testCases {
@@ -56,59 +59,69 @@ func testOne(client *tdx.Client, tc TestCase) {
 	fmt.Println("--------------------------------------------------------------")
 
 	// ----------------------------------------------------------
-	// API 1: 普通股票 K 线 API
+	// API 1: 普通股票 K 线
 	// ----------------------------------------------------------
 	fmt.Println("[1] GetKlineDayAll")
 
+	start := time.Now()
+
 	resp1, err1 := client.GetKlineDayAll(tc.Code)
+
+	elapsed := time.Since(start)
 
 	if err1 != nil {
 		fmt.Printf("  ERROR: %v\n", err1)
 	} else {
-		printResult(resp1)
+		printKlineResult(resp1, elapsed)
 	}
 
 	// ----------------------------------------------------------
-	// API 2: 指数 K 线 API
+	// API 2: 指数 K 线
 	// ----------------------------------------------------------
 	fmt.Println("[2] GetIndexDayAll")
 
+	start = time.Now()
+
 	resp2, err2 := client.GetIndexDayAll(tc.Code)
+
+	elapsed = time.Since(start)
 
 	if err2 != nil {
 		fmt.Printf("  ERROR: %v\n", err2)
 	} else {
-		printResult(resp2)
+		printKlineResult(resp2, elapsed)
 	}
 }
 
-func printResult(resp interface{}) {
+func printKlineResult(resp *protocol.KlineResp, elapsed time.Duration) {
 	if resp == nil {
 		fmt.Println("  response = nil")
 		return
 	}
 
-	// 这里不依赖具体 KlineResp 的字段结构，
-	// 第一阶段只确认请求是否成功以及返回对象是否为空。
-	fmt.Printf("  response type: %T\n", resp)
-	fmt.Printf("  response: %+v\n", resp)
-}
+	fmt.Printf("  count: %d\n", resp.Count)
+	fmt.Printf("  list length: %d\n", len(resp.List))
+	fmt.Printf("  elapsed: %s\n", elapsed)
 
-func runtimeVersion() string {
-	info, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
+	if len(resp.List) == 0 {
+		fmt.Println("  first_date: -")
+		fmt.Println("  last_date:  -")
+		return
 	}
 
-	return fmt.Sprintf(
-		"%s\n  main module: %s %s",
-		info.GoVersion,
-		info.Main.Path,
-		info.Main.Version,
-	)
-}
+	first := resp.List[0]
+	last := resp.List[len(resp.List)-1]
 
-func init() {
-	// 确保某些 CI 环境下 stdout 不被缓冲影响观察。
-	_ = os.Stdout
+	fmt.Printf("  first_date: %s\n", first.Time.Format("2006-01-02"))
+	fmt.Printf("  last_date:  %s\n", last.Time.Format("2006-01-02"))
+
+	fmt.Printf(
+		"  first_close: %.4f\n",
+		first.Close,
+	)
+
+	fmt.Printf(
+		"  last_close:  %.4f\n",
+		last.Close,
+	)
 }
