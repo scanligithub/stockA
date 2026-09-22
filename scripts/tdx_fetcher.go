@@ -432,7 +432,7 @@ func runFetchIndex(codesStr, outPath string) {
 			defer workerCli.Close()
 
 			for tcode := range jobChan {
-				resp, err := workerCli.GetKlineDayAll(tcode)
+				resp, err := workerCli.GetIndexDayAll(tcode)
 				if err != nil || resp == nil || len(resp.List) == 0 {
 					fmt.Printf("[Go Engine] Warning: Failed to fetch %s\n", tcode)
 					continue
