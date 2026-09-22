@@ -245,7 +245,7 @@ func runFetchKlinesWithLocalCSV(codesStr, gbbqPath, outPath string) {
 			defer workerCli.Close()
 
 			for tcode := range jobChan {
-				resp, err := workerCli.GetKlineDayAll(tcode)
+				 resp, err := workerCli.GetIndexDayAll(tcode)
 				if err != nil || resp == nil || len(resp.List) == 0 {
 					continue
 				}
