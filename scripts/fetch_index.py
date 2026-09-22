@@ -51,14 +51,14 @@ def fetch_from_go_engine(codes_str, is_incremental=False):
         bars = []
         for _, row in df.iterrows():
             bars.append({
-                "datetime": row["date"],
-                "open": float(row["open"]),
-                "high": float(row["high"]),
-                "low": float(row["low"]),
-                "close": float(row["close"]),
-                "vol": float(row["volume"]),
-                "amount": float(row["amount"])
-            })
+    "datetime": row["date"],
+    "open": float(row["open"]),
+    "high": float(row["high"]),
+    "low": float(row["low"]),
+    "close": float(row["close"]),
+    "vol": float(row["volume"]),
+    "amount": float(row["amount"])
+})
         return bars, "🚀 Go-TDX"
     except Exception as e:
         print(f"⚠️ Go engine failed: {e}")
