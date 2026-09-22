@@ -1,0 +1,33 @@
+name: Test TDX Index APIs
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-tdx-index-api:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: false
+
+      - name: Show Go version
+        run: |
+          go version
+
+      - name: Download dependencies
+        working-directory: test/tdx_index_api
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Run TDX API test
+        working-directory: test/tdx_index_api
+        run: |
+          go run .
