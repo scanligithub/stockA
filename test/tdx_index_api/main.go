@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/injoyai/tdx"
+	"github.com/injoyai/tdx/protocol"
 )
 
 var indexList = []string{
@@ -67,21 +68,24 @@ func main() {
 	fmt.Printf("Indices: %d\n", len(indexList))
 	fmt.Printf("Output:  %s\n\n", *outPath)
 
-	// ------------------------------------------------------------
-	// 1. 原有 37 个指数完整测试
-	// ------------------------------------------------------------
+	// 1. 原有37个指数完整历史K线测试
 	fetch(*outPath)
 
-	// ------------------------------------------------------------
-	// 2. 独立测试官方中证2000代码 932000
-	// ------------------------------------------------------------
+	// 2. CSI 2000 候选代码直接探测
 	probeCSI2000()
+
+	// 3. 从 TDX 服务器证券代码表反查“中证2000”
+	probeCSI2000FromCodeList()
 
 	fmt.Println()
 	fmt.Println("==============================================================")
 	fmt.Println("All tests completed")
 	fmt.Println("==============================================================")
 }
+
+// ============================================================================
+// 1. 原有37个指数完整K线测试
+// ============================================================================
 
 func fetch(outPath string) {
 	file, err := os.Create(outPath)
@@ -93,7 +97,7 @@ func fetch(outPath string) {
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	writer.Write([]string{
+	err = writer.Write([]string{
 		"code",
 		"date",
 		"open",
@@ -103,6 +107,9 @@ func fetch(outPath string) {
 		"volume",
 		"amount",
 	})
+	if err != nil {
+		panic(err)
+	}
 
 	jobs := make(chan string)
 	var wg sync.WaitGroup
@@ -111,7 +118,7 @@ func fetch(outPath string) {
 	success := make(map[string]int)
 	failed := make([]string, 0)
 
-	// 与 stockA tdx_fetcher.go 一致：8 个 worker
+	// 8个并发连接
 	for i := 0; i < 8; i++ {
 		wg.Add(1)
 
@@ -128,8 +135,6 @@ func fetch(outPath string) {
 			for code := range jobs {
 				tdxCode := strings.ReplaceAll(code, ".", "")
 
-				// 关键：
-				// 指数必须使用 GetIndexDayAll()
 				resp, err := client.GetIndexDayAll(tdxCode)
 
 				if err != nil || resp == nil || len(resp.List) == 0 {
@@ -142,6 +147,7 @@ func fetch(outPath string) {
 					mu.Lock()
 					failed = append(failed, code)
 					mu.Unlock()
+
 					continue
 				}
 
@@ -151,34 +157,16 @@ func fetch(outPath string) {
 					rows = append(rows, []string{
 						code,
 						bar.Time.Format("2006-01-02"),
-						fmt.Sprintf(
-							"%.3f",
-							float64(bar.Open)/1000,
-						),
-						fmt.Sprintf(
-							"%.3f",
-							float64(bar.High)/1000,
-						),
-						fmt.Sprintf(
-							"%.3f",
-							float64(bar.Low)/1000,
-						),
-						fmt.Sprintf(
-							"%.3f",
-							float64(bar.Close)/1000,
-						),
-						strconv.FormatInt(
-							int64(bar.Volume),
-							10,
-						),
-						fmt.Sprintf(
-							"%.3f",
-							float64(bar.Amount)/1000,
-						),
+						fmt.Sprintf("%.3f", float64(bar.Open)/1000),
+						fmt.Sprintf("%.3f", float64(bar.High)/1000),
+						fmt.Sprintf("%.3f", float64(bar.Low)/1000),
+						fmt.Sprintf("%.3f", float64(bar.Close)/1000),
+						strconv.FormatInt(int64(bar.Volume), 10),
+						fmt.Sprintf("%.3f", float64(bar.Amount)/1000),
 					})
 				}
 
-				// 排序，保证 CSV 稳定
+				// 确保按日期排序
 				sort.Slice(rows, func(i, j int) bool {
 					return rows[i][1] < rows[j][1]
 				})
@@ -215,11 +203,7 @@ func fetch(outPath string) {
 	fmt.Println("==============================================================")
 	fmt.Println("Go fetch summary")
 	fmt.Println("==============================================================")
-	fmt.Printf(
-		"Success: %d / %d\n",
-		len(success),
-		len(indexList),
-	)
+	fmt.Printf("Success: %d / %d\n", len(success), len(indexList))
 	fmt.Printf("Failed:  %d\n", len(failed))
 
 	if len(failed) > 0 {
@@ -232,25 +216,9 @@ func fetch(outPath string) {
 	fmt.Printf("\nCSV written: %s\n", outPath)
 }
 
-// ================================================================
-// 中证2000 / 932000 专项探针
-// ================================================================
-//
-// 官方代码：932000
-//
-// 这里故意测试多个可能的 TDX 表示：
-//
-//   932000
-//   sh932000
-//   sz932000
-//
-// 同时保留当前 stockA 中的：
-//
-//   sh000851
-//
-// 目的不是假定哪一个正确，而是直接观察 TDX 返回结果，
-// 再与中证指数官网的 932000 数据进行比较。
-// ================================================================
+// ============================================================================
+// 2. 直接测试中证2000官方代码以及几个候选 TDX 代码
+// ============================================================================
 
 func probeCSI2000() {
 	fmt.Println()
@@ -258,14 +226,20 @@ func probeCSI2000() {
 	fmt.Println("CSI 2000 TDX code probe")
 	fmt.Println("==============================================================")
 
+	// 注意：
+	// 932000 是官方中证2000代码，但 TDX K线接口要求6位代码，
+	// 因此这里仍然保留直接测试，以观察服务器行为。
+	//
+	// sh000851 / sh000852 用于验证此前怀疑的代码。
+	//
+	// 不再测试 sz000852，因为 000852 是上海指数，
+	// 查询 sz000852 会触发 TDX v0.0.83 decoder 异常。
 	candidates := []string{
 		"932000",
 		"sh932000",
 		"sz932000",
 		"sh000851",
-		"sz000851",
 		"sh000852",
-		"sz000852",
 	}
 
 	client, err := tdx.DialDefault()
@@ -350,3 +324,112 @@ func probeCSI2000() {
 	}
 }
 
+// ============================================================================
+// 3. 从 TDX 服务器证券代码表反查“中证2000”
+// ============================================================================
+//
+// 核心目的：
+// 不再猜 sh000851 / sh000852 等代码，
+// 直接从 TDX 服务器返回的证券代码表中寻找：
+//
+//     名称 = 中证2000
+//
+// 或名称中包含：
+//
+//     中证2000
+//     2000
+//
+// 如果这里找到：
+//
+//     sh.xxxxxx -> 中证2000
+//
+// 再用 GetIndexDayAll(xxxxxx) 验证其K线。
+//
+// 如果完全找不到，则说明当前 TDX 服务器代码表没有提供
+// “中证2000”这个指数行情代码。
+
+func probeCSI2000FromCodeList() {
+	fmt.Println()
+	fmt.Println("==============================================================")
+	fmt.Println("TDX server code-list reverse lookup: CSI 2000")
+	fmt.Println("==============================================================")
+
+	client, err := tdx.DialDefault()
+	if err != nil {
+		fmt.Printf("CONNECT ERROR: %v\n", err)
+		return
+	}
+	defer client.Close()
+
+	for _, market := range []string{"SH", "SZ"} {
+		var exchange protocol.Exchange
+
+		switch market {
+		case "SH":
+			exchange = protocol.ExchangeSH
+		case "SZ":
+			exchange = protocol.ExchangeSZ
+		default:
+			continue
+		}
+
+		fmt.Println()
+		fmt.Printf("--------------------------------------------------------------\n")
+		fmt.Printf("Market: %s\n", market)
+
+		resp, err := client.GetCodeAll(exchange)
+		if err != nil {
+			fmt.Printf("ERROR: %v\n", err)
+			continue
+		}
+
+		if resp == nil {
+			fmt.Println("NO RESPONSE")
+			continue
+		}
+
+		fmt.Printf("Total codes: %d\n", len(resp.List))
+
+		found := 0
+
+		for _, item := range resp.List {
+			name := strings.TrimSpace(item.Name)
+			code := strings.TrimSpace(item.Code)
+
+			// 目标1：精确或直接包含“中证2000”
+			//
+			// 目标2：包含“2000”，方便发现：
+			//   中证2000
+			//   国证2000
+			//   其他2000指数
+			if strings.Contains(name, "中证2000") ||
+				strings.Contains(name, "2000") {
+
+				found++
+
+				fmt.Printf(
+					"FOUND: %s.%s  name=%s",
+					strings.ToLower(market),
+					code,
+					name,
+				)
+
+				// 尽量输出行情字段。
+				// 不同版本的 CodeItem 字段可能有所不同，
+				// 因此这里只使用当前 v0.0.83 已存在的基础字段。
+				fmt.Printf(
+					"  LastPrice=%v",
+					item.LastPrice,
+				)
+
+				fmt.Println()
+			}
+		}
+
+		fmt.Printf("Matched: %d\n", found)
+
+		if found == 0 {
+			fmt.Println("No index name containing \"中证2000\" or \"2000\" was found.")
+		}
+	}
+}
