@@ -255,154 +255,98 @@ func fetch(outPath string) {
 func probeCSI2000() {
 	fmt.Println()
 	fmt.Println("==============================================================")
-	fmt.Println("CSI 2000 / 932000 TDX probe")
+	fmt.Println("CSI 2000 TDX code probe")
 	fmt.Println("==============================================================")
-
-	fmt.Println()
-	fmt.Println("Official CSI index code:")
-	fmt.Println("  932000  中证2000")
-
-	fmt.Println()
-	fmt.Println("TDX candidate codes:")
-	fmt.Println("  932000")
-	fmt.Println("  sh932000")
-	fmt.Println("  sz932000")
-	fmt.Println("  sh000851")
-
-	client, err := tdx.DialDefault()
-	if err != nil {
-		fmt.Printf("❌ TDX connect error: %v\n", err)
-		return
-	}
-	defer client.Close()
 
 	candidates := []string{
 		"932000",
 		"sh932000",
 		"sz932000",
 		"sh000851",
+		"sz000851",
+		"sh000852",
+		"sz000852",
 	}
+
+	client, err := tdx.DialDefault()
+	if err != nil {
+		fmt.Printf("CONNECT ERROR: %v\n", err)
+		return
+	}
+	defer client.Close()
 
 	for _, code := range candidates {
-		probeOneIndex(client, code)
-	}
+		fmt.Println()
+		fmt.Printf("--------------------------------------------------------------\n")
+		fmt.Printf("Code: %s\n", code)
 
-	fmt.Println()
-	fmt.Println("==============================================================")
-	fmt.Println("932000 probe completed")
-	fmt.Println("==============================================================")
-}
+		resp, err := client.GetIndexDayAll(code)
 
-func probeOneIndex(
-	client *tdx.Tdx,
-	code string,
-) {
-	fmt.Println()
-	fmt.Println("--------------------------------------------------------------")
-	fmt.Printf("Testing TDX code: %s\n", code)
-	fmt.Println("--------------------------------------------------------------")
+		if err != nil {
+			fmt.Printf("ERROR: %v\n", err)
+			continue
+		}
 
-	resp, err := client.GetIndexDayAll(code)
+		if resp == nil {
+			fmt.Println("NO RESPONSE")
+			continue
+		}
 
-	if err != nil {
-		fmt.Printf("GetIndexDayAll: ERROR: %v\n", err)
-		return
-	}
+		if len(resp.List) == 0 {
+			fmt.Println("ROWS: 0")
+			continue
+		}
 
-	if resp == nil {
-		fmt.Println("GetIndexDayAll: response = nil")
-		return
-	}
+		fmt.Printf("ROWS: %d\n", len(resp.List))
 
-	if len(resp.List) == 0 {
-		fmt.Println("GetIndexDayAll: 0 rows")
-		return
-	}
-
-	// 按日期排序，避免服务端返回顺序影响显示。
-	rows := make([]struct {
-		date   string
-		open   float64
-		high   float64
-		low    float64
-		close  float64
-		volume int64
-		amount float64
-	}, 0, len(resp.List))
-
-	for _, bar := range resp.List {
-		rows = append(rows, struct {
-			date   string
-			open   float64
-			high   float64
-			low    float64
-			close  float64
-			volume int64
-			amount float64
-		}{
-			date:   bar.Time.Format("2006-01-02"),
-			open:   float64(bar.Open) / 1000,
-			high:   float64(bar.High) / 1000,
-			low:    float64(bar.Low) / 1000,
-			close:  float64(bar.Close) / 1000,
-			volume: int64(bar.Volume),
-			amount: float64(bar.Amount) / 1000,
-		})
-	}
-
-	sort.Slice(rows, func(i, j int) bool {
-		return rows[i].date < rows[j].date
-	})
-
-	first := rows[0]
-	last := rows[len(rows)-1]
-
-	fmt.Printf("GetIndexDayAll: %d rows\n", len(rows))
-	fmt.Printf("First: %s\n", first.date)
-	fmt.Printf(
-		"  O=%.3f H=%.3f L=%.3f C=%.3f\n",
-		first.open,
-		first.high,
-		first.low,
-		first.close,
-	)
-
-	fmt.Printf("Last:  %s\n", last.date)
-	fmt.Printf(
-		"  O=%.3f H=%.3f L=%.3f C=%.3f\n",
-		last.open,
-		last.high,
-		last.low,
-		last.close,
-	)
-
-	fmt.Printf(
-		"  Volume=%d Amount=%.3f\n",
-		last.volume,
-		last.amount,
-	)
-
-	// 输出最后 5 个交易日，便于直接与中证官网比较。
-	fmt.Println()
-	fmt.Println("Last 5 rows:")
-
-	start := len(rows) - 5
-	if start < 0 {
-		start = 0
-	}
-
-	for i := start; i < len(rows); i++ {
-		r := rows[i]
+		first := resp.List[0]
+		last := resp.List[len(resp.List)-1]
 
 		fmt.Printf(
-			"  %s  O=%.3f H=%.3f L=%.3f C=%.3f Vol=%d Amt=%.3f\n",
-			r.date,
-			r.open,
-			r.high,
-			r.low,
-			r.close,
-			r.volume,
-			r.amount,
+			"FIRST: %s O=%.3f H=%.3f L=%.3f C=%.3f\n",
+			first.Time.Format("2006-01-02"),
+			float64(first.Open)/1000,
+			float64(first.High)/1000,
+			float64(first.Low)/1000,
+			float64(first.Close)/1000,
 		)
+
+		fmt.Printf(
+			"LAST:  %s O=%.3f H=%.3f L=%.3f C=%.3f\n",
+			last.Time.Format("2006-01-02"),
+			float64(last.Open)/1000,
+			float64(last.High)/1000,
+			float64(last.Low)/1000,
+			float64(last.Close)/1000,
+		)
+
+		fmt.Printf(
+			"LAST:  Volume=%d Amount=%.3f\n",
+			int64(last.Volume),
+			float64(last.Amount)/1000,
+		)
+
+		fmt.Println("Last 5 rows:")
+
+		start := len(resp.List) - 5
+		if start < 0 {
+			start = 0
+		}
+
+		for i := start; i < len(resp.List); i++ {
+			bar := resp.List[i]
+
+			fmt.Printf(
+				"  %s O=%.3f H=%.3f L=%.3f C=%.3f V=%d A=%.3f\n",
+				bar.Time.Format("2006-01-02"),
+				float64(bar.Open)/1000,
+				float64(bar.High)/1000,
+				float64(bar.Low)/1000,
+				float64(bar.Close)/1000,
+				int64(bar.Volume),
+				float64(bar.Amount)/1000,
+			)
+		}
 	}
 }
+
