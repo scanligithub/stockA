@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/injoyai/tdx"
@@ -21,32 +22,72 @@ var testCases = []TestCase{
 }
 
 func main() {
-	fmt.Println("==============================================================")
-	fmt.Println("stockA TDX Index API Comparison Test")
-	fmt.Println("==============================================================")
-	fmt.Printf("Go version: %s\n", runtime.Version())
-	fmt.Printf("Time: %s\n", time.Now().Format(time.RFC3339))
-	fmt.Println()
+    fmt.Println("==============================================================")
+    fmt.Println("TDX spblock.dat 中证2000测试")
+    fmt.Println("==============================================================")
+    fmt.Printf("Go version: %s\n", runtime.Version())
+    fmt.Printf("Time: %s\n", time.Now().Format(time.RFC3339))
+    fmt.Println()
 
-	fmt.Println("Connecting to TDX...")
-	client, err := tdx.DialDefault()
-	if err != nil {
-		fmt.Printf("ERROR: TDX connection failed: %v\n", err)
-		return
-	}
-	defer client.Close()
+    fmt.Println("Connecting to TDX...")
+    client, err := tdx.DialDefault()
+    if err != nil {
+        fmt.Printf("ERROR: TDX connection failed: %v\n", err)
+        return
+    }
+    defer client.Close()
 
-	fmt.Println("TDX connection OK")
-	fmt.Println()
+    fmt.Println("TDX connection OK")
+    fmt.Println()
 
-	for _, tc := range testCases {
-		testOne(client, tc)
-		fmt.Println()
-	}
+    fmt.Println("Calling GetSpBlock()...")
 
-	fmt.Println("==============================================================")
-	fmt.Println("Test completed")
-	fmt.Println("==============================================================")
+    blocks, err := client.GetSpBlock()
+    if err != nil {
+        fmt.Printf("GetSpBlock ERROR: %v\n", err)
+        return
+    }
+
+    fmt.Printf("GetSpBlock OK, blocks = %d\n", len(blocks))
+    fmt.Println()
+
+    found := false
+
+    for _, block := range blocks {
+        if block.Name == "中证2000" {
+            found = true
+
+            fmt.Println("--------------------------------------------------------------")
+            fmt.Println("找到中证2000")
+            fmt.Println("--------------------------------------------------------------")
+            fmt.Printf("Name: %s\n", block.Name)
+            fmt.Printf("Codes: %d\n", len(block.Codes))
+
+            for i, code := range block.Codes {
+                if i >= 30 {
+                    break
+                }
+                fmt.Printf("  %s\n", code)
+            }
+        }
+    }
+
+    if !found {
+        fmt.Println("未找到：中证2000")
+        fmt.Println()
+        fmt.Println("包含“中证”关键字的板块：")
+
+        for _, block := range blocks {
+            if strings.Contains(block.Name, "中证") {
+                fmt.Printf("  %s  codes=%d\n",
+                    block.Name,
+                    len(block.Codes))
+            }
+        }
+    }
+
+    fmt.Println()
+    fmt.Println("Test completed")
 }
 
 func testOne(client *tdx.Client, tc TestCase) {
