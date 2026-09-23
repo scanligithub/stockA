@@ -643,9 +643,194 @@ EXPECTED_MEMBER_COUNTS = {
     "000852": 1000,
     "000688": 50,
     "000016": 50,
-    "399006": 300,
+    "399006": 100,
     "932000": 2000,
 }
+
+
+
+def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
+    """Audit PIT membership exactly on every entry/exit effective date.
+
+    For each interval:
+      entry: member must be absent on start_date - 1 day and present on start_date.
+      exit:  member must be present on end_date - 1 day and absent on end_date.
+
+    This directly verifies the intended half-open semantics:
+        start_date <= as_of < end_date
+    """
+    audit_dir = OUT / "quality_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    work = df.copy()
+    if work.empty:
+        return {"status": "FAIL", "error_count": 1, "reason": "empty membership dataframe"}
+
+    work["start_date_dt"] = pd.to_datetime(work["start_date"])
+    work["end_date_dt"] = pd.to_datetime(
+        work["end_date"].replace("", pd.NA), errors="coerce"
+    )
+
+    checks = []
+    failures = []
+
+    def member_on(index_id: str, stock_id: str, date: pd.Timestamp) -> bool:
+        g = work[
+            (work.index_id == index_id) &
+            (work.stock_id == stock_id)
+        ]
+        return bool((
+            (g.start_date_dt <= date) &
+            (g.end_date_dt.isna() | (date < g.end_date_dt))
+        ).any())
+
+    # Entry boundaries.
+    for row in work.itertuples(index=False):
+        start = row.start_date_dt
+        before = start - pd.Timedelta(days=1)
+        on = start
+        before_actual = member_on(row.index_id, row.stock_id, before)
+        on_actual = member_on(row.index_id, row.stock_id, on)
+        ok = (not before_actual) and on_actual
+        item = {
+            "index_id": row.index_id,
+            "stock_id": row.stock_id,
+            "change_type": "entry",
+            "change_date": start.strftime("%Y-%m-%d"),
+            "probe_date_before": before.strftime("%Y-%m-%d"),
+            "probe_date_on": on.strftime("%Y-%m-%d"),
+            "before_member": before_actual,
+            "on_member": on_actual,
+            "expected_before": False,
+            "expected_on": True,
+            "status": "PASS" if ok else "FAIL",
+        }
+        checks.append(item)
+        if not ok:
+            failures.append(item)
+
+    # Exit boundaries. Current/open-ended intervals have no exit date.
+    for row in work.itertuples(index=False):
+        if pd.isna(row.end_date_dt):
+            continue
+        end = row.end_date_dt
+        before = end - pd.Timedelta(days=1)
+        on = end
+        before_actual = member_on(row.index_id, row.stock_id, before)
+        on_actual = member_on(row.index_id, row.stock_id, on)
+        ok = before_actual and (not on_actual)
+        item = {
+            "index_id": row.index_id,
+            "stock_id": row.stock_id,
+            "change_type": "exit",
+            "change_date": end.strftime("%Y-%m-%d"),
+            "probe_date_before": before.strftime("%Y-%m-%d"),
+            "probe_date_on": on.strftime("%Y-%m-%d"),
+            "before_member": before_actual,
+            "on_member": on_actual,
+            "expected_before": True,
+            "expected_on": False,
+            "status": "PASS" if ok else "FAIL",
+        }
+        checks.append(item)
+        if not ok:
+            failures.append(item)
+
+    checks_df = pd.DataFrame(checks)
+    failures_df = pd.DataFrame(failures)
+    if failures_df.empty:
+        failures_df = checks_df.head(0).copy()
+
+    checks_df.to_csv(
+        audit_dir / "adjustment_boundary_checks.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    failures_df.to_csv(
+        audit_dir / "adjustment_boundary_failures.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    # Aggregate every adjustment date so simultaneous additions/removals are
+    # also visible as a count transition.
+    transition_rows = []
+    for index_id in TARGET_INDEXES:
+        g = work[work.index_id == index_id]
+        dates = sorted(set(g.start_date_dt.dropna()) | set(g.end_date_dt.dropna()))
+        for date in dates:
+            before = date - pd.Timedelta(days=1)
+            before_count = sum(member_on(index_id, stock, before) for stock in g.stock_id.unique())
+            on_count = sum(member_on(index_id, stock, date) for stock in g.stock_id.unique())
+            added = g[g.start_date_dt == date].stock_id.tolist()
+            removed = g[g.end_date_dt == date].stock_id.tolist()
+            transition_rows.append({
+                "index_id": index_id,
+                "change_date": date.strftime("%Y-%m-%d"),
+                "before_count": before_count,
+                "on_count": on_count,
+                "delta": on_count - before_count,
+                "added_count": len(added),
+                "removed_count": len(removed),
+                "added_stocks": ",".join(sorted(added)),
+                "removed_stocks": ",".join(sorted(removed)),
+            })
+
+    transitions_df = pd.DataFrame(transition_rows)
+    transitions_df.to_csv(
+        audit_dir / "adjustment_day_transitions.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    summary_rows = []
+    for index_id in TARGET_INDEXES:
+        cg = checks_df[checks_df.index_id == index_id]
+        tg = transitions_df[transitions_df.index_id == index_id]
+        summary_rows.append({
+            "index_id": index_id,
+            "entry_checks": int((cg.change_type == "entry").sum()),
+            "exit_checks": int((cg.change_type == "exit").sum()),
+            "failed_checks": int((cg.status == "FAIL").sum()),
+            "adjustment_days": len(tg),
+            "transition_min_before": int(tg.before_count.min()) if not tg.empty else "",
+            "transition_max_before": int(tg.before_count.max()) if not tg.empty else "",
+            "transition_min_on": int(tg.on_count.min()) if not tg.empty else "",
+            "transition_max_on": int(tg.on_count.max()) if not tg.empty else "",
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df.to_csv(
+        audit_dir / "adjustment_boundary_summary.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    print()
+    print("=" * 72)
+    print("MEMBER ENTRY/EXIT ADJUSTMENT-DAY BOUNDARY AUDIT")
+    print("=" * 72)
+    print(summary_df.to_string(index=False))
+    print("Boundary checks =", len(checks_df))
+    print("Boundary failures =", len(failures_df))
+    print("Adjustment days =", len(transitions_df))
+
+    return {
+        "status": "PASS" if failures_df.empty else "FAIL",
+        "check_count": len(checks_df),
+        "failure_count": len(failures_df),
+        "failures_by_index": (
+            failures_df.groupby("index_id").size().to_dict()
+            if not failures_df.empty else {}
+        ),
+        "summary": summary_df.to_dict(orient="records"),
+        "files": [
+            str(audit_dir / "adjustment_boundary_checks.csv"),
+            str(audit_dir / "adjustment_boundary_failures.csv"),
+            str(audit_dir / "adjustment_day_transitions.csv"),
+            str(audit_dir / "adjustment_boundary_summary.csv"),
+        ],
+    }
 
 
 def audit_membership_quality(
@@ -1046,8 +1231,10 @@ def main():
     ab_result = run_ab_diff(a_df, final_df)
     b_only_audit = audit_b_only(a_df, final_df, universe)
     quality_audit = audit_membership_quality(final_df, universe, a_df)
+    boundary_audit = audit_adjustment_boundaries(final_df)
     ab_result["b_only_audit"] = b_only_audit
     ab_result["quality_audit"] = quality_audit
+    ab_result["boundary_audit"] = boundary_audit
 
     print(
         f"A normalized intervals = {len(a_df)}, "
@@ -1142,6 +1329,7 @@ def main():
         or a_candidate_errors
         or a_xiangguan_errors
         or quality_audit["status"] == "FAIL"
+        or boundary_audit["status"] == "FAIL"
     ):
         if missing_indexes:
             print(f"ERROR: target indexes missing: {missing_indexes}")
