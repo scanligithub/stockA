@@ -144,7 +144,7 @@ jobs:
       - name: Run full-universe Sina XiangGuan test
         working-directory: test/tdx_index_api
         env:
-          SINA_WORKERS: "8"
+          SINA_WORKERS: "16"
           SINA_DELAY: "0.15"
         run: |
           python test_sina_xiangguan_full_universe.py
