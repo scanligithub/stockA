@@ -175,7 +175,7 @@ def load_parsed_cache(code: str):
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-        if payload.get("version") != 1 or payload.get("stock_id") != code:
+        if payload.get("version") != 2 or payload.get("stock_id") != code:
             return None
         rows = payload.get("rows")
         status = payload.get("status")
@@ -189,7 +189,7 @@ def load_parsed_cache(code: str):
 def save_parsed_cache(code: str, rows, status: str):
     parsed_cache_path(code).write_text(
         json.dumps(
-            {"version": 1, "stock_id": code, "status": status, "rows": rows},
+            {"version": 2, "stock_id": code, "status": status, "rows": rows},
             ensure_ascii=False,
             separators=(",", ":"),
         ),
