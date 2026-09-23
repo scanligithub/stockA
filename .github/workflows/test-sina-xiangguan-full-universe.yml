@@ -166,6 +166,13 @@ jobs:
         run: |
           python test_sina_xiangguan_full_universe.py
 
+      - name: Save updated Sina XiangGuan HTML cache
+        if: always() && steps.sina-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: test/tdx_index_api/sina_xiangguan_cache
+          key: ${{ runner.os }}-sina-xiangguan-v2-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}
+
       - name: Report Sina cache after test
         if: always()
         working-directory: test/tdx_index_api
