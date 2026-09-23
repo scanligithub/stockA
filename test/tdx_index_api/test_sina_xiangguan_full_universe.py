@@ -960,6 +960,238 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
     }
 
 
+
+def audit_interval_overlaps(
+    df: pd.DataFrame,
+    universe: pd.DataFrame,
+) -> dict:
+    """Inspect every structural interval overlap without changing normalization.
+
+    The purpose is forensic classification only. It reads the already cached
+    parsed XiangGuan rows so every reported overlap can be traced back to the
+    original Sina index name/code and raw entry/exit dates.
+    """
+    audit_dir = OUT / "quality_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    key = ["index_id", "stock_id", "start_date", "end_date"]
+    work = df.copy()
+    if work.empty:
+        empty = pd.DataFrame()
+        empty.to_csv(
+            audit_dir / "overlap_audit.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+        empty.to_csv(
+            audit_dir / "overlap_audit_summary.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+        return {
+            "status": "PASS",
+            "overlap_count": 0,
+            "classification_counts": {},
+            "files": [
+                str(audit_dir / "overlap_audit.csv"),
+                str(audit_dir / "overlap_audit_summary.csv"),
+            ],
+        }
+
+    work["start_date_dt"] = pd.to_datetime(work["start_date"])
+    work["end_date_dt"] = pd.to_datetime(
+        work["end_date"].replace("", pd.NA), errors="coerce"
+    )
+
+    name_map = universe.set_index("code")["name"].to_dict()
+
+    # Only structural overlaps need forensic inspection. Keep invalid intervals
+    # here too, so the report is complete if the parser ever produces one.
+    overlap_rows = []
+    for (index_id, stock_id), g in work.groupby(["index_id", "stock_id"]):
+        g = g.sort_values(
+            ["start_date_dt", "end_date_dt"],
+            na_position="last",
+        )
+        prev = None
+        for _, row in g.iterrows():
+            start = row["start_date_dt"]
+            end = row["end_date_dt"]
+            if pd.notna(end) and start >= end:
+                overlap_rows.append({
+                    "index_id": index_id,
+                    "stock_id": stock_id,
+                    "stock_name": name_map.get(stock_id, ""),
+                    "interval_1_start": row["start_date"],
+                    "interval_1_end": row["end_date"],
+                    "interval_2_start": row["start_date"],
+                    "interval_2_end": row["end_date"],
+                    "name_1": "",
+                    "name_2": "",
+                    "raw_code_1": "",
+                    "raw_code_2": "",
+                    "classification": "invalid_interval",
+                    "reason": "start_date >= end_date",
+                })
+            if prev is not None:
+                prev_end = prev["end_date_dt"]
+                if pd.isna(prev_end) or start < prev_end:
+                    # Resolve the two corresponding raw cached rows below.
+                    overlap_rows.append({
+                        "index_id": index_id,
+                        "stock_id": stock_id,
+                        "stock_name": name_map.get(stock_id, ""),
+                        "interval_1_start": prev["start_date"],
+                        "interval_1_end": prev["end_date"],
+                        "interval_2_start": row["start_date"],
+                        "interval_2_end": row["end_date"],
+                        "name_1": "",
+                        "name_2": "",
+                        "raw_code_1": "",
+                        "raw_code_2": "",
+                        "classification": "",
+                        "reason": "",
+                    })
+            prev = row
+
+    def load_raw_rows(stock_id: str, index_id: str) -> list[dict]:
+        cached = load_parsed_cache(stock_id)
+        if cached is None:
+            return []
+        rows, status = cached
+        if status != "ok":
+            return []
+        return [
+            r for r in rows
+            if r.get("index_id") == index_id
+        ]
+
+    def find_raw(rows: list[dict], start: str, end: str) -> list[dict]:
+        return [
+            r for r in rows
+            if r.get("start_date") == start
+            and (r.get("end_date") or "") == (end or "")
+        ]
+
+    enriched = []
+    raw_cache = {}
+    for item in overlap_rows:
+        if item["classification"] == "invalid_interval":
+            enriched.append(item)
+            continue
+
+        stock_id = item["stock_id"]
+        index_id = item["index_id"]
+        cache_key = (stock_id, index_id)
+        if cache_key not in raw_cache:
+            raw_cache[cache_key] = load_raw_rows(stock_id, index_id)
+        raw_rows = raw_cache[cache_key]
+
+        r1 = find_raw(
+            raw_rows,
+            item["interval_1_start"],
+            item["interval_1_end"],
+        )
+        r2 = find_raw(
+            raw_rows,
+            item["interval_2_start"],
+            item["interval_2_end"],
+        )
+
+        raw1 = r1[0] if r1 else {}
+        raw2 = r2[0] if r2 else {}
+
+        name1 = raw1.get("raw_index_name", "")
+        name2 = raw2.get("raw_index_name", "")
+        code1 = raw1.get("raw_index_code", "")
+        code2 = raw2.get("raw_index_code", "")
+
+        item["name_1"] = name1
+        item["name_2"] = name2
+        item["raw_code_1"] = code1
+        item["raw_code_2"] = code2
+
+        end1 = item["interval_1_end"]
+        end2 = item["interval_2_end"]
+
+        if not r1 or not r2:
+            classification = "raw_source_row_not_found"
+            reason = "normalized interval could not be mapped back to parsed cache"
+        elif not end1 and item["interval_2_start"] > item["interval_1_start"]:
+            classification = "open_ended_superseded_by_later_interval"
+            reason = (
+                "earlier interval has no exit date and a later interval "
+                "starts before the earlier open interval is closed"
+            )
+        elif name1 != name2:
+            classification = "same_code_name_change_overlap"
+            reason = "overlapping intervals have different Sina index names"
+        elif code1 != code2:
+            classification = "alias_code_overlap"
+            reason = "overlapping intervals use different raw Sina index codes"
+        else:
+            classification = "same_name_overlapping_intervals"
+            reason = "same raw index name/code has overlapping intervals"
+
+        item["classification"] = classification
+        item["reason"] = reason
+        enriched.append(item)
+
+    report_columns = [
+        "index_id", "stock_id", "stock_name",
+        "interval_1_start", "interval_1_end",
+        "interval_2_start", "interval_2_end",
+        "name_1", "name_2", "raw_code_1", "raw_code_2",
+        "classification", "reason",
+    ]
+    report_df = pd.DataFrame(enriched, columns=report_columns)
+    report_df = report_df.sort_values(
+        ["index_id", "stock_id", "interval_1_start", "interval_2_start"]
+    ).reset_index(drop=True)
+
+    summary_df = (
+        report_df.groupby(["index_id", "classification"])
+        .size()
+        .reset_index(name="count")
+        .sort_values(["index_id", "classification"])
+        if not report_df.empty
+        else pd.DataFrame(columns=["index_id", "classification", "count"])
+    )
+
+    report_df.to_csv(
+        audit_dir / "overlap_audit.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    summary_df.to_csv(
+        audit_dir / "overlap_audit_summary.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    print()
+    print("=" * 72)
+    print("INTERVAL OVERLAP FORENSIC AUDIT")
+    print("=" * 72)
+    print(report_df.to_string(index=False))
+    print()
+    print("Overlap classification summary:")
+    print(summary_df.to_string(index=False))
+
+    return {
+        "status": "PASS" if report_df.empty else "INFO",
+        "overlap_count": len(report_df),
+        "classification_counts": (
+            report_df["classification"].value_counts().to_dict()
+            if not report_df.empty else {}
+        ),
+        "files": [
+            str(audit_dir / "overlap_audit.csv"),
+            str(audit_dir / "overlap_audit_summary.csv"),
+        ],
+    }
+
+
 def audit_membership_quality(
     df: pd.DataFrame,
     universe: pd.DataFrame,
@@ -1237,6 +1469,7 @@ def audit_membership_quality(
             open_by_month.open_ended_intervals,
         )),
         "a_only_intervals": len(a_only),
+        "overlap_audit": overlap_audit,
         "files": [
             str(audit_dir / "interval_overlap_errors.csv"),
             str(audit_dir / "daily_member_counts.csv"),
@@ -1435,9 +1668,11 @@ def main():
     ab_result = run_ab_diff(a_df, final_df)
     b_only_audit = audit_b_only(a_df, final_df, universe)
     quality_audit = audit_membership_quality(final_df, universe, a_df)
+    overlap_audit = audit_interval_overlaps(final_df, universe)
     boundary_audit = audit_adjustment_boundaries(final_df)
     ab_result["b_only_audit"] = b_only_audit
     ab_result["quality_audit"] = quality_audit
+    ab_result["overlap_audit"] = overlap_audit
     ab_result["boundary_audit"] = boundary_audit
 
     print(
