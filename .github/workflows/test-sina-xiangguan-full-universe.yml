@@ -35,7 +35,6 @@ jobs:
       - name: Build TDX current stock universe
         working-directory: test/tdx_index_api
         run: |
-          # Resolve all transitive dependencies and generate go.sum.
           go mod tidy
 
           cat > /tmp/build_tdx_universe.go <<'EOF'
@@ -123,12 +122,23 @@ jobs:
         run: |
           python test_sina_xiangguan_full_universe.py
 
+      - name: Verify test outputs
+        if: always()
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "TDX universe:"
+          ls -lh "$GITHUB_WORKSPACE/test/tdx_index_api/stock_list_master.json" 2>/dev/null || true
+          echo "Sina output directory:"
+          find "$GITHUB_WORKSPACE/test/tdx_index_api/sina_xiangguan_full_universe" \
+            -maxdepth 1 -type f -print 2>/dev/null | sort || true
+
       - name: Upload XiangGuan test artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sina-xiangguan-full-universe
           path: |
-            test/tdx_index_api/sina_xiangguan_full_universe/
-            test/tdx_index_api/stock_list_master.json
+            ${{ github.workspace }}/test/tdx_index_api/sina_xiangguan_full_universe/**
+            ${{ github.workspace }}/test/tdx_index_api/stock_list_master.json
+          if-no-files-found: warn
           retention-days: 14
