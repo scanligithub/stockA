@@ -35,7 +35,8 @@ jobs:
       - name: Build TDX current stock universe
         working-directory: test/tdx_index_api
         run: |
-          go mod download github.com/injoyai/tdx
+          # Resolve all transitive dependencies and generate go.sum.
+          go mod tidy
 
           cat > /tmp/build_tdx_universe.go <<'EOF'
           package main
