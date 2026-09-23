@@ -36,19 +36,36 @@ CACHE.mkdir(parents=True, exist_ok=True)
 OUT.mkdir(parents=True, exist_ok=True)
 
 INDEX_ALIASES = {
-    "000300": "000300",
-    "399300": "000300",
+    "000001": "000001", "399001": "399001", "399006": "399006",
+    "000688": "000688", "899050": "899050", "000016": "000016",
+    "000300": "000300", "399300": "000300", "000905": "000905", "399905": "000905",
+    "000852": "000852", "399852": "000852", "000851": "000851", "932000": "000851",
+    "399303": "399303", "399330": "399330", "000090": "000090", "399324": "399324",
+    "000015": "000015", "000827": "000827", "399317": "399317", "399807": "399807",
+    "399812": "399812", "399354": "399354", "399673": "399673", "399285": "399285",
+    "399008": "399008", "399993": "399993", "399975": "399975", "399986": "399986",
+    "399932": "399932", "399933": "399933", "399967": "399967", "399989": "399989",
+    "399971": "399971", "399997": "399997", "000934": "000934", "000935": "000935",
+    "399990": "399990", "399998": "399998", "399974": "399974",
 }
 
 TARGET_INDEXES = {
-    "000300": "沪深300",
-    "000905": "中证500",
-    "000852": "中证1000",
-    "000688": "科创50",
-    "000016": "上证50",
-    "399006": "创业板指",
-    "932000": "中证2000",
+    "000001": "上证指数", "399001": "深证成指", "399006": "创业板指",
+    "000688": "科创50", "899050": "北证50", "000016": "上证50",
+    "000300": "沪深300", "000905": "中证500", "000852": "中证1000",
+    "000851": "中证2000", "399303": "国证2000", "399330": "深证100",
+    "000090": "上证180", "399324": "深证红利", "000015": "红利指数",
+    "000827": "中证中盘", "399317": "国证1000", "399807": "中证人工智能",
+    "399812": "国证芯片", "399354": "国证人工智能", "399673": "创业板50",
+    "399285": "国证新能源", "399008": "中小100", "399993": "中证信息安全",
+    "399975": "证券公司", "399986": "中证银行", "399932": "中证消费",
+    "399933": "中证医药", "399967": "中证军工", "399989": "中证医疗",
+    "399971": "中证传媒", "399997": "中证白酒", "000934": "中证能源",
+    "000935": "中证原材料", "399990": "煤炭等权", "399998": "中证有色",
+    "399974": "国证国企",
 }
+
+SINA_COMPONENT_INDEX_IDS = {"000851": "932000"}
 
 WORKERS = int(os.getenv("SINA_WORKERS", "8"))
 DELAY = float(os.getenv("SINA_DELAY", "0.15"))
@@ -259,7 +276,8 @@ def fetch_component_page(
         if kind == "history"
         else "vII_NewestComponent.php"
     )
-    url = f"{BASE}/corp/view/{path}?page={page}&indexid={index_id}"
+    query_index_id = SINA_COMPONENT_INDEX_IDS.get(index_id, index_id)
+    url = f"{BASE}/corp/view/{path}?page={page}&indexid={query_index_id}"
     r = session.get(url, timeout=TIMEOUT)
     r.raise_for_status()
     r.encoding = "gb2312"
@@ -497,8 +515,7 @@ def run_ab_diff(
     a_all = (
         pd.concat(all_a_only, ignore_index=True)
         if all_a_only
-        else pd.DataFrame(columns=key + ["diff"])
-    )
+        else pd.DataFrame(columns=key + ["diff"])    )
     b_all = (
         pd.concat(all_b_only, ignore_index=True)
         if all_b_only
@@ -638,13 +655,8 @@ def audit_b_only(
 
 
 EXPECTED_MEMBER_COUNTS = {
-    "000300": 300,
-    "000905": 500,
-    "000852": 1000,
-    "000688": 50,
-    "000016": 50,
-    "399006": 100,
-    "932000": 2000,
+    "000300": 300, "000905": 500, "000852": 1000,
+    "000688": 50, "000016": 50, "399006": 100, "000851": 2000,
 }
 
 
@@ -995,20 +1007,60 @@ def audit_membership_quality(
                 anomaly_rows.append({**row, "severity": "WARN"})
 
     counts_df = pd.DataFrame(count_rows)
+    if not counts_df.empty:
+        counts_df["previous_member_count"] = (
+            counts_df.groupby("index_id")["member_count"].shift(1)
+        )
+        counts_df["next_member_count"] = (
+            counts_df.groupby("index_id")["member_count"].shift(-1)
+        )
     anomalies_df = pd.DataFrame(anomaly_rows)
     if anomalies_df.empty:
-        anomalies_df = pd.DataFrame(columns=[
-            "index_id", "date", "member_count", "expected",
+        anomalies_df = pd.DataFrame(columns=[            "index_id", "date", "member_count", "expected",
             "ratio", "severity",
         ])
     counts_df.to_csv(
         audit_dir / "daily_member_counts.csv",
         index=False, encoding="utf-8-sig",
     )
+    if not anomalies_df.empty:
+        anomalies_df = counts_df[
+            counts_df["index_id"].isin(anomalies_df["index_id"])
+            & counts_df["date"].isin(anomalies_df["date"])
+        ].copy()
+    else:
+        anomalies_df = counts_df.head(0).copy()
+    anomalies_df["severity"] = "WARN"
     anomalies_df.to_csv(
         audit_dir / "member_count_anomalies.csv",
         index=False, encoding="utf-8-sig",
     )
+
+    anomaly_context_rows = []
+    for _, row in anomalies_df[anomalies_df["index_id"] == "399006"].iterrows():
+        d = pd.Timestamp(row["date"])
+        ctx = counts_df[
+            (counts_df["index_id"] == "399006")
+            & counts_df["date"].between(
+                (d - pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
+                (d + pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
+            )
+        ].copy()
+        ctx["anomaly_date"] = row["date"]
+        anomaly_context_rows.append(ctx)
+    anomaly_context = (
+        pd.concat(anomaly_context_rows, ignore_index=True).drop_duplicates()
+        if anomaly_context_rows else counts_df.head(0).copy()
+    )
+    anomaly_context.to_csv(
+        audit_dir / "399006_anomaly_context.csv",
+        index=False, encoding="utf-8-sig",
+    )
+    if not anomalies_df[anomalies_df["index_id"] == "399006"].empty:
+        print("399006 anomaly details:")
+        print(anomalies_df[anomalies_df["index_id"] == "399006"].to_string(index=False))
+        print("399006 anomaly context:")
+        print(anomaly_context.to_string(index=False))
 
     stats_rows = []
     for index_id, g in counts_df.groupby("index_id"):
@@ -1032,7 +1084,7 @@ def audit_membership_quality(
     )
 
     # Dedicated 932000 audit.
-    g932 = work[work.index_id == "932000"].copy()
+    g932 = work[work.index_id == "000851"].copy()
     open932 = g932[g932.end_date == ""].copy()
     open_by_month = (
         open932.assign(
@@ -1045,13 +1097,13 @@ def audit_membership_quality(
         else pd.DataFrame(columns=["start_month", "open_ended_intervals"])
     )
     open_by_month.to_csv(
-        audit_dir / "932000_open_ended_by_month.csv",
+        audit_dir / "000851_open_ended_by_month.csv",
         index=False, encoding="utf-8-sig",
     )
     open932[["index_id", "stock_id", "start_date", "end_date"]].sort_values(
         ["start_date", "stock_id"]
     ).head(100).to_csv(
-        audit_dir / "932000_open_ended_samples.csv",
+        audit_dir / "000851_open_ended_samples.csv",
         index=False, encoding="utf-8-sig",
     )
 
@@ -1104,7 +1156,7 @@ def audit_membership_quality(
     print(quality_df.to_string(index=False))
     print("Interval overlap/invalid errors =", len(overlap_df))
     print("Member-count diagnostic WARN days =", len(anomalies_df))
-    print("932000 open-ended intervals =", len(open932))
+    print("000851/932000 open-ended intervals =", len(open932))
     print("A-only intervals =", len(a_only))
 
     return {
@@ -1120,8 +1172,8 @@ def audit_membership_quality(
             if not anomalies_df.empty else {}
         ),
         "member_count_stats": stats_df.to_dict(orient="records"),
-        "open_ended_932000": len(open932),
-        "open_ended_932000_by_month": dict(zip(
+        "open_ended_000851": len(open932),
+        "open_ended_000851_by_month": dict(zip(
             open_by_month.start_month,
             open_by_month.open_ended_intervals,
         )),
@@ -1131,8 +1183,9 @@ def audit_membership_quality(
             str(audit_dir / "daily_member_counts.csv"),
             str(audit_dir / "member_count_anomalies.csv"),
             str(audit_dir / "member_count_stats.csv"),
-            str(audit_dir / "932000_open_ended_by_month.csv"),
-            str(audit_dir / "932000_open_ended_samples.csv"),
+            str(audit_dir / "399006_anomaly_context.csv"),
+            str(audit_dir / "000851_open_ended_by_month.csv"),
+            str(audit_dir / "000851_open_ended_samples.csv"),
             str(audit_dir / "a_only_detailed.csv"),
             str(audit_dir / "quality_summary.csv"),
         ],
