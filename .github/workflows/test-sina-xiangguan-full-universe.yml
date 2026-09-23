@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - "test/tdx_index_api/test_sina_xiangguan_full_universe.py"
+      - "test/tdx_index_api/delisted_stock_codes.txt"
       - ".github/workflows/test-sina-xiangguan-full-universe.yml"
 
 jobs:
@@ -30,7 +31,260 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install akshare==1.18.88 pandas pyarrow requests beautifulsoup4
+          pip install pandas pyarrow requests beautifulsoup4
+
+      - name: Build TDX current stock universe
+        working-directory: test/tdx_index_api
+        run: |
+          go mod tidy
+
+          cat > /tmp/build_tdx_universe.go <<'EOF'
+          package main
+
+          import (
+            "encoding/json"
+            "fmt"
+            "os"
+            "strings"
+
+            "github.com/injoyai/tdx"
+            "github.com/injoyai/tdx/protocol"
+          )
+
+          type Stock struct {
+            Code string `json:"code"`
+            Name string `json:"name"`
+            Market string `json:"market"`
+          }Sina XiangGuan Full Stock Universe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "test/tdx_index_api/test_sina_xiangguan_full_universe.py"
+      - "test/tdx_index_api/delisted_stock_codes.txt"
+      - ".github/workflows/test-sina-xiangguan-full-universe.yml"
+
+jobs:
+  test-sina-xiangguan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pyarrow requests beautifulsoup4
+
+      - name: Build TDX current stock universe
+        working-directory: test/tdx_index_api
+        run: |
+          go mod tidy
+
+          cat > /tmp/build_tdx_universe.go <<'EOF'
+          package main
+
+          import (
+            "encoding/json"
+            "fmt"
+            "os"
+            "strings"
+
+            "github.com/injoyai/tdx"
+            "github.com/injoyai/tdx/protocol"
+          )
+
+          type Stock struct {
+            Code string `json:"code"`
+            Name string `json:"name"`
+            Market string `json:"market"`
+          }
+
+          func main() {
+            client, err := tdx.DialDefault()
+            if err != nil { panic(err) }
+            defer client.Close()
+
+            var all []Stock
+
+            // This is intentionally the same TDX server mechanism used by
+            // stockA/scripts/tdx_fetcher.go: SH + SZ + BJ.
+            exchanges := []struct {
+              name string
+              ex protocol.Exchange
+            }{
+              {"SH", protocol.ExchangeSH},
+              {"SZ", protocol.ExchangeSZ},
+              {"BJ", protocol.ExchangeBJ},
+            }
+
+            for _, m := range exchanges {
+              resp, err := client.GetCodeAll(m.ex)
+              if err != nil {
+                panic(fmt.Errorf("%s: %w", m.name, err))
+              }
+              if resp == nil {
+                panic(fmt.Errorf("%s: empty response", m.name))
+              }
+
+              for _, item := range resp.List {
+                code := strings.TrimSpace(item.Code)
+                name := strings.TrimSpace(item.Name)
+                if len(code) != 6 {
+                  continue
+                }
+
+                keep := false
+                switch m.name {
+                case "SH":
+                  keep = strings.HasPrefix(code, "60") ||
+                    strings.HasPrefix(code, "68")
+                case "SZ":
+                  keep = strings.HasPrefix(code, "00") ||
+                    strings.HasPrefix(code, "30")
+                case "BJ":
+                  keep = strings.HasPrefix(code, "43") ||
+                    strings.HasPrefix(code, "83") ||
+                    strings.HasPrefix(code, "87") ||
+                    strings.HasPrefix(code, "88") ||
+                    strings.HasPrefix(code, "92")
+                }
+
+                if keep {
+                  all = append(all, Stock{
+                    Code: code,
+                    Name: name,
+                    Market: m.name,
+                  })
+                }
+              }
+            }
+
+            seen := map[string]bool{}
+            out := make([]Stock, 0, len(all))
+            for _, stock := range all {
+              if !seen[stock.Code] {
+                seen[stock.Code] = true
+                out = append(out, stock)
+              }
+            }
+
+            f, err := os.Create("stock_list_master.json")
+            if err != nil { panic(err) }
+            defer f.Close()
+
+            enc := json.NewEncoder(f)
+            enc.SetIndent("", "  ")
+            if err := enc.Encode(out); err != nil {
+              panic(err)
+            }
+
+            fmt.Printf("TDX current A-share stocks (SH/SZ/BJ): %d\\n", len(out))
+          }Sina XiangGuan Full Stock Universe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "test/tdx_index_api/test_sina_xiangguan_full_universe.py"
+      - "test/tdx_index_api/delisted_stock_codes.txt"
+      - ".github/workflows/test-sina-xiangguan-full-universe.yml"
+
+jobs:
+  test-sina-xiangguan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pyarrow requests beautifulsoup4
+
+      - name: Build TDX current stock universe
+        working-directory: test/tdx_index_api
+        run: |
+          go mod tidy
+
+          cat > /tmp/build_tdx_universe.go <<'EOF'
+          package main
+
+          import (
+            "encoding/json"
+            "fmt"
+            "os"
+            "strings"
+
+            "github.com/injoyai/tdx"
+            "github.com/injoyai/tdx/protocol"
+          )
+
+          type Stock struct {
+            Code string `json:"code"`
+            Name string `json:"name"`
+            Market string `json:"market"`
+          }Sina XiangGuan Full Stock Universe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "test/tdx_index_api/test_sina_xiangguan_full_universe.py"
+      - "test/tdx_index_api/delisted_stock_codes.txt"
+      - ".github/workflows/test-sina-xiangguan-full-universe.yml"
+
+jobs:
+  test-sina-xiangguan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pyarrow requests beautifulsoup4
 
       - name: Build TDX current stock universe
         working-directory: test/tdx_index_api
@@ -126,8 +380,10 @@ jobs:
         if: always()
         run: |
           echo "Workspace: $GITHUB_WORKSPACE"
-          echo "TDX universe:"
+          echo "TDX universe (from TDX server):"
           ls -lh "$GITHUB_WORKSPACE/test/tdx_index_api/stock_list_master.json" 2>/dev/null || true
+          echo "Supplied delisted code list:"
+          wc -l "$GITHUB_WORKSPACE/test/tdx_index_api/delisted_stock_codes.txt" 2>/dev/null || true
           echo "Sina output directory:"
           find "$GITHUB_WORKSPACE/test/tdx_index_api/sina_xiangguan_full_universe" \
             -maxdepth 1 -type f -print 2>/dev/null | sort || true
