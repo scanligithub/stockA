@@ -984,7 +984,7 @@ def audit_membership_quality(
         max_date = (
             max_end
             if pd.notna(max_end)
-            else pd.Timestamp.utcnow().tz_localize(None).normalize()
+            else pd.Timestamp.now("UTC").tz_localize(None).normalize()
         )
         expected = EXPECTED_MEMBER_COUNTS.get(index_id)
         for date in pd.date_range(min_date, max_date, freq="D"):
@@ -1016,7 +1016,8 @@ def audit_membership_quality(
         )
     anomalies_df = pd.DataFrame(anomaly_rows)
     if anomalies_df.empty:
-        anomalies_df = pd.DataFrame(columns=[            "index_id", "date", "member_count", "expected",
+        anomalies_df = pd.DataFrame(columns=[
+            "index_id", "date", "member_count", "expected",
             "ratio", "severity",
         ])
     counts_df.to_csv(
@@ -1030,6 +1031,24 @@ def audit_membership_quality(
         ].copy()
     else:
         anomalies_df = counts_df.head(0).copy()
+
+    # 399006 initialization-stage observations are informational only.
+    init_info_mask = (
+        (anomalies_df["index_id"] == "399006")
+        & anomalies_df["date"].isin(["2010-06-01", "2010-06-02"])
+    )
+    initialization_rows = anomalies_df[init_info_mask].copy()
+    if not initialization_rows.empty:
+        initialization_rows["severity"] = "INFO"
+        initialization_rows["reason"] = "index_initialization_phase"
+        initialization_rows.to_csv(
+            audit_dir / "399006_initialization_info.csv",
+            index=False, encoding="utf-8-sig",
+        )
+        print("399006 initialization-stage member-count INFO:")
+        print(initialization_rows.to_string(index=False))
+
+    anomalies_df = anomalies_df[~init_info_mask].copy()
     anomalies_df["severity"] = "WARN"
     anomalies_df.to_csv(
         audit_dir / "member_count_anomalies.csv",
@@ -1171,6 +1190,7 @@ def audit_membership_quality(
             anomalies_df.groupby("index_id").size().to_dict()
             if not anomalies_df.empty else {}
         ),
+        "399006_initialization_info_rows": len(initialization_rows),
         "member_count_stats": stats_df.to_dict(orient="records"),
         "open_ended_000851": len(open932),
         "open_ended_000851_by_month": dict(zip(
@@ -1182,6 +1202,7 @@ def audit_membership_quality(
             str(audit_dir / "interval_overlap_errors.csv"),
             str(audit_dir / "daily_member_counts.csv"),
             str(audit_dir / "member_count_anomalies.csv"),
+            str(audit_dir / "399006_initialization_info.csv"),
             str(audit_dir / "member_count_stats.csv"),
             str(audit_dir / "399006_anomaly_context.csv"),
             str(audit_dir / "000851_open_ended_by_month.csv"),
