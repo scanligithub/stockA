@@ -523,6 +523,119 @@ def run_ab_diff(
     }
 
 
+
+def audit_b_only(
+    a_df: pd.DataFrame,
+    b_df: pd.DataFrame,
+    universe: pd.DataFrame,
+) -> dict:
+    """Audit intervals found by B but missed by A candidate discovery."""
+    audit_dir = OUT / "ab_diff"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    key = ["index_id", "stock_id", "start_date", "end_date"]
+
+    a_keys = set(map(tuple, a_df[key].itertuples(index=False, name=None)))
+    b_tuples = b_df[key].apply(tuple, axis=1)
+    b_only = b_df[~b_tuples.isin(a_keys)][key].copy()
+
+    source_map = universe.set_index("code")["source"].to_dict()
+
+    if b_only.empty:
+        detail = pd.DataFrame(columns=[
+            *key, "source", "interval_count_for_stock",
+            "first_start_for_stock", "last_end_for_stock",
+        ])
+    else:
+        counts = b_only.groupby(["index_id", "stock_id"]).size().rename(
+            "interval_count_for_stock"
+        )
+        first_start = b_only.groupby(["index_id", "stock_id"])["start_date"].min().rename(
+            "first_start_for_stock"
+        )
+        last_end = b_only.groupby(["index_id", "stock_id"])["end_date"].max().rename(
+            "last_end_for_stock"
+        )
+        detail = b_only.merge(counts.reset_index(), on=["index_id", "stock_id"])
+        detail = detail.merge(first_start.reset_index(), on=["index_id", "stock_id"])
+        detail = detail.merge(last_end.reset_index(), on=["index_id", "stock_id"])
+        detail["source"] = detail["stock_id"].map(source_map).fillna("unknown")
+        detail = detail.sort_values(
+            ["index_id", "first_start_for_stock", "stock_id", "start_date"]
+        ).reset_index(drop=True)
+
+    summary_rows = []
+    for index_id in TARGET_INDEXES:
+        g = detail[detail.index_id == index_id]
+        stocks = set(g.stock_id)
+        summary_rows.append({
+            "index_id": index_id,
+            "b_only_intervals": len(g),
+            "b_only_stocks": len(stocks),
+            "current_stocks": sum(source_map.get(x) == "tdx_current" for x in stocks),
+            "delisted_only_stocks": sum(source_map.get(x) == "delisted" for x in stocks),
+            "earliest_start": g.start_date.min() if not g.empty else "",
+            "latest_start": g.start_date.max() if not g.empty else "",
+            "open_ended_intervals": int((g.end_date == "").sum()) if not g.empty else 0,
+        })
+    summary = pd.DataFrame(summary_rows)
+
+    detail.to_csv(audit_dir / "b_only_stock_audit.csv", index=False, encoding="utf-8-sig")
+    summary.to_csv(audit_dir / "b_only_summary.csv", index=False, encoding="utf-8-sig")
+
+    samples = []
+    for index_id in TARGET_INDEXES:
+        g = detail[detail.index_id == index_id]
+        for label, sg in (
+            ("earliest", g.sort_values(["start_date", "stock_id"]).head(10)),
+            ("latest", g.sort_values(["start_date", "stock_id"], ascending=False).head(10)),
+            ("open_ended", g[g.end_date == ""].sort_values(["start_date", "stock_id"]).head(10)),
+        ):
+            if not sg.empty:
+                samples.append(sg.assign(sample=label))
+    sample_df = (
+        pd.concat(samples, ignore_index=True)
+        if samples else detail.head(0).assign(sample=pd.Series(dtype=str))
+    )
+    sample_df.to_csv(
+        audit_dir / "b_only_representative_samples.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    a_only = []
+    for index_id in TARGET_INDEXES:
+        a = a_df[a_df.index_id == index_id][key].drop_duplicates()
+        b = b_df[b_df.index_id == index_id][key].drop_duplicates()
+        merged = a.merge(b, on=key, how="outer", indicator=True)
+        x = merged[merged["_merge"] == "left_only"].drop(columns="_merge")
+        if not x.empty:
+            a_only.append(x)
+    a_only_df = pd.concat(a_only, ignore_index=True) if a_only else pd.DataFrame(columns=key)
+    a_only_df.to_csv(
+        audit_dir / "a_only_intervals_detail.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    print()
+    print("=" * 72)
+    print("B-ONLY AUDIT")
+    print("=" * 72)
+    print(summary.to_string(index=False))
+
+    return {
+        "b_only_intervals": len(detail),
+        "b_only_stocks": int(detail.stock_id.nunique()) if not detail.empty else 0,
+        "summary": summary.to_dict(orient="records"),
+        "audit_files": [
+            str(audit_dir / "b_only_stock_audit.csv"),
+            str(audit_dir / "b_only_summary.csv"),
+            str(audit_dir / "b_only_representative_samples.csv"),
+            str(audit_dir / "a_only_intervals_detail.csv"),
+        ],
+    }
+
+
 def worker(code: str):
     session = requests.Session()
     session.headers.update({
@@ -690,6 +803,8 @@ def main():
     )
 
     ab_result = run_ab_diff(a_df, final_df)
+    b_only_audit = audit_b_only(a_df, final_df, universe)
+    ab_result["b_only_audit"] = b_only_audit
 
     print(
         f"A normalized intervals = {len(a_df)}, "
