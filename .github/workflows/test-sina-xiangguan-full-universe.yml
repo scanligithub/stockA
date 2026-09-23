@@ -1,0 +1,68 @@
+name: Test Sina XiangGuan Full Stock Universe
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "test/tdx_index_api/test_sina_xiangguan_full_universe.py"
+      - ".github/workflows/test-sina-xiangguan-full-universe.yml"
+
+jobs:
+  test-sina-xiangguan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install akshare==1.18.88 pandas pyarrow requests beautifulsoup4
+
+      - name: Download Go dependencies
+        working-directory: test/tdx_index_api
+        run: |
+          go mod tidy
+          go mod download
+
+      - name: Build TDX current stock universe
+        working-directory: test/tdx_index_api
+        run: |
+          go run . -mode list
+          python - <<'PY'
+          import json
+          p = "stock_list_master.json"
+          data = json.load(open(p, encoding="utf-8"))
+          print(f"TDX current stock list: {len(data)}")
+          PY
+
+      - name: Run full-universe Sina XiangGuan test
+        working-directory: test/tdx_index_api
+        env:
+          SINA_WORKERS: "8"
+          SINA_DELAY: "0.15"
+        run: |
+          python test_sina_xiangguan_full_universe.py
+
+      - name: Upload XiangGuan test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sina-xiangguan-full-universe
+          path: |
+            test/tdx_index_api/sina_xiangguan_full_universe/
+            test/tdx_index_api/stock_list_master.json
+          retention-days: 14
