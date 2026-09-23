@@ -148,14 +148,19 @@ jobs:
           path: |
             test/tdx_index_api/sina_xiangguan_cache
             test/tdx_index_api/sina_xiangguan_parsed_cache
-          key: ${{ runner.os }}-sina-xiangguan-v3-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}
+          # GitHub cache entries are immutable. Use a unique snapshot key
+          # per run so the expanded cache can be saved for the next run.
+          key: ${{ runner.os }}-sina-xiangguan-v4-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}-${{ github.run_id }}
           restore-keys: |
+            ${{ runner.os }}-sina-xiangguan-v4-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}-
             ${{ runner.os }}-sina-xiangguan-v3-
 
       - name: Report Sina cache status
         working-directory: test/tdx_index_api
         run: |
           echo "Exact cache hit: ${{ steps.sina-cache.outputs.cache-hit }}"
+          echo "Cache primary key: ${{ steps.sina-cache.outputs.cache-primary-key }}"
+          echo "Cache matched key: ${{ steps.sina-cache.outputs.cache-matched-key }}"
           echo "Cached HTML files before test:"
           find sina_xiangguan_cache -maxdepth 1 -type f -name '*.html' | wc -l
           echo "Cached parsed JSON files before test:"
@@ -171,13 +176,13 @@ jobs:
           python test_sina_xiangguan_full_universe.py
 
       - name: Save updated Sina XiangGuan HTML cache
-        if: always() && steps.sina-cache.outputs.cache-hit != 'true'
+        if: always()
         uses: actions/cache/save@v4
         with:
           path: |
             test/tdx_index_api/sina_xiangguan_cache
             test/tdx_index_api/sina_xiangguan_parsed_cache
-          key: ${{ runner.os }}-sina-xiangguan-v3-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}
+          key: ${{ runner.os }}-sina-xiangguan-v4-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}-${{ github.run_id }}
 
       - name: Report Sina cache after test
         if: always()
