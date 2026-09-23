@@ -636,6 +636,247 @@ def audit_b_only(
     }
 
 
+
+EXPECTED_MEMBER_COUNTS = {
+    "000300": 300,
+    "000905": 500,
+    "000852": 1000,
+    "000688": 50,
+    "000016": 50,
+    "399006": 300,
+    "932000": 2000,
+}
+
+
+def audit_membership_quality(
+    df: pd.DataFrame,
+    universe: pd.DataFrame,
+    a_df: pd.DataFrame,
+) -> dict:
+    """Offline structural/PIT quality audit; network-free."""
+    audit_dir = OUT / "quality_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+
+    key = ["index_id", "stock_id", "start_date", "end_date"]
+    work = df.copy()
+    if work.empty:
+        return {"status": "FAIL", "reason": "empty membership dataframe"}
+
+    work["start_date_dt"] = pd.to_datetime(work["start_date"])
+    work["end_date_dt"] = pd.to_datetime(
+        work["end_date"].replace("", pd.NA), errors="coerce"
+    )
+
+    # Explicit interval integrity check.
+    overlap_rows = []
+    for (idx, stock), g in work.groupby(["index_id", "stock_id"]):
+        g = g.sort_values(["start_date_dt", "end_date_dt"], na_position="last")
+        prev_end = None
+        for _, r in g.iterrows():
+            start = r["start_date_dt"]
+            end = r["end_date_dt"]
+            if pd.notna(end) and start >= end:
+                overlap_rows.append({
+                    "index_id": idx, "stock_id": stock,
+                    "start_date": r["start_date"], "end_date": r["end_date"],
+                    "type": "invalid_interval",
+                    "previous_end": "",
+                })
+            if prev_end is not None and start < prev_end:
+                overlap_rows.append({
+                    "index_id": idx, "stock_id": stock,
+                    "start_date": r["start_date"], "end_date": r["end_date"],
+                    "type": "overlap",
+                    "previous_end": prev_end.strftime("%Y-%m-%d"),
+                })
+            prev_end = end if pd.notna(end) else pd.Timestamp.max
+
+    overlap_df = pd.DataFrame(overlap_rows)
+    if overlap_df.empty:
+        overlap_df = pd.DataFrame(columns=[
+            "index_id", "stock_id", "start_date", "end_date",
+            "type", "previous_end",
+        ])
+    overlap_df.to_csv(
+        audit_dir / "interval_overlap_errors.csv",
+        index=False, encoding="utf-8-sig",
+    )
+
+    # Daily PIT member counts. Deviations are WARN diagnostics, not FAIL.
+    count_rows = []
+    anomaly_rows = []
+    for index_id, g in work.groupby("index_id"):
+        min_date = g["start_date_dt"].min()
+        max_end = g["end_date_dt"].max()
+        max_date = (
+            max_end
+            if pd.notna(max_end)
+            else pd.Timestamp.utcnow().tz_localize(None).normalize()
+        )
+        expected = EXPECTED_MEMBER_COUNTS.get(index_id)
+        for date in pd.date_range(min_date, max_date, freq="D"):
+            starts = g["start_date_dt"].to_numpy()
+            ends = g["end_date_dt"].to_numpy()
+            count = int(((starts <= date) & (
+                pd.isna(ends) | (date < ends)
+            )).sum())
+            row = {
+                "index_id": index_id,
+                "date": date.strftime("%Y-%m-%d"),
+                "member_count": count,
+                "expected": expected if expected else "",
+                "ratio": round(count / expected, 4) if expected else "",
+            }
+            count_rows.append(row)
+            if expected and (
+                count < expected * 0.80 or count > expected * 1.20
+            ):
+                anomaly_rows.append({**row, "severity": "WARN"})
+
+    counts_df = pd.DataFrame(count_rows)
+    anomalies_df = pd.DataFrame(anomaly_rows)
+    if anomalies_df.empty:
+        anomalies_df = pd.DataFrame(columns=[
+            "index_id", "date", "member_count", "expected",
+            "ratio", "severity",
+        ])
+    counts_df.to_csv(
+        audit_dir / "daily_member_counts.csv",
+        index=False, encoding="utf-8-sig",
+    )
+    anomalies_df.to_csv(
+        audit_dir / "member_count_anomalies.csv",
+        index=False, encoding="utf-8-sig",
+    )
+
+    stats_rows = []
+    for index_id, g in counts_df.groupby("index_id"):
+        s = g["member_count"]
+        stats_rows.append({
+            "index_id": index_id,
+            "expected": EXPECTED_MEMBER_COUNTS.get(index_id, ""),
+            "min": int(s.min()),
+            "p01": float(s.quantile(0.01)),
+            "median": float(s.median()),
+            "p99": float(s.quantile(0.99)),
+            "max": int(s.max()),
+            "anomaly_days": int(
+                len(anomalies_df[anomalies_df.index_id == index_id])
+            ),
+        })
+    stats_df = pd.DataFrame(stats_rows)
+    stats_df.to_csv(
+        audit_dir / "member_count_stats.csv",
+        index=False, encoding="utf-8-sig",
+    )
+
+    # Dedicated 932000 audit.
+    g932 = work[work.index_id == "932000"].copy()
+    open932 = g932[g932.end_date == ""].copy()
+    open_by_month = (
+        open932.assign(
+            start_month=open932.start_date_dt.dt.to_period("M").astype(str)
+        )
+        .groupby("start_month")
+        .size()
+        .reset_index(name="open_ended_intervals")
+        if not open932.empty
+        else pd.DataFrame(columns=["start_month", "open_ended_intervals"])
+    )
+    open_by_month.to_csv(
+        audit_dir / "932000_open_ended_by_month.csv",
+        index=False, encoding="utf-8-sig",
+    )
+    open932[["index_id", "stock_id", "start_date", "end_date"]].sort_values(
+        ["start_date", "stock_id"]
+    ).head(100).to_csv(
+        audit_dir / "932000_open_ended_samples.csv",
+        index=False, encoding="utf-8-sig",
+    )
+
+    # A-only detail with source/name.
+    a_keys = set(map(tuple, a_df[key].itertuples(index=False, name=None)))
+    b_keys = set(map(tuple, df[key].itertuples(index=False, name=None)))
+    a_only = a_df[
+        a_df[key].apply(tuple, axis=1).isin(a_keys - b_keys)
+    ][key].drop_duplicates()
+    source_map = universe.set_index("code")["source"].to_dict()
+    name_map = universe.set_index("code")["name"].to_dict()
+    if not a_only.empty:
+        a_only = a_only.copy()
+        a_only["stock_name"] = a_only["stock_id"].map(name_map).fillna("")
+        a_only["universe_source"] = a_only["stock_id"].map(
+            source_map
+        ).fillna("unknown")
+    a_only.to_csv(
+        audit_dir / "a_only_detailed.csv",
+        index=False, encoding="utf-8-sig",
+    )
+
+    quality_rows = []
+    for index_id in TARGET_INDEXES:
+        cg = counts_df[counts_df.index_id == index_id]
+        og = overlap_df[overlap_df.index_id == index_id]
+        qg = anomalies_df[anomalies_df.index_id == index_id]
+        quality_rows.append({
+            "index_id": index_id,
+            "expected": EXPECTED_MEMBER_COUNTS.get(index_id, ""),
+            "min": int(cg.member_count.min()) if not cg.empty else "",
+            "median": float(cg.member_count.median()) if not cg.empty else "",
+            "max": int(cg.member_count.max()) if not cg.empty else "",
+            "anomaly_days": len(qg),
+            "overlap_or_invalid": len(og),
+            "open_ended_intervals": int(
+                ((work.index_id == index_id) & (work.end_date == "")).sum()
+            ),
+        })
+    quality_df = pd.DataFrame(quality_rows)
+    quality_df.to_csv(
+        audit_dir / "quality_summary.csv",
+        index=False, encoding="utf-8-sig",
+    )
+
+    print()
+    print("=" * 72)
+    print("MEMBERSHIP QUALITY AUDIT")
+    print("=" * 72)
+    print(quality_df.to_string(index=False))
+    print("Interval overlap/invalid errors =", len(overlap_df))
+    print("Member-count diagnostic WARN days =", len(anomalies_df))
+    print("932000 open-ended intervals =", len(open932))
+    print("A-only intervals =", len(a_only))
+
+    return {
+        "status": "PASS" if overlap_df.empty else "FAIL",
+        "overlap_count": len(overlap_df),
+        "overlap_by_index": (
+            overlap_df.groupby("index_id").size().to_dict()
+            if not overlap_df.empty else {}
+        ),
+        "count_anomaly_rows": len(anomalies_df),
+        "count_anomaly_by_index": (
+            anomalies_df.groupby("index_id").size().to_dict()
+            if not anomalies_df.empty else {}
+        ),
+        "member_count_stats": stats_df.to_dict(orient="records"),
+        "open_ended_932000": len(open932),
+        "open_ended_932000_by_month": dict(zip(
+            open_by_month.start_month,
+            open_by_month.open_ended_intervals,
+        )),
+        "a_only_intervals": len(a_only),
+        "files": [
+            str(audit_dir / "interval_overlap_errors.csv"),
+            str(audit_dir / "daily_member_counts.csv"),
+            str(audit_dir / "member_count_anomalies.csv"),
+            str(audit_dir / "member_count_stats.csv"),
+            str(audit_dir / "932000_open_ended_by_month.csv"),
+            str(audit_dir / "932000_open_ended_samples.csv"),
+            str(audit_dir / "a_only_detailed.csv"),
+            str(audit_dir / "quality_summary.csv"),
+        ],
+    }
+
 def worker(code: str):
     session = requests.Session()
     session.headers.update({
@@ -804,7 +1045,9 @@ def main():
 
     ab_result = run_ab_diff(a_df, final_df)
     b_only_audit = audit_b_only(a_df, final_df, universe)
+    quality_audit = audit_membership_quality(final_df, universe, a_df)
     ab_result["b_only_audit"] = b_only_audit
+    ab_result["quality_audit"] = quality_audit
 
     print(
         f"A normalized intervals = {len(a_df)}, "
@@ -898,6 +1141,7 @@ def main():
         or missing_indexes
         or a_candidate_errors
         or a_xiangguan_errors
+        or quality_audit["status"] == "FAIL"
     ):
         if missing_indexes:
             print(f"ERROR: target indexes missing: {missing_indexes}")
