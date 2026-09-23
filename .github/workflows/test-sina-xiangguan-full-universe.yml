@@ -32,22 +32,85 @@ jobs:
           python -m pip install --upgrade pip
           pip install akshare==1.18.88 pandas pyarrow requests beautifulsoup4
 
-      - name: Download Go dependencies
-        working-directory: test/tdx_index_api
-        run: |
-          go mod tidy
-          go mod download
-
       - name: Build TDX current stock universe
         working-directory: test/tdx_index_api
         run: |
-          go run . -mode list
-          python - <<'PY'
-          import json
-          p = "stock_list_master.json"
-          data = json.load(open(p, encoding="utf-8"))
-          print(f"TDX current stock list: {len(data)}")
-          PY
+          cat > /tmp/build_tdx_universe.go <<'EOF'
+          package main
+
+          import (
+            "encoding/json"
+            "fmt"
+            "os"
+            "strings"
+
+            "github.com/injoyai/tdx"
+            "github.com/injoyai/tdx/protocol"
+          )
+
+          type Stock struct {
+            Code string `json:"code"`
+            Name string `json:"name"`
+            Market string `json:"market"`
+          }
+
+          func main() {
+            client, err := tdx.DialDefault()
+            if err != nil { panic(err) }
+            defer client.Close()
+
+            var all []Stock
+            for _, m := range []struct{
+              name string
+              ex protocol.Exchange
+            }{
+              {"SH", protocol.ExchangeSH},
+              {"SZ", protocol.ExchangeSZ},
+            } {
+              resp, err := client.GetCodeAll(m.ex)
+              if err != nil { panic(fmt.Errorf("%s: %w", m.name, err)) }
+              for _, item := range resp.List {
+                code := strings.TrimSpace(item.Code)
+                name := strings.TrimSpace(item.Name)
+                if len(code) != 6 { continue }
+
+                if m.name == "SH" && !strings.HasPrefix(code, "6") {
+                  continue
+                }
+                if m.name == "SZ" &&
+                  !(strings.HasPrefix(code, "000") ||
+                    strings.HasPrefix(code, "001") ||
+                    strings.HasPrefix(code, "002") ||
+                    strings.HasPrefix(code, "003") ||
+                    strings.HasPrefix(code, "300") ||
+                    strings.HasPrefix(code, "301")) {
+                  continue
+                }
+
+                all = append(all, Stock{Code: code, Name: name, Market: m.name})
+              }
+            }
+
+            seen := map[string]bool{}
+            out := make([]Stock, 0, len(all))
+            for _, s := range all {
+              if !seen[s.Code] {
+                seen[s.Code] = true
+                out = append(out, s)
+              }
+            }
+
+            f, err := os.Create("stock_list_master.json")
+            if err != nil { panic(err) }
+            defer f.Close()
+            enc := json.NewEncoder(f)
+            enc.SetIndent("", "  ")
+            if err := enc.Encode(out); err != nil { panic(err) }
+
+            fmt.Printf("TDX current A-share stocks: %d\n", len(out))
+          }
+          EOF
+          go run /tmp/build_tdx_universe.go
 
       - name: Run full-universe Sina XiangGuan test
         working-directory: test/tdx_index_api
