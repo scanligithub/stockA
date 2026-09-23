@@ -649,15 +649,15 @@ EXPECTED_MEMBER_COUNTS = {
 
 
 
+
 def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
-    """Audit PIT membership exactly on every entry/exit effective date.
+    """Audit PIT entry/exit boundaries efficiently.
 
-    For each interval:
-      entry: member must be absent on start_date - 1 day and present on start_date.
-      exit:  member must be present on end_date - 1 day and absent on end_date.
-
-    This directly verifies the intended half-open semantics:
+    Verifies the half-open interval semantics:
         start_date <= as_of < end_date
+
+    The audit uses pre-built per-(index, stock) interval maps and aggregate
+    adjustment-date counts, avoiding repeated whole-DataFrame filtering.
     """
     audit_dir = OUT / "quality_audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
@@ -671,26 +671,35 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
         work["end_date"].replace("", pd.NA), errors="coerce"
     )
 
+    # Build once: each stock has only its own intervals.
+    interval_map = {}
+    for (index_id, stock_id), g in work.groupby(["index_id", "stock_id"], sort=False):
+        intervals = [
+            (r.start_date_dt, r.end_date_dt)
+            for r in g.itertuples(index=False)
+        ]
+        interval_map[(index_id, stock_id)] = intervals
+
+    def member_on(index_id: str, stock_id: str, date: pd.Timestamp) -> bool:
+        """O(1)-ish lookup over this stock's small interval list."""
+        for start, end in interval_map.get((index_id, stock_id), ()):
+            if start <= date and (pd.isna(end) or date < end):
+                return True
+        return False
+
     checks = []
     failures = []
 
-    def member_on(index_id: str, stock_id: str, date: pd.Timestamp) -> bool:
-        g = work[
-            (work.index_id == index_id) &
-            (work.stock_id == stock_id)
-        ]
-        return bool((
-            (g.start_date_dt <= date) &
-            (g.end_date_dt.isna() | (date < g.end_date_dt))
-        ).any())
-
-    # Entry boundaries.
-    for row in work.itertuples(index=False):
+    # Entry checks.
+    entry_rows = work[
+        ["index_id", "stock_id", "start_date_dt"]
+    ].itertuples(index=False)
+    entry_total = len(work)
+    for n, row in enumerate(entry_rows, 1):
         start = row.start_date_dt
         before = start - pd.Timedelta(days=1)
-        on = start
         before_actual = member_on(row.index_id, row.stock_id, before)
-        on_actual = member_on(row.index_id, row.stock_id, on)
+        on_actual = member_on(row.index_id, row.stock_id, start)
         ok = (not before_actual) and on_actual
         item = {
             "index_id": row.index_id,
@@ -698,7 +707,7 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
             "change_type": "entry",
             "change_date": start.strftime("%Y-%m-%d"),
             "probe_date_before": before.strftime("%Y-%m-%d"),
-            "probe_date_on": on.strftime("%Y-%m-%d"),
+            "probe_date_on": start.strftime("%Y-%m-%d"),
             "before_member": before_actual,
             "on_member": on_actual,
             "expected_before": False,
@@ -708,16 +717,23 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
         checks.append(item)
         if not ok:
             failures.append(item)
+        if n % 2000 == 0 or n == entry_total:
+            print(
+                f"Boundary audit: entry checks {n}/{entry_total} "
+                f"failures={len(failures)}",
+                flush=True,
+            )
 
-    # Exit boundaries. Current/open-ended intervals have no exit date.
-    for row in work.itertuples(index=False):
-        if pd.isna(row.end_date_dt):
-            continue
+    # Exit checks.
+    exit_rows = work[
+        work["end_date_dt"].notna()
+    ][["index_id", "stock_id", "end_date_dt"]].itertuples(index=False)
+    exit_total = int(work["end_date_dt"].notna().sum())
+    for n, row in enumerate(exit_rows, 1):
         end = row.end_date_dt
         before = end - pd.Timedelta(days=1)
-        on = end
         before_actual = member_on(row.index_id, row.stock_id, before)
-        on_actual = member_on(row.index_id, row.stock_id, on)
+        on_actual = member_on(row.index_id, row.stock_id, end)
         ok = before_actual and (not on_actual)
         item = {
             "index_id": row.index_id,
@@ -725,7 +741,7 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
             "change_type": "exit",
             "change_date": end.strftime("%Y-%m-%d"),
             "probe_date_before": before.strftime("%Y-%m-%d"),
-            "probe_date_on": on.strftime("%Y-%m-%d"),
+            "probe_date_on": end.strftime("%Y-%m-%d"),
             "before_member": before_actual,
             "on_member": on_actual,
             "expected_before": True,
@@ -735,6 +751,12 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
         checks.append(item)
         if not ok:
             failures.append(item)
+        if n % 2000 == 0 or n == exit_total:
+            print(
+                f"Boundary audit: exit checks {n}/{exit_total} "
+                f"failures={len(failures)}",
+                flush=True,
+            )
 
     checks_df = pd.DataFrame(checks)
     failures_df = pd.DataFrame(failures)
@@ -752,33 +774,80 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
         encoding="utf-8-sig",
     )
 
-    # Aggregate every adjustment date so simultaneous additions/removals are
-    # also visible as a count transition.
+    # Aggregate adjustment-day transitions directly from interval boundaries.
+    # For each date:
+    #   before_count = prior active count
+    #   on_count     = before_count + entries - exits
     transition_rows = []
-    for index_id in TARGET_INDEXES:
-        g = work[work.index_id == index_id]
-        dates = sorted(set(g.start_date_dt.dropna()) | set(g.end_date_dt.dropna()))
-        for date in dates:
-            before = date - pd.Timedelta(days=1)
-            before_count = sum(member_on(index_id, stock, before) for stock in g.stock_id.unique())
-            on_count = sum(member_on(index_id, stock, date) for stock in g.stock_id.unique())
-            added = g[g.start_date_dt == date].stock_id.tolist()
-            removed = g[g.end_date_dt == date].stock_id.tolist()
+    for index_id, g in work.groupby("index_id", sort=True):
+        starts = (
+            g.groupby("start_date_dt")
+            .size()
+            .rename("added_count")
+        )
+        exits = (
+            g[g["end_date_dt"].notna()]
+            .groupby("end_date_dt")
+            .size()
+            .rename("removed_count")
+        )
+        changes = pd.concat([starts, exits], axis=1).fillna(0).astype(int).reset_index()
+        changes = changes.rename(columns={"index": "change_date"})
+        changes = changes.sort_values("change_date")
+
+        # Establish the count immediately before the first boundary from
+        # interval membership, then update incrementally thereafter.
+        dates = changes["change_date"].tolist()
+        all_stocks = set(g["stock_id"])
+        first_date = dates[0]
+        before_date = first_date - pd.Timedelta(days=1)
+        before_count = sum(
+            member_on(index_id, stock_id, before_date)
+            for stock_id in all_stocks
+        )
+
+        for row in changes.itertuples(index=False):
+            change_date = row.change_date
+            added_count = int(row.added_count)
+            removed_count = int(row.removed_count)
+            on_count = before_count + added_count - removed_count
+
+            added = g[
+                g["start_date_dt"] == change_date
+            ]["stock_id"].tolist()
+            removed = g[
+                g["end_date_dt"] == change_date
+            ]["stock_id"].tolist()
+
             transition_rows.append({
                 "index_id": index_id,
-                "change_date": date.strftime("%Y-%m-%d"),
+                "change_date": change_date.strftime("%Y-%m-%d"),
                 "before_count": before_count,
                 "on_count": on_count,
                 "delta": on_count - before_count,
-                "added_count": len(added),
-                "removed_count": len(removed),
+                "added_count": added_count,
+                "removed_count": removed_count,
                 "added_stocks": ",".join(sorted(added)),
                 "removed_stocks": ",".join(sorted(removed)),
             })
+            before_count = on_count
 
     transitions_df = pd.DataFrame(transition_rows)
     transitions_df.to_csv(
         audit_dir / "adjustment_day_transitions.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    # Independent transition consistency check:
+    # before + added - removed must equal on.
+    transition_failures = transitions_df[
+        transitions_df["before_count"] +
+        transitions_df["added_count"] -
+        transitions_df["removed_count"] != transitions_df["on_count"]
+    ].copy()
+    transition_failures.to_csv(
+        audit_dir / "adjustment_transition_failures.csv",
         index=False,
         encoding="utf-8-sig",
     )
@@ -813,12 +882,18 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
     print(summary_df.to_string(index=False))
     print("Boundary checks =", len(checks_df))
     print("Boundary failures =", len(failures_df))
+    print("Transition consistency failures =", len(transition_failures))
     print("Adjustment days =", len(transitions_df))
 
     return {
-        "status": "PASS" if failures_df.empty else "FAIL",
+        "status": (
+            "PASS"
+            if failures_df.empty and transition_failures.empty
+            else "FAIL"
+        ),
         "check_count": len(checks_df),
         "failure_count": len(failures_df),
+        "transition_failure_count": len(transition_failures),
         "failures_by_index": (
             failures_df.groupby("index_id").size().to_dict()
             if not failures_df.empty else {}
@@ -828,6 +903,7 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
             str(audit_dir / "adjustment_boundary_checks.csv"),
             str(audit_dir / "adjustment_boundary_failures.csv"),
             str(audit_dir / "adjustment_day_transitions.csv"),
+            str(audit_dir / "adjustment_transition_failures.csv"),
             str(audit_dir / "adjustment_boundary_summary.csv"),
         ],
     }
