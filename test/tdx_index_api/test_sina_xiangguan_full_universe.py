@@ -247,6 +247,282 @@ def parse_xiangguan(html: str, stock_code: str):
     return result, "ok"
 
 
+
+def fetch_component_page(
+    session: requests.Session,
+    index_id: str,
+    kind: str,
+    page: int,
+) -> str:
+    path = (
+        "vII_HistoryComponent.php"
+        if kind == "history"
+        else "vII_NewestComponent.php"
+    )
+    url = f"{BASE}/corp/view/{path}?page={page}&indexid={index_id}"
+    r = session.get(url, timeout=TIMEOUT)
+    r.raise_for_status()
+    r.encoding = "gb2312"
+    return r.text
+
+
+def component_page_count(html: str) -> int:
+    pages = [int(x) for x in re.findall(r"[?&]page=(\d+)", html)]
+    return max(pages, default=1)
+
+
+def parse_component_codes(html: str) -> set[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        for row in rows[:6]:
+            headers = [
+                x.get_text(" ", strip=True)
+                for x in row.find_all(["th", "td"])
+            ]
+            if "品种代码" not in headers:
+                continue
+
+            code_pos = headers.index("品种代码")
+            codes = set()
+            for data_row in rows[rows.index(row) + 1:]:
+                vals = [
+                    x.get_text(" ", strip=True)
+                    for x in data_row.find_all(["th", "td"])
+                ]
+                if len(vals) <= code_pos:
+                    continue
+                code = normalize_code(vals[code_pos])
+                if re.fullmatch(r"\d{6}", code):
+                    codes.add(code)
+            if codes:
+                return codes
+    return set()
+
+
+def collect_a_candidates() -> tuple[dict[str, set[str]], list[dict]]:
+    """
+    Build A = HistoryComponent ∪ NewestComponent candidate stocks.
+
+    This only discovers candidate stock codes. The actual historical
+    intervals are still parsed from the same XiangGuan pages used by B,
+    so the A/B comparison has identical normalization semantics.
+    """
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": UA,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    })
+
+    candidates = {}
+    errors = []
+
+    for index_id in TARGET_INDEXES:
+        codes = set()
+        for kind in ("history", "newest"):
+            try:
+                first = fetch_component_page(session, index_id, kind, 1)
+                pages = component_page_count(first)
+                for page in range(1, pages + 1):
+                    html = (
+                        first
+                        if page == 1
+                        else fetch_component_page(
+                            session, index_id, kind, page
+                        )
+                    )
+                    codes.update(parse_component_codes(html))
+                print(
+                    f"A candidates {index_id} {kind}: "
+                    f"pages={pages} stocks={len(codes)}",
+                    flush=True,
+                )
+            except Exception as exc:
+                errors.append({
+                    "index_id": index_id,
+                    "kind": kind,
+                    "error": repr(exc),
+                })
+
+        candidates[index_id] = codes
+        print(
+            f"A candidates {index_id}: union={len(codes)}",
+            flush=True,
+        )
+
+    return candidates, errors
+
+
+def build_a_from_xiangguan(
+    candidates: dict[str, set[str]],
+) -> tuple[pd.DataFrame, list[dict]]:
+    """
+    Convert A candidate stocks into normalized intervals.
+
+    Reuse the B XiangGuan cache whenever possible. If A discovers a stock
+    that was not present in the B universe, fetch that stock page here.
+    """
+    rows = []
+    errors = []
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": UA,
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    })
+
+    all_codes = sorted(set().union(*candidates.values()))
+    for n, code in enumerate(all_codes, 1):
+        try:
+            html, _ = fetch_html(session, code)
+            parsed, status = parse_xiangguan(html, code)
+            if status != "ok":
+                errors.append({
+                    "code": code,
+                    "status": status,
+                    "error": "XiangGuan parse failed for A candidate",
+                })
+                continue
+
+            wanted = set()
+            for index_id, codes in candidates.items():
+                if code in codes:
+                    wanted.add(index_id)
+
+            rows.extend(
+                row for row in parsed
+                if row["index_id"] in wanted
+            )
+        except Exception as exc:
+            errors.append({
+                "code": code,
+                "status": "http_error",
+                "error": repr(exc),
+            })
+
+        if n % 100 == 0 or n == len(all_codes):
+            print(
+                f"A XiangGuan [{n}/{len(all_codes)}] "
+                f"intervals={len(rows)} errors={len(errors)}",
+                flush=True,
+            )
+
+    columns = ["index_id", "stock_id", "start_date", "end_date"]
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df = pd.DataFrame(columns=columns)
+    else:
+        df = (
+            df[columns]
+            .drop_duplicates()
+            .sort_values(columns)
+            .reset_index(drop=True)
+        )
+    return df, errors
+
+
+def run_ab_diff(
+    a_df: pd.DataFrame,
+    b_df: pd.DataFrame,
+) -> dict:
+    diff_dir = OUT / "ab_diff"
+    diff_dir.mkdir(parents=True, exist_ok=True)
+    key = ["index_id", "stock_id", "start_date", "end_date"]
+
+    summary_rows = []
+    all_a_only = []
+    all_b_only = []
+
+    for index_id in TARGET_INDEXES:
+        a = a_df[a_df.index_id == index_id][key].drop_duplicates()
+        b = b_df[b_df.index_id == index_id][key].drop_duplicates()
+
+        merged = a.merge(
+            b,
+            on=key,
+            how="outer",
+            indicator=True,
+        )
+        a_only = (
+            merged[merged["_merge"] == "left_only"]
+            .drop(columns="_merge")
+            .sort_values(key)
+        )
+        b_only = (
+            merged[merged["_merge"] == "right_only"]
+            .drop(columns="_merge")
+            .sort_values(key)
+        )
+
+        a_only.to_csv(
+            diff_dir / f"{index_id}_a_minus_b.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+        b_only.to_csv(
+            diff_dir / f"{index_id}_b_minus_a.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+
+        for frame, side in ((a_only, "A-B"), (b_only, "B-A")):
+            if not frame.empty:
+                temp = frame.copy()
+                temp["diff"] = side
+                if side == "A-B":
+                    all_a_only.append(temp)
+                else:
+                    all_b_only.append(temp)
+
+        a_stocks = set(a.stock_id)
+        b_stocks = set(b.stock_id)
+        summary_rows.append({
+            "index_id": index_id,
+            "a_intervals": len(a),
+            "b_intervals": len(b),
+            "a_only_intervals": len(a_only),
+            "b_only_intervals": len(b_only),
+            "a_stocks": len(a_stocks),
+            "b_stocks": len(b_stocks),
+            "a_only_stocks": len(a_stocks - b_stocks),
+            "b_only_stocks": len(b_stocks - a_stocks),
+        })
+
+    summary_df = pd.DataFrame(summary_rows)
+    summary_df.to_csv(
+        diff_dir / "all_indices_diff_summary.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    a_all = (
+        pd.concat(all_a_only, ignore_index=True)
+        if all_a_only
+        else pd.DataFrame(columns=key + ["diff"])
+    )
+    b_all = (
+        pd.concat(all_b_only, ignore_index=True)
+        if all_b_only
+        else pd.DataFrame(columns=key + ["diff"])
+    )
+    a_all.to_csv(
+        diff_dir / "all_a_minus_b.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    b_all.to_csv(
+        diff_dir / "all_b_minus_a.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    return {
+        "summary": summary_rows,
+        "a_minus_b_intervals": len(a_all),
+        "b_minus_a_intervals": len(b_all),
+        "diff_dir": str(diff_dir),
+    }
+
+
 def worker(code: str):
     session = requests.Session()
     session.headers.update({
@@ -395,6 +671,36 @@ def main():
 
     errors = validate(final_df)
 
+    print()
+    print("=" * 72)
+    print("A/B COMPLETENESS DIFF")
+    print("=" * 72)
+
+    a_candidates, a_candidate_errors = collect_a_candidates()
+    a_df, a_xiangguan_errors = build_a_from_xiangguan(a_candidates)
+
+    a_df.to_csv(
+        OUT / "ab_a_index_membership_history.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    a_df.to_parquet(
+        OUT / "ab_a_index_membership_history.parquet",
+        index=False,
+    )
+
+    ab_result = run_ab_diff(a_df, final_df)
+
+    print(
+        f"A normalized intervals = {len(a_df)}, "
+        f"B normalized intervals = {len(final_df)}"
+    )
+    print(
+        f"A-B intervals = {ab_result['a_minus_b_intervals']}, "
+        f"B-A intervals = {ab_result['b_minus_a_intervals']}"
+    )
+    print(json.dumps(ab_result["summary"], ensure_ascii=False, indent=2))
+
     pit_tests = [
         ("000300", "000895", "2005-04-08", True),
         ("000300", "000895", "2007-07-01", True),
@@ -444,6 +750,11 @@ def main():
         ),
         "validation_errors": errors,
         "pit_failed": pit_failed,
+        "ab": {
+            "candidate_errors": a_candidate_errors,
+            "xiangguan_errors": a_xiangguan_errors,
+            **ab_result,
+        },
         "output_dir": str(OUT),
     }
 
@@ -465,7 +776,14 @@ def main():
     )
     missing_indexes = sorted(required - actual)
 
-    if failures or errors or pit_failed or missing_indexes:
+    if (
+        failures
+        or errors
+        or pit_failed
+        or missing_indexes
+        or a_candidate_errors
+        or a_xiangguan_errors
+    ):
         if missing_indexes:
             print(f"ERROR: target indexes missing: {missing_indexes}")
         print("FEASIBILITY TEST: FAIL")
