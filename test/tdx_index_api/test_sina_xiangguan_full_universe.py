@@ -842,7 +842,7 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
             .size()
             .rename("removed_count")
         )
-        changes = pd.concat([starts, exits], axis=1).fillna(0).astype(int).reset_index()
+        changes = pd.concat([starts, exits], axis=1, sort=False).fillna(0).astype(int).reset_index()
         changes = changes.rename(columns={"index": "change_date"})
         changes = changes.sort_values("change_date")
 
