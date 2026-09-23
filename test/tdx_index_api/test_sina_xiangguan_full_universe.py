@@ -1469,7 +1469,6 @@ def audit_membership_quality(
             open_by_month.open_ended_intervals,
         )),
         "a_only_intervals": len(a_only),
-        "overlap_audit": overlap_audit,
         "files": [
             str(audit_dir / "interval_overlap_errors.csv"),
             str(audit_dir / "daily_member_counts.csv"),
