@@ -145,10 +145,12 @@ jobs:
         id: sina-cache
         uses: actions/cache@v4
         with:
-          path: test/tdx_index_api/sina_xiangguan_cache
-          key: ${{ runner.os }}-sina-xiangguan-v2-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}
+          path: |
+            test/tdx_index_api/sina_xiangguan_cache
+            test/tdx_index_api/sina_xiangguan_parsed_cache
+          key: ${{ runner.os }}-sina-xiangguan-v3-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}
           restore-keys: |
-            ${{ runner.os }}-sina-xiangguan-v2-
+            ${{ runner.os }}-sina-xiangguan-v3-
 
       - name: Report Sina cache status
         working-directory: test/tdx_index_api
@@ -156,7 +158,9 @@ jobs:
           echo "Exact cache hit: ${{ steps.sina-cache.outputs.cache-hit }}"
           echo "Cached HTML files before test:"
           find sina_xiangguan_cache -maxdepth 1 -type f -name '*.html' | wc -l
-          du -sh sina_xiangguan_cache 2>/dev/null || true
+          echo "Cached parsed JSON files before test:"
+          find sina_xiangguan_parsed_cache -maxdepth 1 -type f -name '*.json' | wc -l
+          du -sh sina_xiangguan_cache sina_xiangguan_parsed_cache 2>/dev/null || true
 
       - name: Run full-universe Sina XiangGuan test
         working-directory: test/tdx_index_api
@@ -170,8 +174,10 @@ jobs:
         if: always() && steps.sina-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: test/tdx_index_api/sina_xiangguan_cache
-          key: ${{ runner.os }}-sina-xiangguan-v2-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}
+          path: |
+            test/tdx_index_api/sina_xiangguan_cache
+            test/tdx_index_api/sina_xiangguan_parsed_cache
+          key: ${{ runner.os }}-sina-xiangguan-v3-${{ hashFiles('test/tdx_index_api/stock_list_master.json', 'test/tdx_index_api/delisted_stock_codes.txt') }}
 
       - name: Report Sina cache after test
         if: always()
@@ -179,7 +185,9 @@ jobs:
         run: |
           echo "Sina HTML files after test:"
           find sina_xiangguan_cache -maxdepth 1 -type f -name '*.html' | wc -l
-          du -sh sina_xiangguan_cache 2>/dev/null || true
+          echo "Sina parsed JSON files after test:"
+          find sina_xiangguan_parsed_cache -maxdepth 1 -type f -name '*.json' | wc -l
+          du -sh sina_xiangguan_cache sina_xiangguan_parsed_cache 2>/dev/null || true
 
       - name: Verify test outputs
         if: always()

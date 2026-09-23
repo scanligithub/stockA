@@ -31,8 +31,10 @@ from bs4 import BeautifulSoup
 BASE = "https://vip.stock.finance.sina.com.cn"
 ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / "sina_xiangguan_cache"
+PARSED_CACHE = ROOT / "sina_xiangguan_parsed_cache"
 OUT = ROOT / "sina_xiangguan_full_universe"
 CACHE.mkdir(parents=True, exist_ok=True)
+PARSED_CACHE.mkdir(parents=True, exist_ok=True)
 OUT.mkdir(parents=True, exist_ok=True)
 
 INDEX_ALIASES = {
@@ -161,6 +163,38 @@ def build_universe() -> pd.DataFrame:
 
 def cache_path(code: str) -> Path:
     return CACHE / f"{code}.html"
+
+
+def parsed_cache_path(code: str) -> Path:
+    return PARSED_CACHE / f"{code}.json"
+
+
+def load_parsed_cache(code: str):
+    path = parsed_cache_path(code)
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("version") != 1 or payload.get("stock_id") != code:
+            return None
+        rows = payload.get("rows")
+        status = payload.get("status")
+        if not isinstance(rows, list) or status not in {"ok", "parse_error"}:
+            return None
+        return rows, status
+    except Exception:
+        return None
+
+
+def save_parsed_cache(code: str, rows, status: str):
+    parsed_cache_path(code).write_text(
+        json.dumps(
+            {"version": 1, "stock_id": code, "status": status, "rows": rows},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
 
 
 def fetch_html(session: requests.Session, code: str) -> tuple[str, str]:
@@ -391,8 +425,13 @@ def build_a_from_xiangguan(
     all_codes = sorted(set().union(*candidates.values()))
     for n, code in enumerate(all_codes, 1):
         try:
-            html, _ = fetch_html(session, code)
-            parsed, status = parse_xiangguan(html, code)
+            cached = load_parsed_cache(code)
+            if cached is None:
+                html, _ = fetch_html(session, code)
+                parsed, status = parse_xiangguan(html, code)
+                save_parsed_cache(code, parsed, status)
+            else:
+                parsed, status = cached
             if status != "ok":
                 errors.append({
                     "code": code,
@@ -1213,6 +1252,13 @@ def audit_membership_quality(
     }
 
 def worker(code: str):
+    # Prefer structured parsed cache. This avoids both HTTP and BeautifulSoup
+    # work on subsequent runs.
+    cached = load_parsed_cache(code)
+    if cached is not None:
+        rows, status = cached
+        return code, rows, status, "parsed_cache", ""
+
     session = requests.Session()
     session.headers.update({
         "User-Agent": UA,
@@ -1221,6 +1267,7 @@ def worker(code: str):
     try:
         html, source = fetch_html(session, code)
         rows, status = parse_xiangguan(html, code)
+        save_parsed_cache(code, rows, status)
         return code, rows, status, source, ""
     except Exception as exc:
         return code, [], "http_error", "network", repr(exc)
@@ -1294,6 +1341,9 @@ def main():
     failures = []
     status_counts = {}
     cache_hits = 0
+    parsed_cache_hits = 0
+    network_fetches = 0
+    started_fetch = time.perf_counter()
 
     codes = universe.code.tolist()
     total = len(codes)
@@ -1305,6 +1355,10 @@ def main():
             status_counts[status] = status_counts.get(status, 0) + 1
             if source == "cache":
                 cache_hits += 1
+            elif source == "parsed_cache":
+                parsed_cache_hits += 1
+            elif source == "network":
+                network_fetches += 1
             if status == "ok":
                 all_rows.extend(rows)
             else:
@@ -1435,6 +1489,9 @@ def main():
         "workers": WORKERS,
         "delay": DELAY,
         "cache_hits": cache_hits,
+        "parsed_cache_hits": parsed_cache_hits,
+        "network_fetches": network_fetches,
+        "fetch_phase_seconds": round(time.perf_counter() - started_fetch, 3),
         "status_counts": status_counts,
         "failed_count": len(failures),
         "raw_target_rows": len(all_rows),
