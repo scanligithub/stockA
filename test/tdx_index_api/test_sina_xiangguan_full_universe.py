@@ -1370,7 +1370,10 @@ def main():
             if n % 100 == 0 or n == total:
                 print(
                     f"[{n}/{total}] rows={len(all_rows)} "
-                    f"failures={len(failures)} cache={cache_hits}",
+                    f"failures={len(failures)} "
+                    f"html_cache={cache_hits} "
+                    f"parsed_cache={parsed_cache_hits} "
+                    f"network={network_fetches}",
                     flush=True,
                 )
 
