@@ -298,6 +298,52 @@ def parse_xiangguan(html: str, stock_code: str):
     return result, "ok"
 
 
+def normalize_intervals(df: pd.DataFrame) -> pd.DataFrame:
+    """Close superseded open-ended Sina intervals within each stock/index.
+
+    Sina XiangGuan can contain an older membership row with an empty
+    end_date followed by a newer entry row for the same index and stock.
+    For PIT half-open semantics, the older row ends on the newer row's
+    start_date. Only strictly later starts are used; the source data is
+    otherwise left unchanged.
+    """
+    columns = ["index_id", "stock_id", "start_date", "end_date"]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = df[columns].drop_duplicates().copy()
+    work["start_date_dt"] = pd.to_datetime(work["start_date"])
+    work["end_date_dt"] = pd.to_datetime(
+        work["end_date"].replace("", pd.NA), errors="coerce"
+    )
+
+    normalized = []
+    for (index_id, stock_id), group in work.groupby(
+        ["index_id", "stock_id"], sort=False
+    ):
+        group = group.sort_values(["start_date_dt", "end_date_dt"], na_position="last").copy()
+        starts = group["start_date_dt"].tolist()
+        rows = group.to_dict("records")
+        for i, row in enumerate(rows):
+            if pd.isna(row["end_date_dt"]):
+                later_starts = [d for d in starts[i + 1:] if d > row["start_date_dt"]]
+                if later_starts:
+                    row["end_date_dt"] = min(later_starts)
+                    row["end_date"] = row["end_date_dt"].strftime("%Y-%m-%d")
+            normalized.append(row)
+
+    result = pd.DataFrame(normalized)
+    result["start_date"] = result["start_date_dt"].dt.strftime("%Y-%m-%d")
+    result["end_date"] = result["end_date_dt"].apply(
+        lambda x: "" if pd.isna(x) else x.strftime("%Y-%m-%d")
+    )
+    return (
+        result[columns]
+        .drop_duplicates()
+        .sort_values(columns)
+        .reset_index(drop=True)
+    )
+
 
 def fetch_component_page(
     session: requests.Session,
@@ -468,12 +514,7 @@ def build_a_from_xiangguan(
     if df.empty:
         df = pd.DataFrame(columns=columns)
     else:
-        df = (
-            df[columns]
-            .drop_duplicates()
-            .sort_values(columns)
-            .reset_index(drop=True)
-        )
+        df = normalize_intervals(df)
     return df, errors
 
 
@@ -1628,6 +1669,10 @@ def main():
         index=False,
         encoding="utf-8-sig",
     )
+    raw_membership_df = raw_df[
+        ["index_id", "stock_id", "start_date", "end_date"]
+    ].copy()
+    final_df = normalize_intervals(raw_membership_df)
     final_df.to_csv(
         OUT / "index_membership_history.csv",
         index=False,
@@ -1667,7 +1712,7 @@ def main():
     ab_result = run_ab_diff(a_df, final_df)
     b_only_audit = audit_b_only(a_df, final_df, universe)
     quality_audit = audit_membership_quality(final_df, universe, a_df)
-    overlap_audit = audit_interval_overlaps(final_df, universe)
+    overlap_audit = audit_interval_overlaps(raw_membership_df, universe)
     boundary_audit = audit_adjustment_boundaries(final_df)
     ab_result["b_only_audit"] = b_only_audit
     ab_result["quality_audit"] = quality_audit
