@@ -742,14 +742,19 @@ EXPECTED_MEMBER_COUNTS = {
 
 
 
-def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
+def audit_adjustment_boundaries(
+    df: pd.DataFrame,
+    raw_df: pd.DataFrame | None = None,
+) -> dict:
     """Audit PIT entry/exit boundaries efficiently.
 
     Verifies the half-open interval semantics:
         start_date <= as_of < end_date
 
-    The audit uses pre-built per-(index, stock) interval maps and aggregate
-    adjustment-date counts, avoiding repeated whole-DataFrame filtering.
+    Superseded open-ended Sina rows are normalized by closing them on the
+    later row's start date. Such synthetic rollover boundaries represent
+    continuity, not a real exit/entry, and are audited separately as
+    before=True/on=True rather than as a member exit.
     """
     audit_dir = OUT / "quality_audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
@@ -762,6 +767,30 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
     work["end_date_dt"] = pd.to_datetime(
         work["end_date"].replace("", pd.NA), errors="coerce"
     )
+
+    # Identify synthetic closes created by normalize_intervals().
+    # These are not real Sina exit events: an older open-ended row is closed
+    # on the start date of a later row for the same stock/index.
+    synthetic_rollover_dates = set()
+    if raw_df is not None and not raw_df.empty:
+        raw_work = raw_df[
+            ["index_id", "stock_id", "start_date", "end_date"]
+        ].drop_duplicates().copy()
+        raw_work["start_date_dt"] = pd.to_datetime(raw_work["start_date"])
+        raw_work["end_date_dt"] = pd.to_datetime(
+            raw_work["end_date"].replace("", pd.NA), errors="coerce"
+        )
+        for (idx, stock), group in raw_work.groupby(
+            ["index_id", "stock_id"], sort=False
+        ):
+            starts = sorted(group["start_date_dt"].tolist())
+            for _, row in group.iterrows():
+                if pd.isna(row["end_date_dt"]):
+                    later = [d for d in starts if d > row["start_date_dt"]]
+                    if later:
+                        synthetic_rollover_dates.add(
+                            (idx, stock, min(later))
+                        )
 
     # Build once: each stock has only its own intervals.
     interval_map = {}
@@ -782,7 +811,8 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
     checks = []
     failures = []
 
-    # Entry checks.
+    # Entry checks. A later start that closes an earlier open-ended row
+    # is a rollover, not a true membership entry.
     entry_rows = work[
         ["index_id", "stock_id", "start_date_dt"]
     ].itertuples(index=False)
@@ -792,18 +822,28 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
         before = start - pd.Timedelta(days=1)
         before_actual = member_on(row.index_id, row.stock_id, before)
         on_actual = member_on(row.index_id, row.stock_id, start)
-        ok = (not before_actual) and on_actual
+        is_rollover = (
+            row.index_id, row.stock_id, start
+        ) in synthetic_rollover_dates
+        if is_rollover:
+            expected_before, expected_on = True, True
+            ok = before_actual and on_actual
+            change_type = "rollover"
+        else:
+            expected_before, expected_on = False, True
+            ok = (not before_actual) and on_actual
+            change_type = "entry"
         item = {
             "index_id": row.index_id,
             "stock_id": row.stock_id,
-            "change_type": "entry",
+            "change_type": change_type,
             "change_date": start.strftime("%Y-%m-%d"),
             "probe_date_before": before.strftime("%Y-%m-%d"),
             "probe_date_on": start.strftime("%Y-%m-%d"),
             "before_member": before_actual,
             "on_member": on_actual,
-            "expected_before": False,
-            "expected_on": True,
+            "expected_before": expected_before,
+            "expected_on": expected_on,
             "status": "PASS" if ok else "FAIL",
         }
         checks.append(item)
@@ -811,18 +851,23 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
             failures.append(item)
         if n % 2000 == 0 or n == entry_total:
             print(
-                f"Boundary audit: entry checks {n}/{entry_total} "
+                f"Boundary audit: entry/rollover checks {n}/{entry_total} "
                 f"failures={len(failures)}",
                 flush=True,
             )
 
-    # Exit checks.
+    # Exit checks. Synthetic rollover dates are deliberately excluded here;
+    # they are continuity points, not exits.
     exit_rows = work[
         work["end_date_dt"].notna()
     ][["index_id", "stock_id", "end_date_dt"]].itertuples(index=False)
     exit_total = int(work["end_date_dt"].notna().sum())
-    for n, row in enumerate(exit_rows, 1):
+    real_exit_n = 0
+    for row in exit_rows:
         end = row.end_date_dt
+        if (row.index_id, row.stock_id, end) in synthetic_rollover_dates:
+            continue
+        real_exit_n += 1
         before = end - pd.Timedelta(days=1)
         before_actual = member_on(row.index_id, row.stock_id, before)
         on_actual = member_on(row.index_id, row.stock_id, end)
@@ -843,9 +888,9 @@ def audit_adjustment_boundaries(df: pd.DataFrame) -> dict:
         checks.append(item)
         if not ok:
             failures.append(item)
-        if n % 2000 == 0 or n == exit_total:
+        if real_exit_n % 2000 == 0 or real_exit_n == exit_total - len(synthetic_rollover_dates):
             print(
-                f"Boundary audit: exit checks {n}/{exit_total} "
+                f"Boundary audit: real exit checks {real_exit_n}/{exit_total - len(synthetic_rollover_dates)} "
                 f"failures={len(failures)}",
                 flush=True,
             )
@@ -1713,7 +1758,7 @@ def main():
     b_only_audit = audit_b_only(a_df, final_df, universe)
     quality_audit = audit_membership_quality(final_df, universe, a_df)
     overlap_audit = audit_interval_overlaps(raw_membership_df, universe)
-    boundary_audit = audit_adjustment_boundaries(final_df)
+    boundary_audit = audit_adjustment_boundaries(final_df, raw_membership_df)
     ab_result["b_only_audit"] = b_only_audit
     ab_result["quality_audit"] = quality_audit
     ab_result["overlap_audit"] = overlap_audit
