@@ -622,14 +622,11 @@ def main() -> None:
     print(f"unique candidate stocks: {classified['code'].nunique()}")
     print(f"current BSE candidates:  {len(active_risk)}")
     print(f"delisted candidates:     {len(delisted)}")
-    print("
------ DELISTED CANDIDATES -----")
+    print("\n----- DELISTED CANDIDATES -----")
     print(delisted.to_string(index=False))
-    print("
------ STILL CURRENT / RISK -----")
+    print("\n----- STILL CURRENT / RISK -----")
     print(active_risk.to_string(index=False))
-    print(f"
-OUTPUT: {OUTPUT_DIR / 'bse_delisted.csv'}")
+    print(f"\nOUTPUT: {OUTPUT_DIR / 'bse_delisted.csv'}")
     print("=============================")
 
 
