@@ -40,9 +40,8 @@ START_DATE = date(2021, 11, 15)
 END_DATE = date.today()
 ANNOUNCEMENT_TYPE = "2"
 
-# Only one historical scan. The previous implementation repeatedly scanned
-# five one-year windows and three keywords, causing hundreds of redundant
-# requests against the same BSE announcement index.
+# BSE date filtering is only reliable as a bounded window, so scan one
+# calendar month at a time and merge/dedupe the returned announcements.
 SERVER_KEYWORD = ""
 
 REQUEST_TIMEOUT = (15, 60)
@@ -214,7 +213,7 @@ def fetch_page(
     start_date: date,
     end_date: date,
 ) -> tuple[list[dict], int, int]:
-    callback = f"jQuery{int(time.time() * 1000)}_{page}"
+    callback = f"jQuery{start_date:%Y%m%d}{end_date:%Y%m%d}{page:04d}"
     form_data = [
         ("siteId", "6"),
         # The BSE endpoint requires flag=0 for the disclosure-list query.
