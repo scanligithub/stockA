@@ -470,30 +470,35 @@ def repair_placeholder_starts(
     """
     Replace Sina XiangGuan's 1900-01-01 placeholder starts.
 
-    Sina's XiangGuan table can emit 1900-01-01 for the first membership
-    interval of some indexes. HistoryComponent carries the actual historical
-    "纳入日期", so use that page as the authoritative repair source.
+    XiangGuan may use 1900-01-01 for the first historical membership
+    interval. HistoryComponent provides true per-stock admission dates for
+    part of the history. Its historical table is itself a limited view, so
+    when an affected stock is absent there, fall back to the earliest valid
+    admission date observed for that index.
 
-    Only the start date is repaired here. End dates remain from XiangGuan;
-    interval normalization is applied afterwards, preserving the validated
-    rollover semantics already used by this builder.
+    The repair is intentionally two-level:
+      1. stock-specific HistoryComponent date, when available;
+      2. index historical earliest date, only when stock-specific evidence
+         is unavailable.
+
+    Every repair is written to placeholder_start_repairs.csv with its source.
     """
+    audit_columns = [
+        "index_id",
+        "stock_id",
+        "old_start_date",
+        "new_start_date",
+        "history_rows",
+        "source",
+        "status",
+    ]
+
     if df.empty:
-        return df, pd.DataFrame(
-            columns=[
-                "index_id", "stock_id", "old_start_date", "new_start_date",
-                "history_rows", "status",
-            ]
-        )
+        return df, pd.DataFrame(columns=audit_columns)
 
     affected = df[df["start_date"] == "1900-01-01"].copy()
     if affected.empty:
-        return df, pd.DataFrame(
-            columns=[
-                "index_id", "stock_id", "old_start_date", "new_start_date",
-                "history_rows", "status",
-            ]
-        )
+        return df, pd.DataFrame(columns=audit_columns)
 
     wanted: dict[str, set[str]] = {}
     for row in affected.itertuples(index=False):
@@ -532,9 +537,17 @@ def repair_placeholder_starts(
                     "old_start_date": "1900-01-01",
                     "new_start_date": "",
                     "history_rows": 0,
+                    "source": "history_component_error",
                     "status": f"ERROR: {exc!r}",
                 })
             continue
+
+        valid_dates = [
+            row["start_date"]
+            for row in all_history
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["start_date"])
+        ]
+        index_earliest = min(valid_dates) if valid_dates else ""
 
         candidate_dates: dict[str, list[str]] = {}
         for row in all_history:
@@ -546,18 +559,27 @@ def repair_placeholder_starts(
 
         for stock_id in sorted(stock_ids):
             dates = sorted(set(candidate_dates.get(stock_id, [])))
-            if not dates:
+
+            if dates:
+                new_start = dates[0]
+                source = "history_component_stock"
+                history_rows = len(dates)
+            elif index_earliest:
+                new_start = index_earliest
+                source = "history_component_index_earliest"
+                history_rows = 0
+            else:
                 audit_rows.append({
                     "index_id": index_id,
                     "stock_id": stock_id,
                     "old_start_date": "1900-01-01",
                     "new_start_date": "",
                     "history_rows": 0,
+                    "source": "history_component_unavailable",
                     "status": "UNRESOLVED",
                 })
                 continue
 
-            new_start = dates[0]
             mask = (
                 (repaired["index_id"] == index_id)
                 & (repaired["stock_id"] == stock_id)
@@ -570,11 +592,12 @@ def repair_placeholder_starts(
                 "stock_id": stock_id,
                 "old_start_date": "1900-01-01",
                 "new_start_date": new_start,
-                "history_rows": len(dates),
+                "history_rows": history_rows,
+                "source": source,
                 "status": "REPAIRED",
             })
 
-    audit = pd.DataFrame(audit_rows)
+    audit = pd.DataFrame(audit_rows, columns=audit_columns)
     return repaired, audit
 
 
@@ -1134,6 +1157,12 @@ def main() -> None:
         "placeholder_start_repairs": int(
             (placeholder_audit["status"] == "REPAIRED").sum()
         ) if not placeholder_audit.empty else 0,
+        "placeholder_start_repairs_by_source": (
+            placeholder_audit.loc[
+                placeholder_audit["status"] == "REPAIRED", "source"
+            ].value_counts().to_dict()
+            if not placeholder_audit.empty else {}
+        ),
         "placeholder_start_unresolved": unresolved_placeholders,
         "placeholder_start_remaining": int(
             (final_df["start_date"] == "1900-01-01").sum()
@@ -1167,6 +1196,15 @@ def main() -> None:
         "Placeholder starts repaired:   "
         f"{int((placeholder_audit['status'] == 'REPAIRED').sum())}"
     )
+    if not placeholder_audit.empty:
+        print(
+            "Placeholder repair sources:     "
+            + str(
+                placeholder_audit.loc[
+                    placeholder_audit["status"] == "REPAIRED", "source"
+                ].value_counts().to_dict()
+            )
+        )
     print(
         "Placeholder starts unresolved: "
         f"{unresolved_placeholders}"
