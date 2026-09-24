@@ -69,7 +69,7 @@ SZSE_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.6",
     "Cache-Control": "no-cache",
     "Referer": "https://www.szse.cn/market/stock/suspend/index.html",
-    "User-Agent": BSE_HEADERS["User-Agent"],
+    "User-Agent": COMMON_USER_AGENT,
 }
 
 
