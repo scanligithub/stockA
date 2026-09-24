@@ -44,7 +44,7 @@ BSE_CURRENT_LIST_URL = f"{BSE_BASE_URL}/nqxxController/nqxxCnzq.do"
 BSE_RISK_API_URL = f"{BSE_BASE_URL}/nqxxController/getRiskWarningStock.do"
 BSE_CODE_MAPPING_URL = f"{BSE_BASE_URL}/service/code_mapping.html"
 CNINFO_TERMINATION_URL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
-SSE_URL = "https://query.sse.com.cn/commonQuery.do"
+SSE_URL = "https://query.sse.com.cn/sseQuery/commonQuery.do"
 SZSE_URL = "https://www.szse.cn/api/report/ShowReport"
 
 COMMON_USER_AGENT = (
@@ -61,7 +61,7 @@ SSE_HEADERS = {
     "Connection": "keep-alive",
     "Host": "query.sse.com.cn",
     "Pragma": "no-cache",
-    "Referer": "https://www.sse.com.cn/",
+    "Referer": "https://www.sse.com.cn/assortment/stock/list/delisting/",
     "User-Agent": COMMON_USER_AGENT,
 }
 SZSE_HEADERS = {
