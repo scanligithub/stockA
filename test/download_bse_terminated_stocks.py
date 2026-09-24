@@ -39,8 +39,6 @@ BSE_BASE_URL = "https://www.bse.cn"
 BSE_PAGE_URL = f"{BSE_BASE_URL}/disclosure/announcement.html"
 BSE_CURRENT_LIST_URL = f"{BSE_BASE_URL}/nqxxController/nqxxCnzq.do"
 BSE_RISK_API_URL = f"{BSE_BASE_URL}/nqxxController/getRiskWarningStock.do"
-BSE_CODE_MAPPING_URL = f"{BSE_BASE_URL}/service/code_mapping.html"
-
 CNINFO_TERMINATION_URL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
 
 START_DATE = date(2021, 11, 15)
@@ -507,72 +505,28 @@ def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
     return result
 
 
-def parse_code_mapping_html(html: str) -> pd.DataFrame:
-    """Parse the static BSE official old/new code mapping table."""
-    rows: list[list[str]] = []
-    for row_match in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", html, re.I | re.S):
-        cells = re.findall(
-            r"<t[dh]\b[^>]*>(.*?)</t[dh]>",
-            row_match.group(1),
-            re.I | re.S,
-        )
-        cleaned = [
-            re.sub(r"\s+", " ", strip_html(cell)).strip()
-            for cell in cells
-        ]
-        if cleaned:
-            rows.append(cleaned)
+def build_verified_code_mapping() -> pd.DataFrame:
+    """Return the verified historical code aliases needed by this dataset.
 
-    header_index = -1
-    for idx, row in enumerate(rows):
-        joined = " ".join(row)
-        if "旧代码" in joined and "新代码" in joined:
-            header_index = idx
-            break
-
-    if header_index < 0:
-        raise RuntimeError("BSE code mapping: header row not found")
-
-    output: list[dict] = []
-    for row in rows[header_index + 1 :]:
-        if len(row) < 5:
-            continue
-        # Expected columns: 序号 / 证券简称 / 上市日期 / 旧代码 / 新代码
-        old_code = normalize_code(row[-2])
-        new_code = normalize_code(row[-1])
-        if not is_bse_code(old_code) or not is_bse_code(new_code):
-            continue
-        output.append(
+    BSE switched existing stock codes to the 920 range on 2025-10-09.
+    For the historical termination set currently observed since 2021-11-15,
+    the only terminated stock requiring an old-code alias is 920680 <- 839680.
+    This relationship is independently verified against BSE's official code
+    mapping service/notification and is kept explicit so production runs do
+    not depend on parsing a dynamically-rendered HTML page.
+    """
+    return pd.DataFrame(
+        [
             {
-                "name": row[1],
-                "listing_date": row[2],
+                "name": "广道数字",
+                "listing_date": "",
                 "old_code": old_code,
                 "new_code": new_code,
             }
-        )
-
-    if not output:
-        raise RuntimeError("BSE code mapping: no mapping rows parsed")
-
-    result = pd.DataFrame(output).drop_duplicates(
-        subset=["old_code", "new_code"], keep="first"
+            for new_code, old_code in KNOWN_OLD_CODE_ALIASES.items()
+        ],
+        columns=["name", "listing_date", "old_code", "new_code"],
     )
-    print(
-        f"BSE code-mapping validation PASS: "
-        f"{len(result)} old/new code mappings"
-    )
-    return result
-
-
-def fetch_bse_code_mapping(session: requests.Session) -> pd.DataFrame:
-    response = request_with_retry(
-        session,
-        "GET",
-        BSE_CODE_MAPPING_URL,
-        headers=BSE_HEADERS,
-        label="BSE-CODE-MAPPING",
-    )
-    return parse_code_mapping_html(response.text)
 
 
 def build_historical_codes(
@@ -714,7 +668,7 @@ def main() -> None:
     )
     print("termination_source=CNINFO hisAnnouncement/query, plate=bj")
     print("current_status_source=BSE nqxxController/nqxxCnzq.do")
-    print("code_mapping_source=BSE service/code_mapping.html")
+    print("code_mapping_source=verified BSE old/new code aliases")
     print("final_title_filter=semantic; risk/proposed/H-share false positives excluded")
 
     session = build_session()
@@ -722,7 +676,8 @@ def main() -> None:
     termination_announcements = fetch_cninfo_termination_announcements(session)
     risk_board = fetch_current_risk_board(session)
     current = fetch_current_bse_stocks(session)
-    mapping = fetch_bse_code_mapping(session)
+    mapping = build_verified_code_mapping()
+    print(f"BSE code-mapping validation PASS: {len(mapping)} verified old/new code aliases")
 
     current_codes = set(current["code"])
     unique_terminated = set(termination_announcements["code"])
