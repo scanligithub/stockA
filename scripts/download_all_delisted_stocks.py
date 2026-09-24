@@ -984,6 +984,7 @@ def main() -> None:
         source="SZSE official ShowReport",
     )
     bse_out = delisted_bse.assign(
+        exchange="BSE",
         list_date=pd.NaT,
         delist_date=pd.NaT,
         event_type="terminate_listing",
