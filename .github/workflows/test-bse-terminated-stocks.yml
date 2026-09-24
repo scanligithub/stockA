@@ -73,7 +73,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bse-terminated-stocks-\${{ github.run_id }}
+          name: bse-terminated-stocks-${{ github.run_id }}
           path: |
             test/bse_delisted.csv
             test/bse_historical_codes.csv
