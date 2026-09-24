@@ -46,7 +46,7 @@ WORKERS = int(os.getenv("SINA_WORKERS", "16"))
 DELAY = float(os.getenv("SINA_DELAY", "0.15"))
 TIMEOUT = 20
 RETRIES = 4
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 CACHE_TTL_SEC = int(os.getenv("SINA_CACHE_TTL_SEC", "86400"))
 REFRESH_CURRENT = os.getenv("SINA_REFRESH_CURRENT", "1") != "0"
 
