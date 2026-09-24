@@ -867,8 +867,7 @@ def main() -> None:
     missing_indexes = sorted(set(TARGET_INDEXES) - set(final_df.index_id.unique()))
     boundary = boundary_audit(final_df, raw_df)
 
-    print("
-A/B completeness audit...", flush=True)
+    print("\nA/B completeness audit...", flush=True)
     a_candidates, a_candidate_errors = build_a_candidates()
     a_df, a_xiangguan_errors = build_a_from_xiangguan(a_candidates, cmap)
     a_df.to_parquet(
