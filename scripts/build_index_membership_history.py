@@ -62,7 +62,8 @@ INDEX_ALIASES = {
     "399303": "399303", "399330": "399330",
     "000010": "000010", "399324": "399324", "000015": "000015",
     "000904": "000904", "399311": "399311",
-    "930713": "930713", "980017": "980017", "980087": "980087",
+    "930713": "930713", "980017": "980017",
+    "399354": "980087", "980087": "980087",
     "399673": "399673", "399412": "399412", "399005": "399005",
     "399994": "399994", "399975": "399975", "399986": "399986",
     "399932": "399932", "399933": "399933", "399967": "399967",
@@ -885,9 +886,42 @@ def build_a_candidates() -> tuple[
                 return codes
         return set()
 
+    def parse_newest_rows(html: str) -> list[tuple[str, str]]:
+        """Return (stock_code, admission_date) rows from NewestComponent."""
+        soup = BeautifulSoup(html, "html.parser")
+        required = {"品种代码", "纳入日期"}
+        for table in soup.find_all("table"):
+            rows = table.find_all("tr")
+            for header_idx, row in enumerate(rows[:6]):
+                headers = [
+                    x.get_text(" ", strip=True)
+                    for x in row.find_all(["th", "td"])
+                ]
+                if not required.issubset(set(headers)):
+                    continue
+                pos = {name: i for i, name in enumerate(headers)}
+                result: list[tuple[str, str]] = []
+                for data_row in rows[header_idx + 1:]:
+                    vals = [
+                        x.get_text(" ", strip=True)
+                        for x in data_row.find_all(["th", "td"])
+                    ]
+                    if len(vals) < len(headers):
+                        continue
+                    code = normalize_code(vals[pos["品种代码"]])
+                    admission = vals[pos["纳入日期"]].strip()
+                    if (
+                        re.fullmatch(r"\d{6}", code)
+                        and re.fullmatch(r"\d{4}-\d{2}-\d{2}", admission)
+                    ):
+                        result.append((code, admission))
+                return result
+        return []
+
     for index_id in TARGET_INDEXES:
         codes: set[str] = set()
-        newest_codes: set[str] = set()
+        newest_rows: list[tuple[str, str]] = []
+        newest_current: set[str] = set()
         for kind in ("history", "newest"):
             try:
                 first = fetch_component(index_id, kind, 1)
@@ -901,20 +935,37 @@ def build_a_candidates() -> tuple[
                     page_codes = parse_codes(html)
                     codes.update(page_codes)
                     if kind == "newest":
-                        newest_codes.update(page_codes)
-                print(
-                    f"A candidates {index_id} {kind}: pages={pages} "
-                    f"stocks={len(newest_codes if kind == 'newest' else codes)}",
-                    flush=True,
-                )
+                        newest_rows.extend(parse_newest_rows(html))
+                if kind == "newest":
+                    latest_date = max(
+                        (date for _, date in newest_rows),
+                        default="",
+                    )
+                    newest_current = {
+                        code for code, date in newest_rows
+                        if date == latest_date
+                    }
+                    print(
+                        f"A candidates {index_id} {kind}: pages={pages} "
+                        f"rows={len(newest_rows)} latest_date={latest_date} "
+                        f"current_stocks={len(newest_current)}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"A candidates {index_id} {kind}: pages={pages} "
+                        f"stocks={len(codes)}",
+                        flush=True,
+                    )
             except Exception as exc:
                 errors.append(
                     {"index_id": index_id, "kind": kind, "error": repr(exc)}
                 )
         candidates[index_id] = codes
-        newest_candidates[index_id] = newest_codes
+        newest_candidates[index_id] = newest_current
         print(
-            f"A candidates {index_id}: union={len(codes)}, newest={len(newest_codes)}",
+            f"A candidates {index_id}: union={len(codes)}, "
+            f"current_newest={len(newest_current)}",
             flush=True,
         )
 
