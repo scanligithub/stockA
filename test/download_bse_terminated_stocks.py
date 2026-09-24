@@ -605,7 +605,24 @@ def fetch_bse_code_mapping(session: requests.Session) -> pd.DataFrame:
         ).drop_duplicates(subset=["old_code", "new_code"])
 
         if len(mapping) != 248:
-            print(f"BSE code mapping parse: extracted {len(mapping)} rows, expected 248")
+            raw_path = OUTPUT_DIR / "bse_code_mapping_raw.html"
+            raw_path.write_text(response.text, encoding="utf-8")
+            print(f"BSE code mapping parse: extracted {len(mapping)} rows, expected 248; raw saved to {raw_path}")
+            print(f"BSE-CODE-MAPPING raw contains 无锡鼎邦={ '无锡鼎邦' in response.text }")
+            print(f"BSE-CODE-MAPPING raw contains 凯添燃气={ '凯添燃气' in response.text }")
+            print(f"BSE-CODE-MAPPING raw contains 2020/7/27={ '2020/7/27' in response.text }")
+            for row_no, row in enumerate(parser.rows, start=1):
+                date_idx = next(
+                    (i for i, value in enumerate(row) if re.fullmatch(r"\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}", value)),
+                    None,
+                )
+                if date_idx is None:
+                    continue
+                codes = [value for value in row[date_idx + 1:] if re.fullmatch(r"\\d{6}", value)]
+                if len(codes) < 2:
+                    print(f"[BSE-CODE-MAPPING-DEBUG] row={row_no} cells={row!r}")
+                elif not codes[1].startswith("920") or codes[0] == codes[1]:
+                    print(f"[BSE-CODE-MAPPING-DEBUG] row={row_no} unusual_codes={codes!r} cells={row!r}")
             for row_no, row in enumerate(parser.rows, start=1):
                 date_idx = next(
                     (i for i, value in enumerate(row) if re.fullmatch(r"\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}", value)),
