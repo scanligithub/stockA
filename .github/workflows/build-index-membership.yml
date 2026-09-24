@@ -166,6 +166,7 @@ jobs:
         env:
           SINA_WORKERS: "16"
           SINA_DELAY: "0.15"
+          SINA_CACHE_TTL_SEC: "86400"
         run: python scripts/build_index_membership_history.py
 
       - name: Save updated Sina cache
@@ -199,6 +200,16 @@ jobs:
           assert not (df["start_date"] == "1900-01-01").any(),               "Sina 1900-01-01 placeholder remains in final output"
           assert summary.get("placeholder_start_unresolved", 0) == 0
           assert summary.get("placeholder_start_remaining", 0) == 0
+
+          current_audit = summary.get("current_membership_audit", {})
+          print(
+              "current membership audit:",
+              json.dumps(current_audit, ensure_ascii=False, indent=2),
+          )
+          assert current_audit.get("status") == "PASS", (
+              "current membership reconciliation failed"
+          )
+
           print(
               "placeholder repairs:",
               summary.get("placeholder_start_repairs", 0),
