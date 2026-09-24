@@ -107,6 +107,7 @@ def probe_risk_warning_api(session: requests.Session) -> None:
     for risk_type, label in ((1, "risk_warning"), (0, "delist_arrange")):
         params = [
             ("page", "0"),
+            ("pageSize", "20"),
             ("type", str(risk_type)),
         ]
         response = session.post(
