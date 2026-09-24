@@ -1,0 +1,51 @@
+name: Test Delisted Stock List
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 1 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  download-delisted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas openpyxl requests
+      - name: Download delisted stock list
+        run: python test/download_delisted_stocks.py
+      - name: Show result
+        run: |
+          echo "=== Counts ==="
+          wc -l test/a_share_delisted_all.csv
+          python - <<'PY'
+          import pandas as pd
+          df = pd.read_csv("test/a_share_delisted_all.csv", dtype={"code": str})
+          print(f"unique codes: {df['code'].nunique()}")
+          print(f"SSE: {(df['exchange'] == 'SSE').sum()}")
+          print(f"SZSE: {(df['exchange'] == 'SZSE').sum()}")
+          print(f"date range: {df['delist_date'].min()} -> {df['delist_date'].max()}")
+          PY
+      - name: Upload result artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: delisted-stocks-\${{ github.run_id }}
+          path: |
+            test/a_share_delisted_all.csv
+            test/sse_delisted.csv
+            test/szse_delisted.csv
+          if-no-files-found: error
+          retention-days: 14
