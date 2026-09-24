@@ -1,0 +1,86 @@
+name: Build BSE Historical Stock Universe
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "45 1 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  build-bse-universe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests
+
+      - name: Build BSE historical stock universe
+        run: python scripts/download_bse_historical_codes.py
+
+      - name: Show result
+        run: |
+          echo "=== BSE historical termination announcements ==="
+          python - <<'PY'
+          import pandas as pd
+          p = "data/universe/bse_termination_announcements.csv"
+          df = pd.read_csv(p, dtype={"code": str})
+          print(f"final termination announcement rows: {len(df)}")
+          print(f"unique terminated codes: {df['code'].nunique()}")
+          print(df.to_string(index=False))
+          PY
+
+          echo "=== BSE current risk board ==="
+          python - <<'PY'
+          import pandas as pd
+          p = "data/universe/bse_current_risk_stocks.csv"
+          df = pd.read_csv(p, dtype={"code": str})
+          print(f"risk-board rows: {len(df)}")
+          print(df.to_string(index=False))
+          PY
+
+          echo "=== BSE final terminated codes ==="
+          python - <<'PY'
+          import pandas as pd
+          p = "data/universe/bse_delisted.csv"
+          df = pd.read_csv(p, dtype={"code": str})
+          print(f"terminated codes: {len(df)}")
+          print(df.to_string(index=False))
+          PY
+
+          echo "=== BSE historical code universe ==="
+          python - <<'PY'
+          import pandas as pd
+          p = "data/universe/bse_historical_codes.csv"
+          df = pd.read_csv(p, dtype={"code": str, "current_code": str})
+          print(f"historical code rows: {len(df)}")
+          print(df.to_string(index=False))
+          PY
+
+      - name: Upload result artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bse-historical-universe-${{ github.run_id }}
+          path: |
+            data/universe/bse_delisted.csv
+            data/universe/bse_historical_codes.csv
+            data/universe/bse_old_code_aliases.csv
+            data/universe/bse_termination_announcements.csv
+            data/universe/bse_current_risk_stocks.csv
+            data/universe/bse_current_stocks.csv
+            data/universe/bse_code_mapping.csv
+          if-no-files-found: error
+          retention-days: 14
