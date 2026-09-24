@@ -937,17 +937,13 @@ def build_a_candidates() -> tuple[
                     if kind == "newest":
                         newest_rows.extend(parse_newest_rows(html))
                 if kind == "newest":
-                    latest_date = max(
-                        (date for _, date in newest_rows),
-                        default="",
-                    )
-                    newest_current = {
-                        code for code, date in newest_rows
-                        if date == latest_date
-                    }
+                    # NewestComponent lists the current constituents across
+                    # all pages; each row's date is that security's own
+                    # admission date, not a rebalance-batch marker.
+                    newest_current = {code for code, _ in newest_rows}
                     print(
                         f"A candidates {index_id} {kind}: pages={pages} "
-                        f"rows={len(newest_rows)} latest_date={latest_date} "
+                        f"rows={len(newest_rows)} "
                         f"current_stocks={len(newest_current)}",
                         flush=True,
                     )
