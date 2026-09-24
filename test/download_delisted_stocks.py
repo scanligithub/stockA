@@ -78,17 +78,18 @@ def get_with_retry(session, url, *, params, headers, label):
 
 
 def normalize_codes(df, exchange):
-    """Normalize six-digit codes and reject only genuinely blank code rows.
+    """Normalize exchange codes to six digits.
 
-    Exchange spreadsheets can contain trailing/description rows with an empty
-    security code. Those rows are not stocks and should not make the download
-    fail. A non-empty value that is not a six-digit stock code remains an error.
+    SZSE's XLSX may let Excel/pandas interpret codes such as 000003 as
+    integers, yielding values like "3". Any non-empty 1-6 digit value is
+    therefore a valid code candidate and is left-padded to six digits.
+    Empty rows are rejected as non-stock rows; other non-numeric values fail.
     """
     raw = df["code"].astype("string").str.strip()
-    extracted = raw.str.extract(r"(\d{6})", expand=False)
 
     blank = raw.isna() | raw.eq("")
-    malformed = ~blank & extracted.isna()
+    numeric_code = raw.str.fullmatch(r"\d{1,6}", na=False)
+    malformed = ~blank & ~numeric_code
     if malformed.any():
         values = raw.loc[malformed].tolist()
         raise RuntimeError(
@@ -102,7 +103,7 @@ def normalize_codes(df, exchange):
         print(f"{exchange}: ignored {len(rejected)} row(s) with blank stock code")
 
     valid = df.loc[~blank].copy()
-    valid["code"] = extracted.loc[~blank].astype(str).str.zfill(6)
+    valid["code"] = raw.loc[~blank].str.zfill(6)
     return valid, rejected
 
 
