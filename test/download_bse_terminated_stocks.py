@@ -53,6 +53,10 @@ RISK_KEYWORDS = ("退市风险", "退市风险警示", "可能被终止上市", 
 TERMINATION_KEYWORDS = ("股票终止上市", "终止上市暨摘牌", "终止在北京证券交易所上市", "因转板在北京证券交易所终止上市", "股票摘牌", "终止上市")
 ALL_SIGNAL_KEYWORDS = RISK_KEYWORDS + TERMINATION_KEYWORDS
 
+# Known historical BSE terminations/transfers used only as source-integrity checks.
+KNOWN_TERMINATED_CODES = ("832317", "833874", "833994", "920680", "920305")
+MIN_CURRENT_BSE_STOCKS = 100
+
 HEADERS = {
     "Accept": "text/javascript, application/javascript, application/ecmascript, */*; q=0.01",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.6",
@@ -395,6 +399,11 @@ def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
 
     if not codes:
         raise RuntimeError("BSE current list: no valid stock codes parsed")
+    if len(codes) < MIN_CURRENT_BSE_STOCKS:
+        raise RuntimeError(
+            f"BSE current list: suspiciously small stock count {len(codes)} "
+            f"< {MIN_CURRENT_BSE_STOCKS}"
+        )
 
     current = pd.DataFrame(codes).sort_values("code").reset_index(drop=True)
     print(f"BSE current-list validation PASS: {len(current)} unique listed stocks")
@@ -490,7 +499,22 @@ def validate_candidates(df: pd.DataFrame, current: pd.DataFrame) -> None:
         )
 
     current_codes = set(current["code"])
+    candidate_codes = set(df["code"])
     present = df["code"].isin(current_codes)
+
+    missing_known = [code for code in KNOWN_TERMINATED_CODES if code not in candidate_codes]
+    still_current_known = [code for code in KNOWN_TERMINATED_CODES if code in current_codes]
+    if missing_known:
+        raise RuntimeError(
+            "BSE: known historical termination codes missing from announcement scan: "
+            f"{missing_known}"
+        )
+    if still_current_known:
+        raise RuntimeError(
+            "BSE: known historical termination codes still present in current list: "
+            f"{still_current_known}"
+        )
+
     print(
         f"BSE VALIDATION PASS: {len(df)} matched announcements, "
         f"{df['code'].nunique()} unique candidate stocks"
@@ -498,6 +522,10 @@ def validate_candidates(df: pd.DataFrame, current: pd.DataFrame) -> None:
     print(
         f"BSE CURRENT-LIST CROSSCHECK: current rows={int(present.sum())}, "
         f"absent rows={int((~present).sum())}"
+    )
+    print(
+        "BSE KNOWN-CASE CHECK PASS: "
+        f"{len(KNOWN_TERMINATED_CODES)} historical termination cases confirmed"
     )
 
 
@@ -576,12 +604,6 @@ def main() -> None:
     active_risk = classified[classified["current_bse"]].copy()
 
     validate_candidates(candidates, current)
-
-    if delisted.empty:
-        raise RuntimeError(
-            "BSE: no candidate is absent from the current stock list; "
-            "nothing can be classified as delisted under the current rule"
-        )
 
     delisted.to_csv(
         OUTPUT_DIR / "bse_delisted.csv",
