@@ -134,6 +134,75 @@ def probe_risk_warning_api(session: requests.Session) -> None:
             f"content_type={type(content).__name__}"
         )
 
+
+
+def probe_cninfo_bse_termination() -> None:
+    """Probe CNINFO full-text history as a fallback historical BSE termination source."""
+    url = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+    print("\n===== CNINFO BSE TERMINATION PROBE =====")
+
+    headers = {
+        "User-Agent": HEADERS["User-Agent"],
+        "Referer": "https://www.cninfo.com.cn/",
+        "Origin": "https://www.cninfo.com.cn",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    }
+
+    for keyword in ("终止上市", "摘牌"):
+        data = {
+            "pageNum": "1",
+            "pageSize": "100",
+            "tabName": "fulltext",
+            "searchkey": keyword,
+            "seDate": "2021-11-15~2026-09-24",
+            "column": "",
+            "plate": "",
+            "category": "",
+            "trade": "",
+            "sortName": "announcementTime",
+            "sortType": "-1",
+            "isHLtitle": "true",
+        }
+        response = requests.post(
+            url,
+            data=data,
+            headers=headers,
+            timeout=(15, 60),
+        )
+        response.raise_for_status()
+        payload = response.json()
+        announcements = payload.get("announcements") or []
+        total = payload.get("totalAnnouncement", 0)
+        bse = []
+        for item in announcements:
+            code = str(item.get("secCode") or "").strip()
+            title = str(item.get("announcementTitle") or "").strip()
+            if (
+                code.isdigit()
+                and len(code) == 6
+                and code.startswith(("83", "87", "92"))
+                and any(k in title for k in ("终止上市", "摘牌"))
+            ):
+                bse.append(
+                    {
+                        "code": code,
+                        "name": item.get("secName"),
+                        "title": title,
+                        "time": item.get("announcementTime"),
+                    }
+                )
+        print(
+            f"[CNINFO] keyword={keyword!r} HTTP={response.status_code} "
+            f"total={total} returned={len(announcements)} bse_hits={len(bse)}"
+        )
+        for item in bse[:40]:
+            print(
+                f"[CNINFO-HIT] {item['code']} {item['name']} "
+                f"{item['title']} time={item['time']}"
+            )
+
 def main() -> None:
     session = requests.Session()
     all_linked: list[str] = []
