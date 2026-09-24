@@ -93,8 +93,15 @@ UA = (
 
 def normalize_code(value: object) -> str:
     raw = str(value or "").strip()
-    raw = re.sub(r"^(sh|sz|bj)\\.?", "", raw, flags=re.I)
-    return raw.zfill(6) if re.fullmatch(r"\\d{1,6}", raw) else ""
+    raw = re.sub(r"^(sh|sz|bj)\.?", "", raw, flags=re.I)
+    return raw.zfill(6) if re.fullmatch(r"\d{1,6}", raw) else ""
+
+
+
+def text_value(value: object) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
 
 
 def read_csv_required(path: Path, *, code_columns: tuple[str, ...]) -> pd.DataFrame:
@@ -117,13 +124,13 @@ def load_tdx_current() -> pd.DataFrame:
     rows = []
     for item in data:
         code = normalize_code(item.get("code"))
-        if not re.fullmatch(r"\\d{6}", code):
+        if not re.fullmatch(r"\d{6}", code):
             continue
         rows.append(
             {
                 "query_code": code,
                 "stock_id": code,
-                "name": str(item.get("code_name") or "").strip(),
+                "name": text_value(item.get("code_name")),
                 "source": "tdx_current",
                 "current_code": code,
             }
@@ -149,7 +156,7 @@ def load_delisted() -> pd.DataFrame:
             {
                 "query_code": code,
                 "stock_id": current_code,
-                "name": str(item.get("name") or "").strip(),
+                "name": text_value(item.get("name")),
                 "source": "delisted",
                 "current_code": current_code,
             }
@@ -211,7 +218,7 @@ def build_universe() -> pd.DataFrame:
 
     if universe["query_code"].duplicated().any():
         raise RuntimeError("duplicate query codes remain")
-    if not universe["query_code"].str.fullmatch(r"\\d{6}").all():
+    if not universe["query_code"].str.fullmatch(r"\d{6}").all():
         raise RuntimeError("universe contains malformed query codes")
 
     print(
@@ -355,9 +362,9 @@ def parse_xiangguan(html: str, query_code: str) -> tuple[list[dict], str]:
         canonical = INDEX_ALIASES.get(index_code, index_code)
         if canonical not in TARGET_INDEXES:
             continue
-        if not re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", start):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start):
             continue
-        if end and not re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", end):
+        if end and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
             continue
 
         result.append(
@@ -594,7 +601,7 @@ def build_a_candidates() -> tuple[dict[str, set[str]], list[dict]]:
         return response.text
 
     def page_count(html: str) -> int:
-        pages = [int(x) for x in re.findall(r"[?&]page=(\\d+)", html)]
+        pages = [int(x) for x in re.findall(r"[?&]page=(\d+)", html)]
         return max(pages, default=1)
 
     def parse_codes(html: str) -> set[str]:
@@ -619,7 +626,7 @@ def build_a_candidates() -> tuple[dict[str, set[str]], list[dict]]:
                     if len(vals) <= pos:
                         continue
                     code = normalize_code(vals[pos])
-                    if re.fullmatch(r"\\d{6}", code):
+                    if re.fullmatch(r"\d{6}", code):
                         codes.add(code)
                 return codes
         return set()
