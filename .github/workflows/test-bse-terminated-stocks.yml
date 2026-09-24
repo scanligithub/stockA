@@ -1,6 +1,10 @@
 name: Test BSE Terminated Stock List
 
 on:
+  push:
+    paths:
+      - "test/download_bse_terminated_stocks.py"
+      - ".github/workflows/test-bse-terminated-stocks.yml"
   workflow_dispatch:
   schedule:
     - cron: "45 1 * * 1-5"
