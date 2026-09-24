@@ -606,6 +606,18 @@ def fetch_bse_code_mapping(session: requests.Session) -> pd.DataFrame:
 
         if len(mapping) != 248:
             print(f"BSE code mapping parse: extracted {len(mapping)} rows, expected 248")
+            for row_no, row in enumerate(parser.rows, start=1):
+                date_idx = next(
+                    (i for i, value in enumerate(row) if re.fullmatch(r"\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}", value)),
+                    None,
+                )
+                if date_idx is None:
+                    continue
+                codes = [value for value in row[date_idx + 1:] if re.fullmatch(r"\\d{6}", value)]
+                if len(codes) < 2:
+                    print(f"[BSE-CODE-MAPPING-DEBUG] row={row_no} cells={row!r}")
+                elif not codes[1].startswith("920") or codes[0] == codes[1]:
+                    print(f"[BSE-CODE-MAPPING-DEBUG] row={row_no} unusual_codes={codes!r} cells={row!r}")
             if attempt < SOURCE_ATTEMPTS:
                 time.sleep(1.5 * attempt)
                 continue
