@@ -29,7 +29,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bse-disclosure-page-probe-\${{ github.run_id }}
+          name: bse-disclosure-page-probe-${{ github.run_id }}
           path: test/bse_page_probe
           if-no-files-found: ignore
           retention-days: 7
