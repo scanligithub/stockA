@@ -2,10 +2,14 @@
 # -*- coding: utf-8 -*-
 """Download Beijing Stock Exchange terminated-listing stock candidates.
 
-The BSE disclosure index already returns the security code/name and the
-announcement title.  For building the historical candidate universe we only
-need to identify stocks whose official announcement title indicates
-termination/delisting. PDF downloads are intentionally not required.
+The BSE disclosure index returns the security code/name and announcement title.
+For the historical candidate universe we only need to identify stocks whose
+official announcement title indicates termination/delisting. PDF downloads are
+not required.
+
+The endpoint is scanned once across the complete historical period. We use
+"终止上市" as the server-side search term to keep the response small, then
+apply the broader ("终止上市", "摘牌", "退市") title test locally.
 """
 
 from __future__ import annotations
@@ -14,7 +18,7 @@ import json
 import random
 import re
 import time
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -30,14 +34,18 @@ BSE_BASE_URL = "https://www.bse.cn"
 
 START_DATE = date(2021, 11, 15)
 END_DATE = date.today()
-WINDOW_DAYS = 365
+
+# Only one historical scan. The previous implementation repeatedly scanned
+# five one-year windows and three keywords, causing hundreds of redundant
+# requests against the same BSE announcement index.
+SERVER_KEYWORD = "终止上市"
 
 REQUEST_TIMEOUT = (15, 60)
 HTTP_RETRIES = 2
 SOURCE_ATTEMPTS = 3
-MAX_PAGES_PER_WINDOW = 200
+MAX_PAGES = 200
 
-KEYWORDS = ("终止上市", "摘牌", "退市")
+TITLE_KEYWORDS = ("终止上市", "摘牌", "退市")
 
 HEADERS = {
     "Accept": "text/javascript, application/javascript, application/ecmascript, */*; q=0.01",
@@ -69,7 +77,7 @@ def build_session() -> requests.Session:
         raise_on_status=False,
     )
     adapter = HTTPAdapter(
-        max_retries=retry,
+        max_retries=HTTP_RETRIES,
         pool_connections=4,
         pool_maxsize=4,
     )
@@ -134,35 +142,11 @@ def normalize_code(value: object) -> str:
     return ""
 
 
-def code_from_text(*values: object) -> str:
-    for value in values:
-        text = str(value or "")
-        # Prefer current six-digit stock codes such as 920xxx/87xxxx/83xxxx.
-        match = re.search(r"(?<!\d)(92\d{4}|87\d{4}|83\d{4}|43\d{4}|82\d{4}|\d{6})(?!\d)", text)
-        if match:
-            return match.group(1)
-        # Also accept 4-digit legacy BJ codes if an announcement only exposes
-        # a short code; normalize later when appropriate.
-        match = re.search(r"(?<!\d)(\d{4})(?!\d)", text)
-        if match:
-            return match.group(1).zfill(6)
-    return ""
-
-
 def extract_records(payload) -> tuple[list[dict], int, int]:
-    """Support the two known BSE announcement response shapes."""
+    """Support both known BSE announcement response shapes."""
     root = payload[0] if isinstance(payload, list) and payload else payload
     if not isinstance(root, dict):
         raise RuntimeError("BSE: JSONP payload root is not an object")
-
-    if isinstance(root.get("listInfo"), dict):
-        info = root["listInfo"]
-        records = info.get("content") or []
-        return (
-            [r for r in records if isinstance(r, dict)],
-            int(info.get("totalPages") or 0),
-            int(info.get("totalElements") or 0),
-        )
 
     if isinstance(root.get("data"), dict):
         data = root["data"]
@@ -182,6 +166,24 @@ def extract_records(payload) -> tuple[list[dict], int, int]:
             int(data.get("totalElements") or 0),
         )
 
+    if isinstance(root.get("listInfo"), dict):
+        info = root["listInfo"]
+        content = info.get("content") or []
+        records: list[dict] = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("disclosures"), list):
+                records.extend(
+                    disclosure for disclosure in item["disclosures"]
+                    if isinstance(disclosure, dict)
+                )
+            elif isinstance(item, dict):
+                records.append(item)
+        return (
+            records,
+            int(info.get("totalPages") or 0),
+            int(info.get("totalElements") or 0),
+        )
+
     if isinstance(root.get("content"), list):
         records = [r for r in root["content"] if isinstance(r, dict)]
         return (
@@ -197,10 +199,7 @@ def extract_records(payload) -> tuple[list[dict], int, int]:
 
 def fetch_page(
     session: requests.Session,
-    start: date,
-    end: date,
     page: int,
-    keyword: str,
 ) -> tuple[list[dict], int, int]:
     callback = f"jQuery{int(time.time() * 1000)}_{page}"
     form_data = [
@@ -209,10 +208,10 @@ def fetch_page(
         ("page", str(page)),
         ("companyCd", ""),
         ("isNewThree", "1"),
-        ("keyword", keyword),
-        ("date", f"{start.isoformat()} ~ {end.isoformat()}"),
-        ("startTime", start.isoformat()),
-        ("endTime", end.isoformat()),
+        ("keyword", SERVER_KEYWORD),
+        ("date", f"{START_DATE.isoformat()} ~ {END_DATE.isoformat()}"),
+        ("startTime", START_DATE.isoformat()),
+        ("endTime", END_DATE.isoformat()),
         ("xxfcbj[]", "2"),
         ("needFields[]", "companyCd"),
         ("needFields[]", "companyName"),
@@ -232,7 +231,7 @@ def fetch_page(
         BSE_LIST_URL,
         params={"callback": callback},
         data=form_data,
-        label=f"BSE-ANN keyword={keyword} page={page}",
+        label=f"BSE-ANN page={page}",
     )
     try:
         payload = parse_jsonp(response.text)
@@ -243,13 +242,9 @@ def fetch_page(
     return extract_records(payload)
 
 
-def fetch_window(
-    session: requests.Session,
-    start: date,
-    end: date,
-    keyword: str,
-) -> list[dict]:
+def fetch_all(session: requests.Session) -> list[dict]:
     last_error: Exception | None = None
+
     for attempt in range(1, SOURCE_ATTEMPTS + 1):
         try:
             records: list[dict] = []
@@ -258,15 +253,12 @@ def fetch_window(
             total_elements = 0
 
             while True:
-                if page >= MAX_PAGES_PER_WINDOW:
+                if page >= MAX_PAGES:
                     raise RuntimeError(
-                        f"BSE: pagination exceeded {MAX_PAGES_PER_WINDOW} pages "
-                        f"for {start}..{end}, keyword={keyword}"
+                        f"BSE: pagination exceeded {MAX_PAGES} pages"
                     )
 
-                page_records, page_total, page_elements = fetch_page(
-                    session, start, end, page, keyword
-                )
+                page_records, page_total, page_elements = fetch_page(session, page)
                 total_pages = page_total or total_pages
                 total_elements = page_elements or total_elements
 
@@ -275,20 +267,25 @@ def fetch_window(
 
                 records.extend(page_records)
                 print(
-                    f"[BSE-ANN] keyword={keyword} window={start}..{end} "
-                    f"page={page} records={len(page_records)} "
-                    f"accumulated={len(records)} total={total_elements}"
+                    f"[BSE-ANN] page={page} records={len(page_records)} "
+                    f"accumulated={len(records)} total={total_elements} "
+                    f"total_pages={total_pages}"
                 )
 
                 if total_pages and page >= total_pages - 1:
                     break
+
                 page += 1
 
+            if not records:
+                raise RuntimeError("BSE: announcement query returned no records")
+
             print(
-                f"[BSE-ANN] source validation PASS keyword={keyword}, "
-                f"rows={len(records)}, source_attempt={attempt}"
+                f"[BSE-ANN] source validation PASS, rows={len(records)}, "
+                f"source_attempt={attempt}"
             )
             return records
+
         except Exception as exc:
             last_error = exc
             if attempt == SOURCE_ATTEMPTS:
@@ -301,35 +298,37 @@ def fetch_window(
             time.sleep(delay)
 
     raise RuntimeError(
-        f"BSE: all {SOURCE_ATTEMPTS} attempts failed for {start}..{end}, "
-        f"keyword={keyword}"
+        f"BSE: all {SOURCE_ATTEMPTS} source attempts failed"
     ) from last_error
-
-
-def iter_windows(start: date, end: date):
-    cursor = start
-    while cursor <= end:
-        window_end = min(cursor + timedelta(days=WINDOW_DAYS - 1), end)
-        yield cursor, window_end
-        cursor = window_end + timedelta(days=1)
 
 
 def build_candidates(records: list[dict]) -> pd.DataFrame:
     rows: list[dict] = []
+
     for record in records:
         title = str(record.get("disclosureTitle") or "").strip()
         post_title = str(record.get("disclosurePostTitle") or "").strip()
         combined_title = f"{title} {post_title}"
 
-        if not any(keyword in combined_title for keyword in KEYWORDS):
+        if not any(keyword in combined_title for keyword in TITLE_KEYWORDS):
             continue
 
-        code = normalize_code(record.get("companyCd")) or code_from_text(
-            record.get("companyCd"),
-            title,
-            post_title,
-            record.get("destFilePath"),
-        )
+        code = normalize_code(record.get("companyCd"))
+        if not code:
+            # Some BSE notices put the code only in the title/post-title/file name.
+            text = " ".join(
+                [
+                    title,
+                    post_title,
+                    str(record.get("destFilePath") or ""),
+                ]
+            )
+            matches = re.findall(
+                r"(?<!\d)(?:92|87|83|43|82)\d{4}(?!\d)",
+                text,
+            )
+            code = matches[0] if matches else ""
+
         if not code:
             continue
 
@@ -343,7 +342,8 @@ def build_candidates(records: list[dict]) -> pd.DataFrame:
                 "category": str(record.get("xxzrlx") or "").strip(),
                 "source_url": BSE_PAGE_URL,
                 "termination_signal": ",".join(
-                    keyword for keyword in KEYWORDS if keyword in combined_title
+                    keyword for keyword in TITLE_KEYWORDS
+                    if keyword in combined_title
                 ),
             }
         )
@@ -355,9 +355,9 @@ def build_candidates(records: list[dict]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame(columns=columns)
 
-    df = pd.DataFrame(rows)
     return (
-        df.drop_duplicates(
+        pd.DataFrame(rows)
+        .drop_duplicates(
             subset=["code", "publish_time", "title"],
             keep="first",
         )
@@ -368,7 +368,9 @@ def build_candidates(records: list[dict]) -> pd.DataFrame:
 
 def validate_candidates(df: pd.DataFrame) -> None:
     if df.empty:
-        raise RuntimeError("BSE: no terminated-listing announcement candidates found")
+        raise RuntimeError(
+            "BSE: no terminated-listing announcement candidates found"
+        )
 
     invalid = ~df["code"].astype("string").str.fullmatch(r"\d{6}", na=False)
     if invalid.any():
@@ -388,7 +390,8 @@ def validate_candidates(df: pd.DataFrame) -> None:
 
 def main() -> None:
     print(f"BSE announcement scan: {START_DATE} -> {END_DATE}")
-    print(f"keywords={KEYWORDS}")
+    print(f"server_keyword={SERVER_KEYWORD}")
+    print(f"title_keywords={TITLE_KEYWORDS}")
 
     session = build_session()
 
@@ -399,17 +402,17 @@ def main() -> None:
             timeout=REQUEST_TIMEOUT,
             allow_redirects=False,
         )
-        print(f"[BSE-PAGE] HTTP {response.status_code}, {len(response.content):,} bytes")
+        print(
+            f"[BSE-PAGE] HTTP {response.status_code}, "
+            f"{len(response.content):,} bytes"
+        )
     except Exception as exc:
-        print(f"[BSE-PAGE] warm-up failed (continuing): {type(exc).__name__}: {exc}")
+        print(
+            f"[BSE-PAGE] warm-up failed (continuing): "
+            f"{type(exc).__name__}: {exc}"
+        )
 
-    raw_records: list[dict] = []
-
-    for keyword in KEYWORDS:
-        for start, end in iter_windows(START_DATE, END_DATE):
-            raw_records.extend(fetch_window(session, start, end, keyword))
-            time.sleep(random.uniform(0.3, 0.8))
-
+    raw_records = fetch_all(session)
     candidates = build_candidates(raw_records)
 
     candidates.to_csv(
@@ -418,7 +421,6 @@ def main() -> None:
         encoding="utf-8-sig",
     )
 
-    # One row per stock is what the historical universe builder needs.
     stocks = (
         candidates.sort_values(["publish_time", "code"])
         .drop_duplicates("code", keep="last")
@@ -426,6 +428,7 @@ def main() -> None:
         .sort_values("code")
         .reset_index(drop=True)
     )
+
     validate_candidates(candidates)
 
     stocks.to_csv(
