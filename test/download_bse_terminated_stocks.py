@@ -8,8 +8,8 @@ Production source strategy:
 2. Announcement titles are semantically filtered so risk-warning/proposed
    termination notices are not treated as final termination events.
 3. BSE's official current stock list is the current-status cross-check.
-4. BSE's official old/new code mapping is joined so pre-2025 BSE codes (for
-   example 839680 -> 920680) remain in the historical code universe.
+4. BSE's official 248-row old/new code mapping is joined so all pre-2025
+   BSE codes remain in the historical code universe.
 5. The current BSE risk-warning board is fetched separately as an audit of
    currently risky / delisting-arrangement stocks.
 
@@ -586,7 +586,7 @@ def fetch_bse_code_mapping(session: requests.Session) -> pd.DataFrame:
             if len(code_idx) < 2:
                 continue
             old_code, new_code = row[code_idx[0]], row[code_idx[1]]
-            if not is_bse_code(old_code) or not is_bse_code(new_code):
+            if not re.fullmatch(r"\d{6}", old_code) or not is_bse_code(new_code):
                 continue
             if not new_code.startswith("920") or old_code == new_code:
                 continue
@@ -605,36 +605,7 @@ def fetch_bse_code_mapping(session: requests.Session) -> pd.DataFrame:
         ).drop_duplicates(subset=["old_code", "new_code"])
 
         if len(mapping) != 248:
-            raw_path = OUTPUT_DIR / "bse_code_mapping_raw.html"
-            raw_path.write_text(response.text, encoding="utf-8")
-            print(f"BSE code mapping parse: extracted {len(mapping)} rows, expected 248; raw saved to {raw_path}")
-            print(f"BSE-CODE-MAPPING raw contains 无锡鼎邦={ '无锡鼎邦' in response.text }")
-            print(f"BSE-CODE-MAPPING raw contains 凯添燃气={ '凯添燃气' in response.text }")
-            print(f"BSE-CODE-MAPPING raw contains 2020/7/27={ '2020/7/27' in response.text }")
-            for row_no, row in enumerate(parser.rows, start=1):
-                date_idx = next(
-                    (i for i, value in enumerate(row) if re.fullmatch(r"\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}", value)),
-                    None,
-                )
-                if date_idx is None:
-                    continue
-                codes = [value for value in row[date_idx + 1:] if re.fullmatch(r"\\d{6}", value)]
-                if len(codes) < 2:
-                    print(f"[BSE-CODE-MAPPING-DEBUG] row={row_no} cells={row!r}")
-                elif not codes[1].startswith("920") or codes[0] == codes[1]:
-                    print(f"[BSE-CODE-MAPPING-DEBUG] row={row_no} unusual_codes={codes!r} cells={row!r}")
-            for row_no, row in enumerate(parser.rows, start=1):
-                date_idx = next(
-                    (i for i, value in enumerate(row) if re.fullmatch(r"\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}", value)),
-                    None,
-                )
-                if date_idx is None:
-                    continue
-                codes = [value for value in row[date_idx + 1:] if re.fullmatch(r"\\d{6}", value)]
-                if len(codes) < 2:
-                    print(f"[BSE-CODE-MAPPING-DEBUG] row={row_no} cells={row!r}")
-                elif not codes[1].startswith("920") or codes[0] == codes[1]:
-                    print(f"[BSE-CODE-MAPPING-DEBUG] row={row_no} unusual_codes={codes!r} cells={row!r}")
+            print(f"BSE code mapping parse: extracted {len(mapping)} rows, expected 248")
             if attempt < SOURCE_ATTEMPTS:
                 time.sleep(1.5 * attempt)
                 continue
@@ -794,7 +765,7 @@ def main() -> None:
     )
     print("termination_source=CNINFO hisAnnouncement/query, plate=bj")
     print("current_status_source=BSE nqxxController/nqxxCnzq.do")
-    print("code_mapping_source=verified BSE old/new code aliases")
+    print("code_mapping_source=BSE service/code_mapping.html (official 248-row table)")
     print("final_title_filter=semantic; risk/proposed/H-share false positives excluded")
 
     session = build_session()
