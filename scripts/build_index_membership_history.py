@@ -46,8 +46,11 @@ WORKERS = int(os.getenv("SINA_WORKERS", "16"))
 DELAY = float(os.getenv("SINA_DELAY", "0.15"))
 TIMEOUT = 20
 RETRIES = 4
-CACHE_VERSION = 3
+CACHE_VERSION = 4
+CACHE_TTL_SEC = int(os.getenv("SINA_CACHE_TTL_SEC", "86400"))
 
+# Only genuine aliases/equivalent identifiers are normalized here. Wrong
+# historical code/name pairs are deliberately NOT aliased into another index.
 INDEX_ALIASES = {
     "000001": "000001", "399001": "399001", "399006": "399006",
     "000688": "000688", "899050": "899050", "000016": "000016",
@@ -55,16 +58,16 @@ INDEX_ALIASES = {
     "000905": "000905", "399905": "000905",
     "000852": "000852", "399852": "000852",
     "000851": "000851", "932000": "000851",
-    "399303": "399303", "399330": "399330", "000090": "000090",
-    "399324": "399324", "000015": "000015", "000827": "000827",
-    "399311": "399311", "399317": "399317", "399807": "399807",
-    "399812": "399812", "399354": "399354", "399673": "399673",
-    "399285": "399285", "399008": "399008", "399993": "399993",
-    "399975": "399975", "399986": "399986", "399932": "399932",
-    "399933": "399933", "399967": "399967", "399989": "399989",
-    "399971": "399971", "399997": "399997", "000934": "000934",
-    "000935": "000935", "399990": "399990", "399998": "399998",
-    "399974": "399974",
+    "399303": "399303", "399330": "399330",
+    "000010": "000010", "399324": "399324", "000015": "000015",
+    "000904": "000904", "399311": "399311",
+    "930713": "930713", "980017": "980017", "980087": "980087",
+    "399673": "399673", "399412": "399412", "399005": "399005",
+    "399994": "399994", "399975": "399975", "399986": "399986",
+    "399932": "399932", "399933": "399933", "399967": "399967",
+    "399989": "399989", "399971": "399971", "399997": "399997",
+    "000928": "000928", "000929": "000929", "399990": "399990",
+    "930708": "930708", "399974": "399974",
 }
 
 TARGET_INDEXES = {
@@ -72,15 +75,16 @@ TARGET_INDEXES = {
     "000688": "科创50", "899050": "北证50", "000016": "上证50",
     "000300": "沪深300", "000905": "中证500", "000852": "中证1000",
     "000851": "中证2000", "399303": "国证2000", "399330": "深证100",
-    "000090": "上证180", "399324": "深证红利", "000015": "红利指数",
-    "000827": "中证中盘", "399311": "国证1000", "399807": "中证人工智能",
-    "399812": "国证芯片", "399354": "国证人工智能", "399673": "创业板50",
-    "399285": "国证新能源", "399008": "中小100", "399993": "中证信息安全",
-    "399975": "证券公司", "399986": "中证银行", "399932": "中证消费",
-    "399933": "中证医药", "399967": "中证军工", "399989": "中证医疗",
-    "399971": "中证传媒", "399997": "中证白酒", "000934": "中证能源",
-    "000935": "中证原材料", "399990": "煤炭等权", "399998": "中证有色",
-    "399974": "国证国企",
+    "000010": "上证180", "399324": "深证红利", "000015": "红利指数",
+    "000904": "中证中盘200", "399311": "国证1000",
+    "930713": "中证人工智能主题", "980017": "国证芯片",
+    "980087": "国证人工智能精选", "399673": "创业板50",
+    "399412": "国证新能源", "399005": "中小100",
+    "399994": "中证信息安全", "399975": "证券公司",
+    "399986": "中证银行", "399932": "中证消费", "399933": "中证医药",
+    "399967": "中证军工", "399989": "中证医疗", "399971": "中证传媒",
+    "399997": "中证白酒", "000928": "中证能源", "000929": "中证原材料",
+    "399990": "煤炭等权", "930708": "中证有色", "399974": "国证国企",
 }
 
 SINA_COMPONENT_INDEX_IDS = {"000851": "932000"}
@@ -251,9 +255,18 @@ def html_cache_path(code: str) -> Path:
     return CACHE / f"{code}.html"
 
 
+def cache_is_fresh(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size == 0:
+        return False
+    if CACHE_TTL_SEC <= 0:
+        return True
+    age = time.time() - path.stat().st_mtime
+    return age <= CACHE_TTL_SEC
+
+
 def load_parsed_cache(code: str):
     path = parsed_cache_path(code)
-    if not path.exists() or path.stat().st_size == 0:
+    if not cache_is_fresh(path):
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -289,7 +302,7 @@ def save_parsed_cache(code: str, rows, status: str) -> None:
 
 def fetch_html(session: requests.Session, code: str) -> tuple[str, str]:
     path = html_cache_path(code)
-    if path.exists() and path.stat().st_size > 1000:
+    if path.stat().st_size > 1000 and cache_is_fresh(path):
         return path.read_text(encoding="gb2312", errors="ignore"), "cache"
 
     url = f"{BASE}/corp/go.php/vCI_CorpXiangGuan/stockid/{code}.phtml"
@@ -802,9 +815,14 @@ def boundary_audit(df: pd.DataFrame, raw_df: pd.DataFrame) -> dict:
     }
 
 
-def build_a_candidates() -> tuple[dict[str, set[str]], list[dict]]:
+def build_a_candidates() -> tuple[
+    dict[str, set[str]],
+    dict[str, set[str]],
+    list[dict],
+]:
     session = make_session()
     candidates: dict[str, set[str]] = {}
+    newest_candidates: dict[str, set[str]] = {}
     errors: list[dict] = []
 
     def fetch_component(index_id: str, kind: str, page: int) -> str:
@@ -853,6 +871,7 @@ def build_a_candidates() -> tuple[dict[str, set[str]], list[dict]]:
 
     for index_id in TARGET_INDEXES:
         codes: set[str] = set()
+        newest_codes: set[str] = set()
         for kind in ("history", "newest"):
             try:
                 first = fetch_component(index_id, kind, 1)
@@ -863,9 +882,13 @@ def build_a_candidates() -> tuple[dict[str, set[str]], list[dict]]:
                         if page == 1
                         else fetch_component(index_id, kind, page)
                     )
-                    codes.update(parse_codes(html))
+                    page_codes = parse_codes(html)
+                    codes.update(page_codes)
+                    if kind == "newest":
+                        newest_codes.update(page_codes)
                 print(
-                    f"A candidates {index_id} {kind}: pages={pages} stocks={len(codes)}",
+                    f"A candidates {index_id} {kind}: pages={pages} "
+                    f"stocks={len(newest_codes if kind == 'newest' else codes)}",
                     flush=True,
                 )
             except Exception as exc:
@@ -873,12 +896,103 @@ def build_a_candidates() -> tuple[dict[str, set[str]], list[dict]]:
                     {"index_id": index_id, "kind": kind, "error": repr(exc)}
                 )
         candidates[index_id] = codes
+        newest_candidates[index_id] = newest_codes
         print(
-            f"A candidates {index_id}: union={len(codes)}",
+            f"A candidates {index_id}: union={len(codes)}, newest={len(newest_codes)}",
             flush=True,
         )
 
-    return candidates, errors
+    return candidates, newest_candidates, errors
+
+
+
+def audit_current_membership(
+    final_df: pd.DataFrame,
+    newest_candidates: dict[str, set[str]],
+    universe: pd.DataFrame,
+) -> dict:
+    """Reconcile current XiangGuan membership against Sina NewestComponent."""
+    cmap = universe.set_index("query_code")["stock_id"].to_dict()
+    universe_codes = set(universe["query_code"])
+
+    rows: list[dict] = []
+    missing_rows: list[dict] = []
+    extra_rows: list[dict] = []
+
+    for index_id in TARGET_INDEXES:
+        newest_all = newest_candidates.get(index_id, set())
+        newest_in_universe = {
+            cmap.get(code, code)
+            for code in newest_all
+            if code in universe_codes
+        }
+
+        b_current = set(
+            final_df.loc[
+                (final_df["index_id"] == index_id)
+                & (final_df["end_date"] == ""),
+                "stock_id",
+            ]
+        )
+
+        missing = sorted(newest_in_universe - b_current)
+        extra = sorted(b_current - newest_in_universe)
+
+        for stock_id in missing:
+            missing_rows.append({
+                "index_id": index_id,
+                "stock_id": stock_id,
+            })
+        for stock_id in extra:
+            extra_rows.append({
+                "index_id": index_id,
+                "stock_id": stock_id,
+            })
+
+        rows.append({
+            "index_id": index_id,
+            "newest_component_codes": len(newest_all),
+            "newest_in_universe": len(newest_in_universe),
+            "b_current_open_intervals": len(b_current),
+            "missing_from_xiangguan": len(missing),
+            "extra_in_xiangguan": len(extra),
+            "status": "PASS" if not missing and not extra else "FAIL",
+        })
+
+    audit_df = pd.DataFrame(rows)
+    missing_df = pd.DataFrame(missing_rows, columns=["index_id", "stock_id"])
+    extra_df = pd.DataFrame(extra_rows, columns=["index_id", "stock_id"])
+
+    audit_df.to_csv(
+        OUT / "current_membership_audit.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    missing_df.to_csv(
+        OUT / "current_membership_missing.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    extra_df.to_csv(
+        OUT / "current_membership_extra.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    failures = int((audit_df["status"] == "FAIL").sum()) if not audit_df.empty else 0
+    print(
+        f"Current membership reconciliation: indexes={len(audit_df)}, "
+        f"failures={failures}, missing={len(missing_df)}, extra={len(extra_df)}",
+        flush=True,
+    )
+
+    return {
+        "status": "PASS" if failures == 0 else "FAIL",
+        "index_failures": failures,
+        "missing_total": len(missing_df),
+        "extra_total": len(extra_df),
+        "by_index": rows,
+    }
 
 
 def build_a_from_xiangguan(
@@ -1102,8 +1216,11 @@ def main() -> None:
     boundary = boundary_audit(final_df, raw_df)
 
     print("\nA/B completeness audit...", flush=True)
-    a_candidates, a_candidate_errors = build_a_candidates()
+    a_candidates, newest_candidates, a_candidate_errors = build_a_candidates()
     a_df, a_xiangguan_errors = build_a_from_xiangguan(a_candidates, cmap)
+    current_audit = audit_current_membership(
+        final_df, newest_candidates, universe
+    )
     a_df.to_parquet(
         OUT / "ab_a_index_membership_history.parquet",
         index=False,
@@ -1171,6 +1288,8 @@ def main() -> None:
         "validation_errors": validation_errors,
         "boundary_audit": boundary,
         "pit_failures": pit_failures,
+        "cache_ttl_seconds": CACHE_TTL_SEC,
+        "current_membership_audit": current_audit,
         "ab": {
             "candidate_errors": a_candidate_errors,
             "xiangguan_errors": a_xiangguan_errors,
@@ -1219,6 +1338,12 @@ def main() -> None:
     print(
         f"B-A intervals:                {ab['b_minus_a_intervals']}"
     )
+    print(
+        "Current membership audit:       "
+        f"{current_audit['status']} "
+        f"(missing={current_audit['missing_total']}, "
+        f"extra={current_audit['extra_total']})"
+    )
     print("============================================")
 
     if (
@@ -1231,6 +1356,7 @@ def main() -> None:
         or a_candidate_errors
         or a_xiangguan_errors
         or boundary["status"] != "PASS"
+        or current_audit["status"] != "PASS"
     ):
         print("PRODUCTION INDEX MEMBERSHIP BUILD: FAIL")
         sys.exit(1)
