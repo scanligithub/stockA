@@ -18,6 +18,8 @@ BASE = "https://www.bse.cn"
 PAGES = {
     "vocational": f"{BASE}/disclosure/vocational.html",
     "announcement": f"{BASE}/disclosure/announcement.html",
+    "risk_warning": f"{BASE}/disclosure/risk_warning_board.html",
+    "select_stop": f"{BASE}/disclosure/select_stop/200028455.html",
     "listedcompany": f"{BASE}/nq/listedcompany.html",
 }
 
