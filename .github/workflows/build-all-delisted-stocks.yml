@@ -1,10 +1,6 @@
 name: Build All A-share Delisted Stock Universe
 
 on:
-  push:
-    paths:
-      - "scripts/download_all_delisted_stocks.py"
-      - ".github/workflows/build-all-delisted-stocks.yml"
   workflow_dispatch:
   schedule:
     - cron: "30 1 * * 1-5"
