@@ -196,6 +196,15 @@ jobs:
           assert df["index_id"].nunique() == 37
           assert len(df) > 0
           assert not df.duplicated(["index_id","stock_id","start_date","end_date"]).any()
+          assert not (df["start_date"] == "1900-01-01").any(),               "Sina 1900-01-01 placeholder remains in final output"
+          assert summary.get("placeholder_start_unresolved", 0) == 0
+          assert summary.get("placeholder_start_remaining", 0) == 0
+          print(
+              "placeholder repairs:",
+              summary.get("placeholder_start_repairs", 0),
+              "remaining:",
+              summary.get("placeholder_start_remaining", 0),
+          )
           print("PRODUCTION OUTPUT VALIDATION PASS")
           PY
 
