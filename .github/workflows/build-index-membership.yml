@@ -1,0 +1,211 @@
+name: Build Index Historical Membership
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1-5"
+
+permissions:
+  contents: read
+
+jobs:
+  build-index-membership:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pyarrow requests beautifulsoup4 openpyxl
+
+      - name: Build official delisted universe
+        run: python scripts/download_all_delisted_stocks.py
+
+      - name: Build TDX current stock universe
+        working-directory: test/tdx_index_api
+        run: |
+          go mod tidy
+
+          cat > /tmp/build_tdx_universe.go <<'EOF'
+          package main
+
+          import (
+            "encoding/json"
+            "fmt"
+            "os"
+            "strings"
+
+            "github.com/injoyai/tdx"
+            "github.com/injoyai/tdx/protocol"
+          )
+
+          type Stock struct {
+            Code string `json:"code"`
+            CodeName string `json:"code_name"`
+          }
+
+          func main() {
+            client, err := tdx.DialDefault()
+            if err != nil { panic(err) }
+            defer client.Close()
+
+            var all []Stock
+            exchanges := []struct{
+              name string
+              ex protocol.Exchange
+            }{
+              {"SH", protocol.ExchangeSH},
+              {"SZ", protocol.ExchangeSZ},
+              {"BJ", protocol.ExchangeBJ},
+            }
+
+            for _, m := range exchanges {
+              resp, err := client.GetCodeAll(m.ex)
+              if err != nil || resp == nil {
+                panic(fmt.Errorf("%s: empty/error response: %v", m.name, err))
+              }
+
+              for _, item := range resp.List {
+                code := strings.TrimSpace(item.Code)
+                if len(code) != 6 {
+                  continue
+                }
+
+                keep := false
+                switch m.name {
+                case "SH":
+                  keep = strings.HasPrefix(code, "60") || strings.HasPrefix(code, "68")
+                case "SZ":
+                  keep = strings.HasPrefix(code, "00") || strings.HasPrefix(code, "30")
+                case "BJ":
+                  keep = strings.HasPrefix(code, "43") ||
+                    strings.HasPrefix(code, "83") ||
+                    strings.HasPrefix(code, "87") ||
+                    strings.HasPrefix(code, "88") ||
+                    strings.HasPrefix(code, "92")
+                }
+
+                if keep {
+                  all = append(all, Stock{
+                    Code: code,
+                    CodeName: strings.TrimSpace(item.Name),
+                  })
+                }
+              }
+            }
+
+            seen := map[string]bool{}
+            out := make([]Stock, 0, len(all))
+            for _, stock := range all {
+              if !seen[stock.Code] {
+                seen[stock.Code] = true
+                out = append(out, stock)
+              }
+            }
+
+            f, err := os.Create("stock_list_master.json")
+            if err != nil { panic(err) }
+            defer f.Close()
+
+            enc := json.NewEncoder(f)
+            enc.SetIndent("", "  ")
+            if err := enc.Encode(out); err != nil { panic(err) }
+
+            fmt.Printf("TDX current A-share stocks: %d\\n", len(out))
+          }
+          EOF
+
+          go run /tmp/build_tdx_universe.go
+          mkdir -p ../../data/index_membership
+          cp stock_list_master.json ../../data/index_membership/stock_list_master.json
+
+      - name: Prepare Sina cache directories
+        run: |
+          mkdir -p data/cache/sina_xiangguan data/cache/sina_xiangguan_parsed
+
+      - name: Calculate query-universe cache key
+        id: universe-key
+        run: |
+          sha256sum             data/index_membership/stock_list_master.json             data/universe/a_share_delisted_all.csv             data/universe/bse_old_code_aliases.csv             | sha256sum | cut -d' ' -f1 > /tmp/universe.sha
+          echo "hash=$(cat /tmp/universe.sha)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Sina XiangGuan cache
+        id: sina-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/cache/sina_xiangguan
+            data/cache/sina_xiangguan_parsed
+          key: ${{ runner.os }}-sina-xiangguan-prod-v1-${{ steps.universe-key.outputs.hash }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-sina-xiangguan-prod-v1-
+            ${{ runner.os }}-sina-xiangguan-v4-
+
+      - name: Report Sina cache status
+        run: |
+          echo "Exact cache hit: ${{ steps.sina-cache.outputs.cache-hit }}"
+          echo "Matched cache key: ${{ steps.sina-cache.outputs.cache-matched-key }}"
+          echo "HTML cached: $(find data/cache/sina_xiangguan -maxdepth 1 -type f -name '*.html' | wc -l)"
+          echo "Parsed cached: $(find data/cache/sina_xiangguan_parsed -maxdepth 1 -type f -name '*.json' | wc -l)"
+
+      - name: Build production index membership
+        env:
+          SINA_WORKERS: "16"
+          SINA_DELAY: "0.15"
+        run: python scripts/build_index_membership_history.py
+
+      - name: Save updated Sina cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/cache/sina_xiangguan
+            data/cache/sina_xiangguan_parsed
+          key: ${{ runner.os }}-sina-xiangguan-prod-v1-${{ steps.universe-key.outputs.hash }}-${{ github.run_id }}
+
+      - name: Verify production result
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          import pandas as pd
+
+          summary = json.load(open("data/index_membership/summary.json", encoding="utf-8"))
+          df = pd.read_parquet("data/index_membership/index_membership_history.parquet")
+
+          print("summary:", json.dumps(summary, ensure_ascii=False, indent=2))
+          print("rows:", len(df))
+          print("indexes:", df["index_id"].nunique())
+          print("columns:", list(df.columns))
+
+          assert list(df.columns) == ["index_id", "stock_id", "start_date", "end_date"]
+          assert df["index_id"].nunique() == 37
+          assert len(df) > 0
+          assert not df.duplicated(["index_id","stock_id","start_date","end_date"]).any()
+          print("PRODUCTION OUTPUT VALIDATION PASS")
+          PY
+
+      - name: Upload production artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: index-membership-history-${{ github.run_id }}
+          path: |
+            data/index_membership/**
+          if-no-files-found: error
+          retention-days: 30
