@@ -157,7 +157,7 @@ def probe_cninfo_bse_termination() -> None:
             "tabName": "fulltext",
             "searchkey": keyword,
             "seDate": "2021-11-15~2026-09-24",
-            "column": "",
+            "column": "bj",
             "plate": "",
             "category": "",
             "trade": "",
