@@ -34,7 +34,8 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-OUTPUT_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = Path(__file__).resolve().parents[1] / "data" / "universe"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 BSE_BASE_URL = "https://www.bse.cn"
 BSE_PAGE_URL = f"{BSE_BASE_URL}/disclosure/announcement.html"
