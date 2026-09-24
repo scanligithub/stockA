@@ -86,5 +86,6 @@ jobs:
             test/bse_current_risk_stocks.csv
             test/bse_current_stocks.csv
             test/bse_code_mapping.csv
+            test/bse_code_mapping_raw.html
           if-no-files-found: error
           retention-days: 14
