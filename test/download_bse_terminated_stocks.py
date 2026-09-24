@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Build the BSE historical delisting candidate list from risk notices + current stock list.
+"""Build the historical BSE stock universe for downstream index-membership crawling.
 
-BSE does not provide a simple historical terminated-stock table equivalent to
-SSE/SZSE. We therefore use BSE company announcements as the candidate source:
-first remember stocks whose titles indicate delisting risk / possible
-termination / termination, then query the official current BSE stock list.
-A candidate still present in the current BSE list is NOT considered delisted;
-only a candidate absent from the current BSE list is emitted as a delisted
-candidate. This also handles securities that transferred from BSE to SSE/SZSE.
+Production source strategy:
+1. CNINFO historical full-text search, filtered by plate=bj, finds BSE
+   "终止上市"/"摘牌" announcements.
+2. Announcement titles are semantically filtered so risk-warning/proposed
+   termination notices are not treated as final termination events.
+3. BSE's official current stock list is the current-status cross-check.
+4. BSE's official old/new code mapping is joined so pre-2025 BSE codes (for
+   example 839680 -> 920680) remain in the historical code universe.
+5. The current BSE risk-warning board is fetched separately as an audit of
+   currently risky / delisting-arrangement stocks.
 
-PDF downloads are intentionally not required: the announcement title is enough
-to identify the risk/termination signal, while the current-list membership is
-the deciding evidence for current BSE listing status.
+No PDF download is required.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ import json
 import random
 import re
 import time
-from datetime import date
+from datetime import date, datetime, timezone
+from html import unescape
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import requests
@@ -31,33 +34,48 @@ from urllib3.util.retry import Retry
 
 OUTPUT_DIR = Path(__file__).resolve().parent
 
-BSE_PAGE_URL = "https://www.bse.cn/disclosure/announcement.html"
-BSE_LIST_URL = "https://www.bse.cn/disclosureInfoController/initDisclosureList.do"
-BSE_CURRENT_LIST_URL = "https://www.bse.cn/nqxxController/nqxxCnzq.do"
 BSE_BASE_URL = "https://www.bse.cn"
+BSE_PAGE_URL = f"{BSE_BASE_URL}/disclosure/announcement.html"
+BSE_CURRENT_LIST_URL = f"{BSE_BASE_URL}/nqxxController/nqxxCnzq.do"
+BSE_RISK_API_URL = f"{BSE_BASE_URL}/nqxxController/getRiskWarningStock.do"
+BSE_CODE_MAPPING_URL = f"{BSE_BASE_URL}/service/code_mapping.html"
+
+CNINFO_TERMINATION_URL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
 
 START_DATE = date(2021, 11, 15)
 END_DATE = date.today()
-ANNOUNCEMENT_TYPE = "2"
-
-# BSE date filtering is only reliable as a bounded window, so scan one
-# calendar month at a time and merge/dedupe the returned announcements.
-SERVER_KEYWORD = ""
 
 REQUEST_TIMEOUT = (15, 60)
 HTTP_RETRIES = 2
 SOURCE_ATTEMPTS = 3
-MAX_PAGES = 200
+MAX_PAGES = 100
+CNINFO_PAGE_SIZE = 100
+MIN_CURRENT_BSE_STOCKS = 300
 
-RISK_KEYWORDS = ("退市风险", "退市风险警示", "可能被终止上市", "可能终止上市", "拟终止上市")
-TERMINATION_KEYWORDS = ("股票终止上市", "终止上市暨摘牌", "终止在北京证券交易所上市", "因转板在北京证券交易所终止上市", "股票摘牌", "终止上市")
-ALL_SIGNAL_KEYWORDS = RISK_KEYWORDS + TERMINATION_KEYWORDS
-
-# Known historical BSE terminations/transfers used only as source-integrity checks.
+# These are hard source-integrity cases already independently verified.
 KNOWN_TERMINATED_CODES = ("832317", "833874", "833994", "920680", "920305")
-MIN_CURRENT_BSE_STOCKS = 100
+KNOWN_OLD_CODE_ALIASES = {"920680": "839680"}
 
-HEADERS = {
+# Positive title patterns for an actual/final BSE termination event.
+TERMINATION_PHRASES = (
+    "股票终止上市暨摘牌",
+    "股票在北京证券交易所终止上市",
+    "股票因转板在北京证券交易所终止上市",
+    "终止在北京证券交易所上市",
+)
+# These phrases identify process/risk notices, not the final termination event.
+NON_FINAL_TERMINATION_PHRASES = (
+    "风险提示",
+    "风险警示",
+    "可能被终止上市",
+    "可能终止上市",
+    "拟终止上市",
+    "将被终止上市",
+    "事先告知书",
+    "筹划发行",
+)
+
+BSE_HEADERS = {
     "Accept": "text/javascript, application/javascript, application/ecmascript, */*; q=0.01",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.6",
     "Cache-Control": "no-cache",
@@ -70,6 +88,15 @@ HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/150.0.0.0 Safari/537.36"
     ),
+    "X-Requested-With": "XMLHttpRequest",
+}
+
+CNINFO_HEADERS = {
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "Origin": "https://www.cninfo.com.cn",
+    "Referer": "https://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search",
+    "User-Agent": BSE_HEADERS["User-Agent"],
     "X-Requested-With": "XMLHttpRequest",
 }
 
@@ -87,9 +114,9 @@ def build_session() -> requests.Session:
         raise_on_status=False,
     )
     adapter = HTTPAdapter(
-        max_retries=HTTP_RETRIES,
-        pool_connections=4,
-        pool_maxsize=4,
+        max_retries=retry,
+        pool_connections=8,
+        pool_maxsize=8,
     )
     session.mount("https://", adapter)
     session.mount("http://", adapter)
@@ -101,11 +128,12 @@ def request_with_retry(
     method: str,
     url: str,
     *,
-    params: dict | None = None,
-    data=None,
+    headers: dict[str, str],
+    params: dict[str, str] | None = None,
+    data: Any = None,
     label: str,
 ) -> requests.Response:
-    last_error = None
+    last_error: Exception | None = None
     for attempt in range(1, HTTP_RETRIES + 1):
         try:
             response = session.request(
@@ -113,7 +141,7 @@ def request_with_retry(
                 url,
                 params=params,
                 data=data,
-                headers=HEADERS,
+                headers=headers,
                 timeout=REQUEST_TIMEOUT,
             )
             response.raise_for_status()
@@ -128,266 +156,277 @@ def request_with_retry(
             last_error = exc
             if attempt == HTTP_RETRIES:
                 break
-            delay = min(30, 2 ** (attempt - 1) + random.random())
+            delay = min(30.0, 2 ** (attempt - 1) + random.random())
             print(
-                f"[{label}] http attempt {attempt}/{HTTP_RETRIES} failed: "
+                f"[{label}] HTTP attempt {attempt}/{HTTP_RETRIES} failed: "
                 f"{type(exc).__name__}: {exc}; retry in {delay:.1f}s"
             )
             time.sleep(delay)
     raise RuntimeError(f"{label}: all HTTP retries failed") from last_error
 
 
-def parse_jsonp(text: str):
-    payload = text.strip()
-    match = re.match(r"^[A-Za-z_$][\w$]*\((.*)\);?$", payload, re.DOTALL)
-    if match:
-        payload = match.group(1)
-    return json.loads(payload)
-
-
 def normalize_code(value: object) -> str:
     raw = str(value or "").strip()
-    if re.fullmatch(r"\d{1,6}", raw):
-        return raw.zfill(6)
-    return ""
+    return raw.zfill(6) if re.fullmatch(r"\d{1,6}", raw) else ""
 
 
-def extract_records(payload) -> tuple[list[dict], int, int]:
-    """Support both known BSE announcement response shapes."""
-    root = payload[0] if isinstance(payload, list) and payload else payload
-    if not isinstance(root, dict):
-        raise RuntimeError("BSE: JSONP payload root is not an object")
-
-    if isinstance(root.get("data"), dict):
-        data = root["data"]
-        blocks = data.get("content") or []
-        records: list[dict] = []
-        for block in blocks:
-            if isinstance(block, dict) and isinstance(block.get("disclosures"), list):
-                records.extend(
-                    item for item in block["disclosures"]
-                    if isinstance(item, dict)
-                )
-            elif isinstance(block, dict):
-                records.append(block)
-        return (
-            records,
-            int(data.get("totalPages") or 0),
-            int(data.get("totalElements") or 0),
-        )
-
-    if isinstance(root.get("listInfo"), dict):
-        info = root["listInfo"]
-        content = info.get("content") or []
-        records: list[dict] = []
-        for item in content:
-            if isinstance(item, dict) and isinstance(item.get("disclosures"), list):
-                records.extend(
-                    disclosure for disclosure in item["disclosures"]
-                    if isinstance(disclosure, dict)
-                )
-            elif isinstance(item, dict):
-                records.append(item)
-        return (
-            records,
-            int(info.get("totalPages") or 0),
-            int(info.get("totalElements") or 0),
-        )
-
-    if isinstance(root.get("content"), list):
-        records = [r for r in root["content"] if isinstance(r, dict)]
-        return (
-            records,
-            int(root.get("totalPages") or 0),
-            int(root.get("totalElements") or 0),
-        )
-
-    raise RuntimeError(
-        f"BSE: unsupported announcement JSON structure, keys={list(root)[:20]}"
-    )
-
-
-def fetch_page(
-    session: requests.Session,
-    page: int,
-    start_date: date,
-    end_date: date,
-) -> tuple[list[dict], int, int]:
-    callback = f"jQuery{start_date:%Y%m%d}{end_date:%Y%m%d}{page:04d}"
-    form_data = [
-        ("siteId", "6"),
-        # The BSE endpoint requires flag=0 for the disclosure-list query.
-        # flag=1 caused the server to ignore the requested date window and
-        # return the same 1212-record dataset for every query.
-        ("flag", "0"),
-        ("page", str(page)),
-        ("companyCd", ""),
-        ("isNewThree", "1"),
-        ("keyword", SERVER_KEYWORD),
-        ("date", f"{start_date.isoformat()} ~ {end_date.isoformat()}"),
-        ("startTime", start_date.isoformat()),
-        ("endTime", end_date.isoformat()),
-        ("xxfcbj[]", ANNOUNCEMENT_TYPE),
-        ("needFields[]", "companyCd"),
-        ("needFields[]", "companyName"),
-        ("needFields[]", "disclosureTitle"),
-        ("needFields[]", "disclosurePostTitle"),
-        ("needFields[]", "destFilePath"),
-        ("needFields[]", "publishDate"),
-        ("needFields[]", "xxfcbj"),
-        ("needFields[]", "fileExt"),
-        ("needFields[]", "xxzrlx"),
-        ("sortfield", "xxssdq"),
-        ("sorttype", "asc"),
-    ]
-    response = request_with_retry(
-        session,
-        "POST",
-        BSE_LIST_URL,
-        params={"callback": callback},
-        data=form_data,
-        label=f"BSE-ANN page={page} window={start_date}:{end_date}",
-    )
+def to_announcement_date(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
     try:
-        payload = parse_jsonp(response.text)
-    except Exception as exc:
+        timestamp = int(float(raw))
+        return datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).date().isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def strip_html(value: object) -> str:
+    text = unescape(str(value or ""))
+    return re.sub(r"<[^>]+>", "", text).strip()
+
+
+def is_bse_code(code: str) -> bool:
+    return bool(
+        re.fullmatch(r"\d{6}", code)
+        and code.startswith(("83", "87", "88", "92"))
+    )
+
+
+def is_final_termination_title(title: str) -> bool:
+    clean = re.sub(r"\s+", "", title)
+    if any(phrase in clean for phrase in NON_FINAL_TERMINATION_PHRASES):
+        return False
+    return any(phrase in clean for phrase in TERMINATION_PHRASES)
+
+
+def fetch_cninfo_keyword(session: requests.Session, keyword: str) -> list[dict]:
+    """Fetch every CNINFO BSE announcement for one keyword."""
+    all_rows: list[dict] = []
+    seen = set()
+
+    for page_num in range(1, MAX_PAGES + 1):
+        data = {
+            "pageNum": str(page_num),
+            "pageSize": str(CNINFO_PAGE_SIZE),
+            "column": "",
+            "tabName": "fulltext",
+            "plate": "bj",
+            "stock": "",
+            "searchkey": keyword,
+            "secid": "",
+            "category": "",
+            "trade": "",
+            "seDate": f"{START_DATE.isoformat()}~{END_DATE.isoformat()}",
+            "sortName": "announcementTime",
+            "sortType": "-1",
+            "isHLtitle": "true",
+        }
+
+        response = request_with_retry(
+            session,
+            "POST",
+            CNINFO_TERMINATION_URL,
+            headers=CNINFO_HEADERS,
+            data=data,
+            label=f"CNINFO keyword={keyword} page={page_num}",
+        )
+        payload = response.json()
+        announcements = payload.get("announcements") or []
+        total = int(payload.get("totalAnnouncement") or 0)
+
+        print(
+            f"[CNINFO] keyword={keyword!r} page={page_num} "
+            f"returned={len(announcements)} total={total}"
+        )
+
+        for item in announcements:
+            if not isinstance(item, dict):
+                continue
+            code = normalize_code(item.get("secCode"))
+            title = strip_html(item.get("announcementTitle"))
+            if not is_bse_code(code):
+                continue
+            key = (
+                code,
+                title,
+                str(item.get("announcementTime") or ""),
+                str(item.get("adjunctUrl") or ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            row = dict(item)
+            row["secCode"] = code
+            row["announcementTitle"] = title
+            row["_keyword"] = keyword
+            all_rows.append(row)
+
+        if not announcements or page_num * CNINFO_PAGE_SIZE >= total:
+            break
+    else:
         raise RuntimeError(
-            f"BSE: invalid JSONP response: {response.text[:160]!r}"
-        ) from exc
-    return extract_records(payload)
+            f"CNINFO keyword={keyword!r}: pagination exceeded {MAX_PAGES} pages"
+        )
+
+    return all_rows
 
 
-def iter_month_windows(start_date: date, end_date: date):
-    """Yield non-overlapping calendar-month windows clipped to the requested range."""
-    current = date(start_date.year, start_date.month, 1)
-    while current <= end_date:
-        if current.month == 12:
-            next_month = date(current.year + 1, 1, 1)
-        else:
-            next_month = date(current.year, current.month + 1, 1)
-        month_end = next_month.fromordinal(next_month.toordinal() - 1)
-        window_start = max(start_date, current)
-        window_end = min(end_date, month_end)
-        if window_start <= window_end:
-            yield window_start, window_end
-        current = next_month
-
-
-def fetch_window(
+def fetch_cninfo_termination_announcements(
     session: requests.Session,
-    window_start: date,
-    window_end: date,
-) -> list[dict]:
-    """Fetch one monthly BSE disclosure window completely."""
-    records: list[dict] = []
-    page = 0
-    total_pages = 0
-    total_elements = 0
+) -> pd.DataFrame:
+    rows: list[dict] = []
+    for keyword in ("终止上市", "摘牌"):
+        rows.extend(fetch_cninfo_keyword(session, keyword))
 
-    while True:
-        if page >= MAX_PAGES:
+    output: list[dict] = []
+    seen = set()
+    for item in rows:
+        code = str(item.get("secCode") or "")
+        title = str(item.get("announcementTitle") or "")
+        if not is_final_termination_title(title):
+            continue
+
+        key = (
+            code,
+            title,
+            str(item.get("announcementTime") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+
+        adjunct = str(item.get("adjunctUrl") or "").strip()
+        announcement_url = (
+            f"https://static.cninfo.com.cn/{adjunct.lstrip('/')}"
+            if adjunct
+            else ""
+        )
+        output.append(
+            {
+                "code": code,
+                "name": str(item.get("secName") or "").strip(),
+                "announcement_date": to_announcement_date(
+                    item.get("announcementTime")
+                ),
+                "title": title,
+                "keyword": str(item.get("_keyword") or "").strip(),
+                "announcement_url": announcement_url,
+            }
+        )
+
+    columns = [
+        "code",
+        "name",
+        "announcement_date",
+        "title",
+        "keyword",
+        "announcement_url",
+    ]
+    result = pd.DataFrame(output, columns=columns)
+    if result.empty:
+        raise RuntimeError("CNINFO: no final BSE termination announcements found")
+
+    result = (
+        result.drop_duplicates(
+            subset=["code", "title", "announcement_date"],
+            keep="first",
+        )
+        .sort_values(["announcement_date", "code", "title"], ascending=[False, True, True])
+        .reset_index(drop=True)
+    )
+
+    unique_codes = result["code"].nunique()
+    print(
+        f"CNINFO termination validation PASS: "
+        f"rows={len(result)} unique_codes={unique_codes}"
+    )
+    return result
+
+
+def fetch_current_risk_board(session: requests.Session) -> pd.DataFrame:
+    """Fetch current BSE risk-warning and delisting-arrangement snapshots."""
+    rows: list[dict] = []
+
+    for risk_type, label in ((0, "risk_warning"), (1, "delist_arrange")):
+        for page in range(MAX_PAGES):
+            response = request_with_retry(
+                session,
+                "POST",
+                BSE_RISK_API_URL,
+                headers=BSE_HEADERS,
+                params={"callback": f"jQueryRisk{risk_type}"},
+                data=[
+                    ("page", str(page)),
+                    ("pageSize", "20"),
+                    ("type", str(risk_type)),
+                ],
+                label=f"BSE-RISK type={risk_type} page={page}",
+            )
+            text = response.text.strip()
+            match = re.match(r"^[A-Za-z_$][\w$]*\((.*)\);?$", text, re.DOTALL)
+            if match:
+                text = match.group(1)
+            payload = json.loads(text)
+            root = payload[0] if isinstance(payload, list) and payload else payload
+            if not isinstance(root, dict):
+                raise RuntimeError(
+                    f"BSE risk type={risk_type}: unsupported response root"
+                )
+
+            content = root.get("content") or []
+            total_pages = int(root.get("totalPages") or 0)
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                code = normalize_code(item.get("xxzqdm"))
+                if not is_bse_code(code):
+                    continue
+                rows.append(
+                    {
+                        "code": code,
+                        "name": str(item.get("xxzqjc") or "").strip(),
+                        "risk_type": label,
+                    }
+                )
+
+            print(
+                f"[BSE-RISK] type={risk_type} page={page} "
+                f"rows={len(content)} total_pages={total_pages}"
+            )
+            if not content or page >= max(total_pages - 1, 0):
+                break
+        else:
             raise RuntimeError(
-                f"BSE window {window_start}:{window_end}: "
-                f"pagination exceeded {MAX_PAGES} pages"
+                f"BSE risk type={risk_type}: pagination exceeded {MAX_PAGES} pages"
             )
 
-        page_records, page_total, page_elements = fetch_page(
-            session, page, window_start, window_end
-        )
-        total_pages = page_total or total_pages
-        total_elements = page_elements or total_elements
-
-        if not page_records:
-            break
-
-        records.extend(page_records)
-        print(
-            f"[BSE-ANN window={window_start}:{window_end}] page={page} "
-            f"records={len(page_records)} accumulated={len(records)} "
-            f"total={total_elements} total_pages={total_pages}"
-        )
-
-        if total_pages and page >= total_pages - 1:
-            break
-        page += 1
-
-    return records
-
-
-def fetch_all(session: requests.Session) -> list[dict]:
-    """Scan the historical BSE announcement list month by month."""
-    all_records: list[dict] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    windows = list(iter_month_windows(START_DATE, END_DATE))
-
-    print(f"BSE monthly disclosure windows: {len(windows)}")
-
-    for window_start, window_end in windows:
-        last_error: Exception | None = None
-
-        for attempt in range(1, SOURCE_ATTEMPTS + 1):
-            try:
-                window_records = fetch_window(session, window_start, window_end)
-                if not window_records:
-                    raise RuntimeError(
-                        f"BSE window {window_start}:{window_end}: no records"
-                    )
-
-                added = 0
-                for record in window_records:
-                    key = (
-                        str(record.get("companyCd") or "").strip(),
-                        str(record.get("publishDate") or "").strip(),
-                        str(record.get("disclosureTitle") or "").strip(),
-                        str(record.get("destFilePath") or "").strip(),
-                    )
-                    if key not in seen:
-                        seen.add(key)
-                        all_records.append(record)
-                        added += 1
-
-                print(
-                    f"[BSE-ANN window={window_start}:{window_end}] "
-                    f"validation PASS rows={len(window_records)} added={added} "
-                    f"attempt={attempt}"
-                )
-                break
-
-            except Exception as exc:
-                last_error = exc
-                if attempt == SOURCE_ATTEMPTS:
-                    break
-                delay = min(60, 5 * attempt + random.uniform(0, 3))
-                print(
-                    f"[BSE-ANN window={window_start}:{window_end}] "
-                    f"source attempt {attempt}/{SOURCE_ATTEMPTS} failed: "
-                    f"{type(exc).__name__}: {exc}; retry in {delay:.1f}s"
-                )
-                time.sleep(delay)
-
-        else:
-            raise RuntimeError(
-                f"BSE window {window_start}:{window_end}: "
-                f"all {SOURCE_ATTEMPTS} source attempts failed"
-            ) from last_error
-
-        # The loop above must either break successfully or raise after the
-        # final retry. This assertion guards future edits to the control flow.
-        if last_error is not None and attempt == SOURCE_ATTEMPTS:
-            # A successful final attempt resets last_error below.
-            pass
-
-    if not all_records:
-        raise RuntimeError("BSE: monthly announcement scan returned no records")
-
-    print(
-        f"[BSE-ANN] monthly scan validation PASS, unique rows={len(all_records)}"
+    result = pd.DataFrame(rows, columns=["code", "name", "risk_type"]).drop_duplicates(
+        subset=["code", "risk_type"]
     )
-    return all_records
+    print(
+        f"BSE risk-board validation PASS: {len(result)} rows, "
+        f"{result['code'].nunique() if not result.empty else 0} unique codes"
+    )
+    return result
+
+
+def parse_current_list_payload(text: str) -> tuple[list[Any], int]:
+    start = text.find("[")
+    end = text.rfind("]")
+    if start < 0 or end < start:
+        raise RuntimeError(f"BSE current list: invalid response: {text[:160]!r}")
+    payload = json.loads(text[start : end + 1])
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+        raise RuntimeError("BSE current list: unsupported response shape")
+    root = payload[0]
+    content = root.get("content") or []
+    if not isinstance(content, list):
+        raise RuntimeError("BSE current list: content is not a list")
+    return content, int(root.get("totalPages") or 0)
 
 
 def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
-    """Fetch the official current BSE listed-stock snapshot."""
     payload = {
         "page": "0",
         "typejb": "T",
@@ -397,33 +436,19 @@ def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
         "sorttype": "asc",
     }
 
-    def parse_current(text: str) -> tuple[list[object], int]:
-        start = text.find("[")
-        end = text.rfind("]")
-        if start < 0 or end < start:
-            raise RuntimeError(f"BSE current list: invalid response: {text[:160]!r}")
-        data = json.loads(text[start:end + 1])
-        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
-            raise RuntimeError("BSE current list: unsupported response shape")
-        root = data[0]
-        content = root.get("content") or []
-        if not isinstance(content, list):
-            raise RuntimeError("BSE current list: content is not a list")
-        return content, int(root.get("totalPages") or 0)
-
-    all_rows: list[object] = []
+    all_rows: list[Any] = []
     total_pages = 0
-    page = 0
-    while True:
+    for page in range(MAX_PAGES):
         payload["page"] = str(page)
         response = request_with_retry(
             session,
             "POST",
             BSE_CURRENT_LIST_URL,
+            headers=BSE_HEADERS,
             data=payload,
             label=f"BSE-CURRENT page={page}",
         )
-        rows, page_total = parse_current(response.text)
+        rows, page_total = parse_current_list_payload(response.text)
         total_pages = page_total or total_pages
         all_rows.extend(rows)
         print(
@@ -432,224 +457,307 @@ def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
         )
         if not rows or (total_pages and page >= total_pages - 1):
             break
-        page += 1
-        if page >= MAX_PAGES:
-            raise RuntimeError(
-                f"BSE current list: pagination exceeded {MAX_PAGES} pages"
-            )
+    else:
+        raise RuntimeError(
+            f"BSE current list: pagination exceeded {MAX_PAGES} pages"
+        )
 
-    codes: list[dict] = []
-    seen: set[str] = set()
+    parsed: list[dict] = []
+    seen = set()
     for row in all_rows:
         code = ""
         name = ""
+        values: list[Any] = []
 
         if isinstance(row, dict):
-            code = normalize_code(row.get("证券代码"))
-            if not code:
-                code = normalize_code(row.get("xxzqdm"))
+            code = normalize_code(row.get("证券代码") or row.get("xxzqdm"))
             name = str(row.get("证券简称") or row.get("xxzqjc") or "").strip()
             values = list(row.values())
         elif isinstance(row, list):
-            # The current BSE endpoint returns array rows. AKShare's official
-            # parser maps index 20 -> 证券代码 and index 22 -> 证券简称.
+            values = row
             code = normalize_code(row[20]) if len(row) > 20 else ""
             name = str(row[22] or "").strip() if len(row) > 22 else ""
-            values = row
-        else:
-            values = []
 
         if not code:
             for value in values:
                 candidate = normalize_code(value)
-                if candidate and candidate.startswith(("43", "83", "87", "88", "92")):
+                if is_bse_code(candidate):
                     code = candidate
                     break
 
-        if not code or code in seen:
+        if not is_bse_code(code) or code in seen:
             continue
         seen.add(code)
-        codes.append({"code": code, "name": name})
+        parsed.append({"code": code, "name": name})
 
-    if not codes:
-        raise RuntimeError("BSE current list: no valid stock codes parsed")
-    if len(codes) < MIN_CURRENT_BSE_STOCKS:
+    if len(parsed) < MIN_CURRENT_BSE_STOCKS:
         raise RuntimeError(
-            f"BSE current list: suspiciously small stock count {len(codes)} "
+            f"BSE current list: suspiciously small count {len(parsed)} "
             f"< {MIN_CURRENT_BSE_STOCKS}"
         )
 
-    current = pd.DataFrame(codes).sort_values("code").reset_index(drop=True)
-    print(f"BSE current-list validation PASS: {len(current)} unique listed stocks")
-    return current
+    result = pd.DataFrame(parsed).sort_values("code").reset_index(drop=True)
+    print(
+        f"BSE current-list validation PASS: "
+        f"{len(result)} unique listed stocks"
+    )
+    return result
 
 
-def build_candidates(records: list[dict]) -> pd.DataFrame:
+def parse_code_mapping_html(html: str) -> pd.DataFrame:
+    """Parse the static BSE official old/new code mapping table."""
+    rows: list[list[str]] = []
+    for row_match in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", html, re.I | re.S):
+        cells = re.findall(
+            r"<t[dh]\b[^>]*>(.*?)</t[dh]>",
+            row_match.group(1),
+            re.I | re.S,
+        )
+        cleaned = [
+            re.sub(r"\s+", " ", strip_html(cell)).strip()
+            for cell in cells
+        ]
+        if cleaned:
+            rows.append(cleaned)
+
+    header_index = -1
+    for idx, row in enumerate(rows):
+        joined = " ".join(row)
+        if "旧代码" in joined and "新代码" in joined:
+            header_index = idx
+            break
+
+    if header_index < 0:
+        raise RuntimeError("BSE code mapping: header row not found")
+
+    output: list[dict] = []
+    for row in rows[header_index + 1 :]:
+        if len(row) < 5:
+            continue
+        # Expected columns: 序号 / 证券简称 / 上市日期 / 旧代码 / 新代码
+        old_code = normalize_code(row[-2])
+        new_code = normalize_code(row[-1])
+        if not is_bse_code(old_code) or not is_bse_code(new_code):
+            continue
+        output.append(
+            {
+                "name": row[1],
+                "listing_date": row[2],
+                "old_code": old_code,
+                "new_code": new_code,
+            }
+        )
+
+    if not output:
+        raise RuntimeError("BSE code mapping: no mapping rows parsed")
+
+    result = pd.DataFrame(output).drop_duplicates(
+        subset=["old_code", "new_code"], keep="first"
+    )
+    print(
+        f"BSE code-mapping validation PASS: "
+        f"{len(result)} old/new code mappings"
+    )
+    return result
+
+
+def fetch_bse_code_mapping(session: requests.Session) -> pd.DataFrame:
+    response = request_with_retry(
+        session,
+        "GET",
+        BSE_CODE_MAPPING_URL,
+        headers=BSE_HEADERS,
+        label="BSE-CODE-MAPPING",
+    )
+    return parse_code_mapping_html(response.text)
+
+
+def build_historical_codes(
+    termination_announcements: pd.DataFrame,
+    current: pd.DataFrame,
+    mapping: pd.DataFrame,
+) -> pd.DataFrame:
+    current_codes = set(current["code"])
+    terminated_codes = sorted(set(termination_announcements["code"]))
+
+    latest = (
+        termination_announcements.sort_values(
+            ["announcement_date", "code"],
+            ascending=[False, True],
+        )
+        .drop_duplicates("code", keep="first")
+        .set_index("code")
+    )
+
     rows: list[dict] = []
-
-    for record in records:
-        title = str(record.get("disclosureTitle") or "").strip()
-        post_title = str(record.get("disclosurePostTitle") or "").strip()
-        combined_title = f"{title} {post_title}"
-
-        signals = [keyword for keyword in ALL_SIGNAL_KEYWORDS if keyword in combined_title]
-        if not signals:
-            continue
-
-        code = normalize_code(record.get("companyCd"))
-        if not code:
-            text_blob = " ".join(
-                [
-                    title,
-                    post_title,
-                    str(record.get("destFilePath") or ""),
-                    str(record.get("companyName") or ""),
-                ]
-            )
-            matches = re.findall(
-                r"(?<!\d)(?:92|87|83|43|82)\d{4}(?!\d)",
-                text_blob,
-            )
-            code = matches[0] if matches else ""
-
-        if not code:
-            continue
-
-        is_risk = any(keyword in combined_title for keyword in RISK_KEYWORDS)
-        is_termination = any(keyword in combined_title for keyword in TERMINATION_KEYWORDS)
+    for code in terminated_codes:
+        evidence = latest.loc[code]
+        current_code = code
 
         rows.append(
             {
                 "code": code,
-                "name": str(record.get("companyName") or "").strip(),
-                "title": title,
-                "post_title": post_title,
-                "publish_time": str(record.get("publishDate") or "").strip(),
-                "category": str(record.get("xxzrlx") or "").strip(),
-                "source_url": BSE_PAGE_URL,
-                "risk_signal": int(is_risk),
-                "termination_signal": int(is_termination),
-                "signal_keywords": ",".join(signals),
+                "current_code": current_code,
+                "name": evidence["name"],
+                "code_type": "termination_code",
+                "termination_announcement_date": evidence["announcement_date"],
+                "current_bse": code in current_codes,
+                "status": (
+                    "current_after_termination_signal"
+                    if code in current_codes
+                    else "absent_from_current_bse"
+                ),
             }
         )
 
-    columns = [
-        "code", "name", "title", "post_title", "publish_time",
-        "category", "source_url", "risk_signal", "termination_signal",
-        "signal_keywords",
-    ]
-    if not rows:
-        return pd.DataFrame(columns=columns)
+        aliases = mapping[mapping["new_code"] == code]
+        for _, alias in aliases.iterrows():
+            rows.append(
+                {
+                    "code": alias["old_code"],
+                    "current_code": code,
+                    "name": alias["name"] or evidence["name"],
+                    "code_type": "old_code_alias",
+                    "termination_announcement_date": evidence["announcement_date"],
+                    "current_bse": alias["old_code"] in current_codes,
+                    "status": "historical_old_code",
+                }
+            )
 
-    return (
+    result = (
         pd.DataFrame(rows)
-        .drop_duplicates(
-            subset=["code", "publish_time", "title"],
-            keep="first",
-        )
-        .sort_values(["publish_time", "code", "title"])
+        .drop_duplicates(subset=["code", "current_code", "code_type"], keep="first")
+        .sort_values(["code_type", "code"])
         .reset_index(drop=True)
     )
+    return result
 
 
-def validate_candidates(df: pd.DataFrame, current: pd.DataFrame) -> None:
-    if df.empty:
-        raise RuntimeError(
-            "BSE: no delisting-risk/termination announcement candidates found"
-        )
+def validate(
+    termination_announcements: pd.DataFrame,
+    current: pd.DataFrame,
+    mapping: pd.DataFrame,
+    historical_codes: pd.DataFrame,
+    risk_board: pd.DataFrame,
+) -> None:
+    if termination_announcements.empty:
+        raise RuntimeError("BSE: no termination announcements")
     if current.empty:
-        raise RuntimeError("BSE: current listed-stock snapshot is empty")
+        raise RuntimeError("BSE: current list empty")
+    if mapping.empty:
+        raise RuntimeError("BSE: code mapping empty")
 
-    invalid = ~df["code"].astype("string").str.fullmatch(r"\d{6}", na=False)
-    if invalid.any():
+    missing_known = [
+        code
+        for code in KNOWN_TERMINATED_CODES
+        if code not in set(termination_announcements["code"])
+    ]
+    if missing_known:
         raise RuntimeError(
-            f"BSE: invalid candidate codes: {df.loc[invalid, 'code'].tolist()[:20]}"
-        )
-
-    current_invalid = ~current["code"].astype("string").str.fullmatch(r"\d{6}", na=False)
-    if current_invalid.any():
-        raise RuntimeError(
-            f"BSE: invalid current-list codes: {current.loc[current_invalid, 'code'].tolist()[:20]}"
+            "BSE: known termination codes missing from CNINFO final announcements: "
+            f"{missing_known}"
         )
 
     current_codes = set(current["code"])
-    candidate_codes = set(df["code"])
-    present = df["code"].isin(current_codes)
-
-    missing_known = [code for code in KNOWN_TERMINATED_CODES if code not in candidate_codes]
-    still_current_known = [code for code in KNOWN_TERMINATED_CODES if code in current_codes]
-    if missing_known:
-        raise RuntimeError(
-            "BSE: known historical termination codes missing from announcement scan: "
-            f"{missing_known}"
-        )
+    still_current_known = [
+        code for code in KNOWN_TERMINATED_CODES if code in current_codes
+    ]
     if still_current_known:
         raise RuntimeError(
-            "BSE: known historical termination codes still present in current list: "
+            "BSE: known terminated codes unexpectedly present in current BSE list: "
             f"{still_current_known}"
         )
 
+    for new_code, old_code in KNOWN_OLD_CODE_ALIASES.items():
+        hit = mapping[
+            (mapping["new_code"] == new_code)
+            & (mapping["old_code"] == old_code)
+        ]
+        if hit.empty:
+            raise RuntimeError(
+                f"BSE: expected old/new code mapping missing: {old_code} -> {new_code}"
+            )
+
+    if not risk_board.empty:
+        bad = ~risk_board["code"].astype("string").str.fullmatch(
+            r"\d{6}", na=False
+        )
+        if bad.any():
+            raise RuntimeError("BSE: risk board contains invalid codes")
+
     print(
-        f"BSE VALIDATION PASS: {len(df)} matched announcements, "
-        f"{df['code'].nunique()} unique candidate stocks"
+        f"BSE VALIDATION PASS: final termination announcement rows="
+        f"{len(termination_announcements)}, unique terminated codes="
+        f"{termination_announcements['code'].nunique()}"
     )
     print(
-        f"BSE CURRENT-LIST CROSSCHECK: current rows={int(present.sum())}, "
-        f"absent rows={int((~present).sum())}"
+        f"BSE CURRENT-LIST CROSSCHECK: current stocks={len(current)}, "
+        f"terminated codes still current={sum(code in current_codes for code in terminated_announcements(termination_announcements))}, "
+        f"terminated codes absent={sum(code not in current_codes for code in termination_announcements['code'].unique())}"
     )
     print(
-        "BSE KNOWN-CASE CHECK PASS: "
-        f"{len(KNOWN_TERMINATED_CODES)} historical termination cases confirmed"
+        f"BSE HISTORICAL CODE UNIVERSE: {len(historical_codes)} unique code rows"
     )
+
+
+def terminated_announcements(df: pd.DataFrame) -> list[str]:
+    return list(df["code"].dropna().astype(str).unique())
 
 
 def main() -> None:
-    print(f"BSE announcement scan: {START_DATE} -> {END_DATE}")
-    print(f"server_keyword={SERVER_KEYWORD}")
-    print(f"signal_keywords={ALL_SIGNAL_KEYWORDS}")
-    print(f"announcement_source=BSE company announcements (xxfcbj={ANNOUNCEMENT_TYPE}, flag=0, monthly windows)")
-    print("decision_rule=candidate absent from current BSE stock list => delisted")
+    print(
+        f"BSE historical termination build: "
+        f"{START_DATE} -> {END_DATE}"
+    )
+    print("termination_source=CNINFO hisAnnouncement/query, plate=bj")
+    print("current_status_source=BSE nqxxController/nqxxCnzq.do")
+    print("code_mapping_source=BSE service/code_mapping.html")
+    print("final_title_filter=semantic; risk/proposed/H-share false positives excluded")
 
     session = build_session()
 
-    try:
-        response = session.get(
-            BSE_PAGE_URL,
-            headers=HEADERS,
-            timeout=REQUEST_TIMEOUT,
-            allow_redirects=False,
-        )
-        print(
-            f"[BSE-PAGE] HTTP {response.status_code}, "
-            f"{len(response.content):,} bytes"
-        )
-    except Exception as exc:
-        print(
-            f"[BSE-PAGE] warm-up failed (continuing): "
-            f"{type(exc).__name__}: {exc}"
-        )
-
-    raw_records = fetch_all(session)
-    candidates = build_candidates(raw_records)
+    termination_announcements = fetch_cninfo_termination_announcements(session)
+    risk_board = fetch_current_risk_board(session)
     current = fetch_current_bse_stocks(session)
+    mapping = fetch_bse_code_mapping(session)
 
     current_codes = set(current["code"])
+    unique_terminated = set(termination_announcements["code"])
+    terminated_current = sorted(unique_terminated & current_codes)
+    terminated_absent = sorted(unique_terminated - current_codes)
 
-    latest_rows = (
-        candidates.sort_values(["publish_time", "code"])
-        .drop_duplicates("code", keep="last")
-        .copy()
-    )
-    latest_rows["current_bse"] = latest_rows["code"].isin(current_codes)
-    latest_rows["status"] = latest_rows["current_bse"].map(
-        {
-            True: "current_bse_not_delisted",
-            False: "absent_from_current_bse_delisted_candidate",
-        }
+    historical_codes = build_historical_codes(
+        termination_announcements,
+        current,
+        mapping,
     )
 
-    candidates.to_csv(
-        OUTPUT_DIR / "bse_delisting_candidates_all.csv",
+    # The final delisted list is based on final termination announcements,
+    # then cross-checked against today's BSE current-stock list.
+    delisted = historical_codes[
+        (historical_codes["code_type"] == "termination_code")
+        & (~historical_codes["current_bse"])
+    ].copy()
+
+    aliases = historical_codes[
+        (historical_codes["code_type"] == "old_code_alias")
+    ].copy()
+
+    validate(
+        termination_announcements,
+        current,
+        mapping,
+        historical_codes,
+        risk_board,
+    )
+
+    termination_announcements.to_csv(
+        OUTPUT_DIR / "bse_termination_announcements.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    risk_board.to_csv(
+        OUTPUT_DIR / "bse_current_risk_stocks.csv",
         index=False,
         encoding="utf-8-sig",
     )
@@ -658,49 +766,68 @@ def main() -> None:
         index=False,
         encoding="utf-8-sig",
     )
-
-    classified = latest_rows[
-        [
-            "code",
-            "name",
-            "publish_time",
-            "title",
-            "risk_signal",
-            "termination_signal",
-            "signal_keywords",
-            "current_bse",
-            "status",
-            "source_url",
-        ]
-    ].sort_values("code").reset_index(drop=True)
-
-    delisted = classified[~classified["current_bse"]].copy()
-    active_risk = classified[classified["current_bse"]].copy()
-
-    validate_candidates(candidates, current)
-
+    mapping.to_csv(
+        OUTPUT_DIR / "bse_code_mapping.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    historical_codes.to_csv(
+        OUTPUT_DIR / "bse_historical_codes.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
     delisted.to_csv(
         OUTPUT_DIR / "bse_delisted.csv",
         index=False,
         encoding="utf-8-sig",
     )
-    classified.to_csv(
-        OUTPUT_DIR / "bse_delisting_candidates_classified.csv",
+    aliases.to_csv(
+        OUTPUT_DIR / "bse_old_code_aliases.csv",
         index=False,
         encoding="utf-8-sig",
     )
 
     print("========== RESULT ==========")
-    print(f"raw announcement records: {len(raw_records)}")
-    print(f"matched announcement rows: {len(candidates)}")
-    print(f"unique candidate stocks: {classified['code'].nunique()}")
-    print(f"current BSE candidates:  {len(active_risk)}")
-    print(f"delisted candidates:     {len(delisted)}")
-    print("\n----- DELISTED CANDIDATES -----")
-    print(delisted.to_string(index=False))
-    print("\n----- STILL CURRENT / RISK -----")
-    print(active_risk.to_string(index=False))
+    print(f"CNINFO final termination rows: {len(termination_announcements)}")
+    print(f"CNINFO unique terminated codes: {len(unique_terminated)}")
+    print(f"terminated codes still current: {len(terminated_current)}")
+    print(f"terminated codes absent current: {len(terminated_absent)}")
+    print(f"BSE current stocks: {len(current)}")
+    print(f"BSE current risk-board rows: {len(risk_board)}")
+    print(f"BSE code mappings: {len(mapping)}")
+    print(f"historical code universe rows: {len(historical_codes)}")
+
+    print("\n----- FINAL DELISTED CODES -----")
+    print(
+        delisted[
+            [
+                "code",
+                "current_code",
+                "name",
+                "termination_announcement_date",
+                "status",
+            ]
+        ].to_string(index=False)
+    )
+
+    print("\n----- OLD CODE ALIASES -----")
+    print(
+        aliases[
+            [
+                "code",
+                "current_code",
+                "name",
+                "termination_announcement_date",
+                "status",
+            ]
+        ].to_string(index=False)
+    )
+
+    print("\n----- CURRENT RISK BOARD -----")
+    print(risk_board.to_string(index=False))
+
     print(f"\nOUTPUT: {OUTPUT_DIR / 'bse_delisted.csv'}")
+    print(f"OUTPUT: {OUTPUT_DIR / 'bse_historical_codes.csv'}")
     print("=============================")
 
 
