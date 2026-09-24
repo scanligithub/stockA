@@ -210,6 +210,7 @@ def extract_records(payload) -> tuple[list[dict], int, int]:
 def fetch_page(
     session: requests.Session,
     page: int,
+    announcement_type: str,
 ) -> tuple[list[dict], int, int]:
     callback = f"jQuery{int(time.time() * 1000)}_{page}"
     form_data = [
@@ -222,7 +223,7 @@ def fetch_page(
         ("date", f"{START_DATE.isoformat()} ~ {END_DATE.isoformat()}"),
         ("startTime", START_DATE.isoformat()),
         ("endTime", END_DATE.isoformat()),
-        ("xxfcbj[]", "2"),
+        ("xxfcbj[]", announcement_type),
         ("needFields[]", "companyCd"),
         ("needFields[]", "companyName"),
         ("needFields[]", "disclosureTitle"),
@@ -252,7 +253,11 @@ def fetch_page(
     return extract_records(payload)
 
 
-def fetch_all(session: requests.Session) -> list[dict]:
+def fetch_all(
+    session: requests.Session,
+    announcement_type: str,
+) -> list[dict]:
+    """Fetch one BSE announcement channel completely."""
     last_error: Exception | None = None
 
     for attempt in range(1, SOURCE_ATTEMPTS + 1):
@@ -265,10 +270,12 @@ def fetch_all(session: requests.Session) -> list[dict]:
             while True:
                 if page >= MAX_PAGES:
                     raise RuntimeError(
-                        f"BSE: pagination exceeded {MAX_PAGES} pages"
+                        f"BSE channel {announcement_type}: pagination exceeded {MAX_PAGES} pages"
                     )
 
-                page_records, page_total, page_elements = fetch_page(session, page)
+                page_records, page_total, page_elements = fetch_page(
+                    session, page, announcement_type
+                )
                 total_pages = page_total or total_pages
                 total_elements = page_elements or total_elements
 
@@ -277,9 +284,9 @@ def fetch_all(session: requests.Session) -> list[dict]:
 
                 records.extend(page_records)
                 print(
-                    f"[BSE-ANN] page={page} records={len(page_records)} "
-                    f"accumulated={len(records)} total={total_elements} "
-                    f"total_pages={total_pages}"
+                    f"[BSE-ANN type={announcement_type}] page={page} "
+                    f"records={len(page_records)} accumulated={len(records)} "
+                    f"total={total_elements} total_pages={total_pages}"
                 )
 
                 if total_pages and page >= total_pages - 1:
@@ -288,11 +295,13 @@ def fetch_all(session: requests.Session) -> list[dict]:
                 page += 1
 
             if not records:
-                raise RuntimeError("BSE: announcement query returned no records")
+                raise RuntimeError(
+                    f"BSE channel {announcement_type}: announcement query returned no records"
+                )
 
             print(
-                f"[BSE-ANN] source validation PASS, rows={len(records)}, "
-                f"source_attempt={attempt}"
+                f"[BSE-ANN type={announcement_type}] source validation PASS, "
+                f"rows={len(records)}, source_attempt={attempt}"
             )
             return records
 
@@ -302,13 +311,14 @@ def fetch_all(session: requests.Session) -> list[dict]:
                 break
             delay = min(60, 5 * attempt + random.uniform(0, 3))
             print(
-                f"[BSE-ANN] source attempt {attempt}/{SOURCE_ATTEMPTS} failed: "
-                f"{type(exc).__name__}: {exc}; retry in {delay:.1f}s"
+                f"[BSE-ANN type={announcement_type}] source attempt "
+                f"{attempt}/{SOURCE_ATTEMPTS} failed: {type(exc).__name__}: {exc}; "
+                f"retry in {delay:.1f}s"
             )
             time.sleep(delay)
 
     raise RuntimeError(
-        f"BSE: all {SOURCE_ATTEMPTS} source attempts failed"
+        f"BSE channel {announcement_type}: all {SOURCE_ATTEMPTS} source attempts failed"
     ) from last_error
 
 
@@ -533,7 +543,7 @@ def main() -> None:
     print(f"BSE announcement scan: {START_DATE} -> {END_DATE}")
     print(f"server_keyword={SERVER_KEYWORD}")
     print(f"signal_keywords={ALL_SIGNAL_KEYWORDS}")
-    print("announcement_source=BSE company announcements (xxfcbj=2)")
+    print("announcement_source=BSE announcements (xxfcbj=1 + xxfcbj=2)")
     print("decision_rule=candidate absent from current BSE stock list => delisted")
 
     session = build_session()
@@ -555,7 +565,13 @@ def main() -> None:
             f"{type(exc).__name__}: {exc}"
         )
 
-    raw_records = fetch_all(session)
+    exchange_records = fetch_all(session, "1")
+    company_records = fetch_all(session, "2")
+    raw_records = exchange_records + company_records
+    print(
+        f"BSE combined announcement source: exchange={len(exchange_records)}, "
+        f"company={len(company_records)}, total={len(raw_records)}"
+    )
     candidates = build_candidates(raw_records)
     current = fetch_current_bse_stocks(session)
 
