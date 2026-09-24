@@ -383,6 +383,201 @@ def parse_xiangguan(html: str, query_code: str) -> tuple[list[dict], str]:
     return result, "ok"
 
 
+def fetch_history_component_page(
+    session: requests.Session,
+    index_id: str,
+    page: int,
+) -> str:
+    query_index_id = SINA_COMPONENT_INDEX_IDS.get(index_id, index_id)
+    url = (
+        f"{BASE}/corp/view/vII_HistoryComponent.php"
+        f"?page={page}&indexid={query_index_id}"
+    )
+    response = session.get(url, timeout=TIMEOUT)
+    response.raise_for_status()
+    response.encoding = "gb2312"
+    return response.text
+
+
+def parse_history_component_rows(html: str) -> list[dict]:
+    """Parse Sina HistoryComponent rows with true inclusion/removal dates."""
+    soup = BeautifulSoup(html, "html.parser")
+    required = {"品种代码", "纳入日期", "剔除日期"}
+
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        header_idx = None
+        headers: list[str] = []
+
+        for idx, row in enumerate(rows[:6]):
+            values = [
+                x.get_text(" ", strip=True)
+                for x in row.find_all(["th", "td"])
+            ]
+            if required.issubset(set(values)):
+                header_idx = idx
+                headers = values
+                break
+
+        if header_idx is None:
+            continue
+
+        pos = {name: i for i, name in enumerate(headers)}
+        result: list[dict] = []
+
+        for row in rows[header_idx + 1:]:
+            values = [
+                x.get_text(" ", strip=True)
+                for x in row.find_all(["th", "td"])
+            ]
+            if len(values) < len(headers):
+                continue
+
+            code = normalize_code(values[pos["品种代码"]])
+            start = values[pos["纳入日期"]].strip()
+            end = values[pos["剔除日期"]].strip()
+
+            if not re.fullmatch(r"\d{6}", code):
+                continue
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start):
+                continue
+            if end in {"", "--", "-"}:
+                end = ""
+            elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
+                continue
+
+            result.append({
+                "stock_code": code,
+                "start_date": start,
+                "end_date": end,
+            })
+
+        if result:
+            return result
+
+    return []
+
+
+def component_page_count(html: str) -> int:
+    pages = [int(x) for x in re.findall(r"[?&]page=(\d+)", html)]
+    return max(pages, default=1)
+
+
+def repair_placeholder_starts(
+    df: pd.DataFrame,
+    universe: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Replace Sina XiangGuan's 1900-01-01 placeholder starts.
+
+    Sina's XiangGuan table can emit 1900-01-01 for the first membership
+    interval of some indexes. HistoryComponent carries the actual historical
+    "纳入日期", so use that page as the authoritative repair source.
+
+    Only the start date is repaired here. End dates remain from XiangGuan;
+    interval normalization is applied afterwards, preserving the validated
+    rollover semantics already used by this builder.
+    """
+    if df.empty:
+        return df, pd.DataFrame(
+            columns=[
+                "index_id", "stock_id", "old_start_date", "new_start_date",
+                "history_rows", "status",
+            ]
+        )
+
+    affected = df[df["start_date"] == "1900-01-01"].copy()
+    if affected.empty:
+        return df, pd.DataFrame(
+            columns=[
+                "index_id", "stock_id", "old_start_date", "new_start_date",
+                "history_rows", "status",
+            ]
+        )
+
+    wanted: dict[str, set[str]] = {}
+    for row in affected.itertuples(index=False):
+        wanted.setdefault(row.index_id, set()).add(row.stock_id)
+
+    cmap = universe.set_index("query_code")["stock_id"].to_dict()
+    repaired = df.copy()
+    audit_rows: list[dict] = []
+    session = make_session()
+
+    for index_id, stock_ids in wanted.items():
+        all_history: list[dict] = []
+
+        try:
+            first = fetch_history_component_page(session, index_id, 1)
+            pages = component_page_count(first)
+
+            for page in range(1, pages + 1):
+                html = (
+                    first
+                    if page == 1
+                    else fetch_history_component_page(session, index_id, page)
+                )
+                all_history.extend(parse_history_component_rows(html))
+
+            print(
+                f"Placeholder repair {index_id}: "
+                f"HistoryComponent pages={pages}, rows={len(all_history)}",
+                flush=True,
+            )
+        except Exception as exc:
+            for stock_id in sorted(stock_ids):
+                audit_rows.append({
+                    "index_id": index_id,
+                    "stock_id": stock_id,
+                    "old_start_date": "1900-01-01",
+                    "new_start_date": "",
+                    "history_rows": 0,
+                    "status": f"ERROR: {exc!r}",
+                })
+            continue
+
+        candidate_dates: dict[str, list[str]] = {}
+        for row in all_history:
+            stock_id = cmap.get(row["stock_code"], row["stock_code"])
+            if stock_id in stock_ids:
+                candidate_dates.setdefault(stock_id, []).append(
+                    row["start_date"]
+                )
+
+        for stock_id in sorted(stock_ids):
+            dates = sorted(set(candidate_dates.get(stock_id, [])))
+            if not dates:
+                audit_rows.append({
+                    "index_id": index_id,
+                    "stock_id": stock_id,
+                    "old_start_date": "1900-01-01",
+                    "new_start_date": "",
+                    "history_rows": 0,
+                    "status": "UNRESOLVED",
+                })
+                continue
+
+            new_start = dates[0]
+            mask = (
+                (repaired["index_id"] == index_id)
+                & (repaired["stock_id"] == stock_id)
+                & (repaired["start_date"] == "1900-01-01")
+            )
+            repaired.loc[mask, "start_date"] = new_start
+
+            audit_rows.append({
+                "index_id": index_id,
+                "stock_id": stock_id,
+                "old_start_date": "1900-01-01",
+                "new_start_date": new_start,
+                "history_rows": len(dates),
+                "status": "REPAIRED",
+            })
+
+    audit = pd.DataFrame(audit_rows)
+    return repaired, audit
+
+
 def make_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(
@@ -844,8 +1039,24 @@ def main() -> None:
         encoding="utf-8-sig",
     )
 
-    final_df = normalize_intervals(
-        raw_df[["index_id", "stock_id", "start_date", "end_date"]]
+    repaired_input_df, placeholder_audit = repair_placeholder_starts(
+        raw_df[["index_id", "stock_id", "start_date", "end_date"]].copy(),
+        universe,
+    )
+    placeholder_audit.to_csv(
+        OUT / "placeholder_start_repairs.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+    unresolved_placeholders = int(
+        (placeholder_audit["status"] != "REPAIRED").sum()
+    ) if not placeholder_audit.empty else 0
+
+    final_df = normalize_intervals(repaired_input_df)
+    final_df.to_csv(
+        OUT / "index_membership_history.csv",
+        index=False,
+        encoding="utf-8-sig",
     )
     final_df.to_csv(
         OUT / "index_membership_history.csv",
@@ -917,6 +1128,16 @@ def main() -> None:
         "raw_target_rows": len(raw_df),
         "normalized_interval_count": len(final_df),
         "target_index_count": len(TARGET_INDEXES),
+        "placeholder_start_rows_before_repair": int(
+            (raw_df["start_date"] == "1900-01-01").sum()
+        ),
+        "placeholder_start_repairs": int(
+            (placeholder_audit["status"] == "REPAIRED").sum()
+        ) if not placeholder_audit.empty else 0,
+        "placeholder_start_unresolved": unresolved_placeholders,
+        "placeholder_start_remaining": int(
+            (final_df["start_date"] == "1900-01-01").sum()
+        ),
         "missing_indexes": missing_indexes,
         "validation_errors": validation_errors,
         "boundary_audit": boundary,
@@ -943,6 +1164,18 @@ def main() -> None:
     print(f"Boundary audit:              {boundary['status']} ({boundary['failures']} failures)")
     print(f"PIT failures:                 {len(pit_failures)}")
     print(
+        "Placeholder starts repaired:   "
+        f"{int((placeholder_audit['status'] == 'REPAIRED').sum())}"
+    )
+    print(
+        "Placeholder starts unresolved: "
+        f"{unresolved_placeholders}"
+    )
+    print(
+        "Placeholder starts remaining:  "
+        f"{int((final_df['start_date'] == '1900-01-01').sum())}"
+    )
+    print(
         f"A-B intervals:                {ab['a_minus_b_intervals']}"
     )
     print(
@@ -955,6 +1188,8 @@ def main() -> None:
         or validation_errors
         or missing_indexes
         or pit_failures
+        or unresolved_placeholders
+        or int((final_df["start_date"] == "1900-01-01").sum())
         or a_candidate_errors
         or a_xiangguan_errors
         or boundary["status"] != "PASS"
