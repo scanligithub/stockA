@@ -47,6 +47,12 @@ CNINFO_TERMINATION_URL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
 SSE_URL = "https://query.sse.com.cn/commonQuery.do"
 SZSE_URL = "https://www.szse.cn/api/report/ShowReport"
 
+COMMON_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/150.0.0.0 Safari/537.36"
+)
+
 SSE_HEADERS = {
     "Accept": "*/*",
     "Accept-Encoding": "gzip, deflate",
@@ -56,7 +62,7 @@ SSE_HEADERS = {
     "Host": "query.sse.com.cn",
     "Pragma": "no-cache",
     "Referer": "https://www.sse.com.cn/",
-    "User-Agent": BSE_HEADERS["User-Agent"],
+    "User-Agent": COMMON_USER_AGENT,
 }
 SZSE_HEADERS = {
     "Accept": "*/*",
@@ -107,11 +113,7 @@ BSE_HEADERS = {
     "Origin": BSE_BASE_URL,
     "Pragma": "no-cache",
     "Referer": BSE_PAGE_URL,
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/150.0.0.0 Safari/537.36"
-    ),
+    "User-Agent": COMMON_USER_AGENT,
     "X-Requested-With": "XMLHttpRequest",
 }
 
