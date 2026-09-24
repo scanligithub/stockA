@@ -137,9 +137,9 @@ def probe_risk_warning_api(session: requests.Session) -> None:
 
 
 def probe_cninfo_bse_termination() -> None:
-    """Probe CNINFO filtering combinations for historical BSE termination announcements."""
+    """Get the complete CNINFO BSE termination/delisting announcement hits."""
     url = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
-    print("\n===== CNINFO BSE FILTER MATRIX =====")
+    print("\n===== CNINFO BSE TERMINATION FULL PROBE =====")
 
     headers = {
         "User-Agent": HEADERS["User-Agent"],
@@ -150,23 +150,17 @@ def probe_cninfo_bse_termination() -> None:
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     }
 
-    cases = (
-        {"name": "plain", "column": "", "plate": ""},
-        {"name": "column_bj", "column": "bj", "plate": ""},
-        {"name": "plate_bj", "column": "", "plate": "bj"},
-        {"name": "szse_plate_bj", "column": "szse", "plate": "bj"},
-        {"name": "sse_plate_bj", "column": "sse", "plate": "bj"},
-    )
+    all_hits: dict[str, dict] = {}
 
-    for case in cases:
+    for keyword in ("终止上市", "摘牌"):
         data = {
             "pageNum": "1",
-            "pageSize": "30",
-            "column": case["column"],
+            "pageSize": "100",
+            "column": "",
             "tabName": "fulltext",
-            "plate": case["plate"],
+            "plate": "bj",
             "stock": "",
-            "searchkey": "终止上市",
+            "searchkey": keyword,
             "secid": "",
             "category": "",
             "trade": "",
@@ -184,19 +178,39 @@ def probe_cninfo_bse_termination() -> None:
         response.raise_for_status()
         payload = response.json()
         anns = payload.get("announcements") or []
-        codes = [
-            str(x.get("secCode") or "").strip()
-            for x in anns
-            if str(x.get("secCode") or "").strip()
-        ]
-        bse_codes = sorted({
-            code for code in codes
-            if code.isdigit() and len(code) == 6 and code.startswith(("83", "87", "92"))
-        })
+        keyword_hits = []
+
+        for item in anns:
+            code = str(item.get("secCode") or "").strip()
+            title = str(item.get("announcementTitle") or "").strip()
+            if code.isdigit() and len(code) == 6 and code.startswith(("83", "87", "92")):
+                hit = {
+                    "code": code,
+                    "name": str(item.get("secName") or "").strip(),
+                    "title": title,
+                    "time": item.get("announcementTime"),
+                    "adjunctUrl": item.get("adjunctUrl"),
+                    "keyword": keyword,
+                }
+                keyword_hits.append(hit)
+                all_hits.setdefault(code, hit)
+
         print(
-            f"[CNINFO-FILTER] {case['name']}: HTTP={response.status_code} "
+            f"[CNINFO] keyword={keyword!r} HTTP={response.status_code} "
             f"total={payload.get('totalAnnouncement', 0)} returned={len(anns)} "
-            f"bse_codes={len(bse_codes)} codes={bse_codes[:20]}"
+            f"bse_hits={len(keyword_hits)}"
+        )
+        for hit in keyword_hits:
+            print(
+                f"[CNINFO-HIT] {hit['code']} {hit['name']} "
+                f"{hit['title']} time={hit['time']} keyword={keyword}"
+            )
+
+    print(f"[CNINFO-UNION] unique_bse_codes={len(all_hits)}")
+    for code in sorted(all_hits):
+        print(
+            f"[CNINFO-UNION-HIT] {code} {all_hits[code]['name']} "
+            f"{all_hits[code]['title']}"
         )
 
 def main() -> None:
