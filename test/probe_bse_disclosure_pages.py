@@ -256,6 +256,7 @@ def main() -> None:
             print_hits(url, js)
 
     probe_risk_warning_api(session)
+    probe_cninfo_bse_termination()
 
     print("\n===== PROBE COMPLETE =====")
     print(f"saved under: {OUT}")
