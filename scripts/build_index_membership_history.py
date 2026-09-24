@@ -92,7 +92,9 @@ UA = (
 
 
 def normalize_code(value: object) -> str:
-    raw = str(value or "").strip()
+    if value is None or pd.isna(value):
+        return ""
+    raw = str(value).strip()
     raw = re.sub(r"^(sh|sz|bj)\.?", "", raw, flags=re.I)
     return raw.zfill(6) if re.fullmatch(r"\d{1,6}", raw) else ""
 
