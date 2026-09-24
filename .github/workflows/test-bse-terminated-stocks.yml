@@ -33,14 +33,16 @@ jobs:
       - name: Show result
         run: |
           echo "=== BSE matched announcements ==="
-          wc -l test/bse_termination_announcements.csv
+          wc -l test/bse_delisting_candidates_classified.csv
           python - <<'PY'
           import pandas as pd
 
-          ann = pd.read_csv("test/bse_termination_announcements.csv", dtype={"code": str})
-          print(f"matched announcements: {len(ann)}")
+          ann = pd.read_csv("test/bse_delisting_candidates_classified.csv", dtype={"code": str})
+          print(f"classified candidate stocks: {len(ann)}")
           print(f"candidate company codes: {ann['code'].nunique()}")
-          print(ann[["code", "name", "publish_time", "title", "termination_signal"]].to_string(index=False))
+          print(f"current BSE: {int(ann['current_bse'].sum())}")
+          print(f"delisted candidates: {int((~ann['current_bse']).sum())}")
+          print(ann[["code", "name", "publish_time", "title", "current_bse", "status"]].to_string(index=False))
           PY
 
           echo "=== BSE terminated stock candidates ==="
@@ -60,6 +62,8 @@ jobs:
           name: bse-terminated-stocks-${{ github.run_id }}
           path: |
             test/bse_delisted.csv
-            test/bse_termination_announcements.csv
+            test/bse_delisting_candidates_classified.csv
+            test/bse_delisting_candidates_all.csv
+            test/bse_current_stocks.csv
           if-no-files-found: error
           retention-days: 14
