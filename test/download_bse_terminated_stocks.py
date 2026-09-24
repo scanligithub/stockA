@@ -644,14 +644,15 @@ def build_historical_codes(
     )
 
     rows: list[dict] = []
+
+    # Every final BSE termination code must remain searchable, including
+    # transfers that happened before the 2025 code migration.
     for code in terminated_codes:
         evidence = latest.loc[code]
-        current_code = code
-
         rows.append(
             {
                 "code": code,
-                "current_code": current_code,
+                "current_code": code,
                 "name": evidence["name"],
                 "code_type": "termination_code",
                 "termination_announcement_date": evidence["announcement_date"],
@@ -664,28 +665,33 @@ def build_historical_codes(
             }
         )
 
-        aliases = mapping[mapping["new_code"] == code]
-        for _, alias in aliases.iterrows():
-            rows.append(
-                {
-                    "code": alias["old_code"],
-                    "current_code": code,
-                    "name": alias["name"] or evidence["name"],
-                    "code_type": "old_code_alias",
-                    "termination_announcement_date": evidence["announcement_date"],
-                    "current_bse": alias["old_code"] in current_codes,
-                    "status": "historical_old_code",
-                }
-            )
+    # Every one of the 248 official pre-switch codes is required for
+    # historical Sina XiangGuan lookups, not only aliases belonging to
+    # already-terminated stocks.
+    for _, alias in mapping.iterrows():
+        new_code = alias["new_code"]
+        termination_date = ""
+        if new_code in latest.index:
+            termination_date = latest.loc[new_code, "announcement_date"]
+        rows.append(
+            {
+                "code": alias["old_code"],
+                "current_code": new_code,
+                "name": alias["name"],
+                "code_type": "old_code_alias",
+                "termination_announcement_date": termination_date,
+                "current_bse": alias["old_code"] in current_codes,
+                "status": "historical_old_code",
+            }
+        )
 
     result = (
         pd.DataFrame(rows)
-        .drop_duplicates(subset=["code", "current_code", "code_type"], keep="first")
+        .drop_duplicates(subset=["code"], keep="first")
         .sort_values(["code_type", "code"])
         .reset_index(drop=True)
     )
     return result
-
 
 def validate(
     termination_announcements: pd.DataFrame,
@@ -725,6 +731,15 @@ def validate(
     if len(mapping) != 248:
         raise RuntimeError(
             f"BSE: official code mapping must contain 248 rows, got {len(mapping)}"
+        )
+
+    expected_historical = len(mapping) + len(
+        set(termination_announcements["code"]) - set(mapping["old_code"])
+    )
+    if len(historical_codes) != expected_historical:
+        raise RuntimeError(
+            "BSE: historical code universe size mismatch: "
+            f"expected {expected_historical}, got {len(historical_codes)}"
         )
 
     alias_hit = mapping[
