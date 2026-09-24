@@ -36,17 +36,18 @@ SZSE_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0.0.0 Safari/537.36",
 }
 REQUEST_TIMEOUT = (15, 60)
-MAX_RETRIES = 5
+HTTP_RETRIES = 2
+SOURCE_ATTEMPTS = 4
 
 
 def build_session():
     session = requests.Session()
     retry = Retry(
-        total=MAX_RETRIES,
-        connect=MAX_RETRIES,
-        read=MAX_RETRIES,
-        status=MAX_RETRIES,
-        backoff_factor=1.5,
+        total=HTTP_RETRIES,
+        connect=HTTP_RETRIES,
+        read=HTTP_RETRIES,
+        status=HTTP_RETRIES,
+        backoff_factor=2.0,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=frozenset({"GET"}),
         raise_on_status=False,
@@ -59,7 +60,7 @@ def build_session():
 
 def get_with_retry(session, url, *, params, headers, label):
     last_error = None
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(1, HTTP_RETRIES + 1):
         try:
             response = session.get(url, params=params, headers=headers, timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
@@ -72,9 +73,9 @@ def get_with_retry(session, url, *, params, headers, label):
             if attempt == MAX_RETRIES:
                 break
             delay = min(30, 2 ** (attempt - 1) + random.random())
-            print(f"[{label}] attempt {attempt}/{MAX_RETRIES} failed: {type(exc).__name__}: {exc}; retry in {delay:.1f}s")
+            print(f"[{label}] attempt {attempt}/{HTTP_RETRIES} failed: {type(exc).__name__}: {exc}; retry in {delay:.1f}s")
             time.sleep(delay)
-    raise RuntimeError(f"{label}: all retries failed") from last_error
+    raise RuntimeError(f"{label}: all HTTP retries failed") from last_error
 
 
 def normalize_codes(df, exchange):
@@ -122,6 +123,7 @@ def fetch_sse(session):
         "pageHelp.pageSize": "500",
         "pageHelp.pageNo": "1",
         "pageHelp.endPage": "1",
+        "_ts": str(int(time.time() * 1000)),
     }
     response = get_with_retry(session, SSE_URL, params=params, headers=SSE_HEADERS, label="SSE")
     payload = response.json()
@@ -187,15 +189,39 @@ def validate(df):
     print(f"VALIDATION PASS: {len(df)} unique delisted stocks")
 
 
+def fetch_source_with_retry(session, fetcher, label):
+    """Retry the complete source fetch, including parsing and validation."""
+    last_error = None
+    for attempt in range(1, SOURCE_ATTEMPTS + 1):
+        try:
+            df, rejected = fetcher(session)
+            if df.empty:
+                raise RuntimeError("parsed dataframe is empty")
+            if df["code"].nunique() != len(df):
+                raise RuntimeError("duplicate stock codes in source response")
+            if df["delist_date"].notna().sum() == 0:
+                raise RuntimeError("no valid delist dates in source response")
+            print(f"[{label}] source validation PASS, rows={len(df)}, source_attempt={attempt}")
+            return df, rejected
+        except Exception as exc:
+            last_error = exc
+            if attempt == SOURCE_ATTEMPTS:
+                break
+            delay = min(60, 5 * attempt + random.uniform(0, 3))
+            print(f"[{label}] source attempt {attempt}/{SOURCE_ATTEMPTS} failed: {type(exc).__name__}: {exc}; retry in {delay:.1f}s")
+            time.sleep(delay)
+    raise RuntimeError(f"{label}: all {SOURCE_ATTEMPTS} source attempts failed") from last_error
+
+
 def main():
     session = build_session()
 
     print("Downloading SSE delisted stocks...")
-    sse, sse_rejected = fetch_sse(session)
+    sse, sse_rejected = fetch_source_with_retry(session, fetch_sse, "SSE")
     print(f"SSE rows: {len(sse)}")
 
     print("Downloading SZSE delisted stocks...")
-    szse, szse_rejected = fetch_szse(session)
+    szse, szse_rejected = fetch_source_with_retry(session, fetch_szse, "SZSE")
     print(f"SZSE rows: {len(szse)}")
 
     sse.to_csv(OUTPUT_DIR / "sse_delisted.csv", index=False, encoding="utf-8-sig")
