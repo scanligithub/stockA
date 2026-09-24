@@ -722,15 +722,17 @@ def validate(
             f"{still_current_known}"
         )
 
-    for new_code, old_code in KNOWN_OLD_CODE_ALIASES.items():
-        hit = mapping[
-            (mapping["new_code"] == new_code)
-            & (mapping["old_code"] == old_code)
-        ]
-        if hit.empty:
-            raise RuntimeError(
-                f"BSE: expected old/new code mapping missing: {old_code} -> {new_code}"
-            )
+    if len(mapping) != 248:
+        raise RuntimeError(
+            f"BSE: official code mapping must contain 248 rows, got {len(mapping)}"
+        )
+
+    alias_hit = mapping[
+        (mapping["new_code"] == "920680")
+        & (mapping["old_code"] == "839680")
+    ]
+    if len(alias_hit) != 1:
+        raise RuntimeError("BSE: verified 839680 -> 920680 mapping missing")
 
     if not risk_board.empty:
         bad = ~risk_board["code"].astype("string").str.fullmatch(
