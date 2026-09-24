@@ -38,6 +38,7 @@ BSE_BASE_URL = "https://www.bse.cn"
 
 START_DATE = date(2021, 11, 15)
 END_DATE = date.today()
+ANNOUNCEMENT_TYPE = "2"
 
 # Only one historical scan. The previous implementation repeatedly scanned
 # five one-year windows and three keywords, causing hundreds of redundant
@@ -210,26 +211,24 @@ def extract_records(payload) -> tuple[list[dict], int, int]:
 def fetch_page(
     session: requests.Session,
     page: int,
-    announcement_type: str,
+    start_date: date,
+    end_date: date,
 ) -> tuple[list[dict], int, int]:
     callback = f"jQuery{int(time.time() * 1000)}_{page}"
     form_data = [
-        # BSE announcement search uses the legacy disclosure-query
-        # protocol. These fields are required; flag/xxfcbj alone are ignored
-        # by the server and lead to the same unfiltered result for both values.
-        ("noticeType[]", "5"),
-        ("disclosureType[]", "5"),
-        ("disclosureSubtype[]", ""),
         ("siteId", "6"),
+        # The BSE endpoint requires flag=0 for the disclosure-list query.
+        # flag=1 caused the server to ignore the requested date window and
+        # return the same 1212-record dataset for every query.
+        ("flag", "0"),
         ("page", str(page)),
         ("companyCd", ""),
         ("isNewThree", "1"),
         ("keyword", SERVER_KEYWORD),
-        ("date", f"{START_DATE.isoformat()} ~ {END_DATE.isoformat()}"),
-        ("startTime", START_DATE.isoformat()),
-        ("endTime", END_DATE.isoformat()),
-        ("xxfcbj[]", announcement_type),
-        ("hyType[]", ""),
+        ("date", f"{start_date.isoformat()} ~ {end_date.isoformat()}"),
+        ("startTime", start_date.isoformat()),
+        ("endTime", end_date.isoformat()),
+        ("xxfcbj[]", ANNOUNCEMENT_TYPE),
         ("needFields[]", "companyCd"),
         ("needFields[]", "companyName"),
         ("needFields[]", "disclosureTitle"),
@@ -248,7 +247,7 @@ def fetch_page(
         BSE_LIST_URL,
         params={"callback": callback},
         data=form_data,
-        label=f"BSE-ANN page={page}",
+        label=f"BSE-ANN page={page} window={start_date}:{end_date}",
     )
     try:
         payload = parse_jsonp(response.text)
@@ -259,73 +258,133 @@ def fetch_page(
     return extract_records(payload)
 
 
-def fetch_all(
+def iter_month_windows(start_date: date, end_date: date):
+    """Yield non-overlapping calendar-month windows clipped to the requested range."""
+    current = date(start_date.year, start_date.month, 1)
+    while current <= end_date:
+        if current.month == 12:
+            next_month = date(current.year + 1, 1, 1)
+        else:
+            next_month = date(current.year, current.month + 1, 1)
+        month_end = next_month.fromordinal(next_month.toordinal() - 1)
+        window_start = max(start_date, current)
+        window_end = min(end_date, month_end)
+        if window_start <= window_end:
+            yield window_start, window_end
+        current = next_month
+
+
+def fetch_window(
     session: requests.Session,
-    announcement_type: str,
+    window_start: date,
+    window_end: date,
 ) -> list[dict]:
-    """Fetch one BSE announcement channel completely."""
-    last_error: Exception | None = None
+    """Fetch one monthly BSE disclosure window completely."""
+    records: list[dict] = []
+    page = 0
+    total_pages = 0
+    total_elements = 0
 
-    for attempt in range(1, SOURCE_ATTEMPTS + 1):
-        try:
-            records: list[dict] = []
-            page = 0
-            total_pages = 0
-            total_elements = 0
+    while True:
+        if page >= MAX_PAGES:
+            raise RuntimeError(
+                f"BSE window {window_start}:{window_end}: "
+                f"pagination exceeded {MAX_PAGES} pages"
+            )
 
-            while True:
-                if page >= MAX_PAGES:
+        page_records, page_total, page_elements = fetch_page(
+            session, page, window_start, window_end
+        )
+        total_pages = page_total or total_pages
+        total_elements = page_elements or total_elements
+
+        if not page_records:
+            break
+
+        records.extend(page_records)
+        print(
+            f"[BSE-ANN window={window_start}:{window_end}] page={page} "
+            f"records={len(page_records)} accumulated={len(records)} "
+            f"total={total_elements} total_pages={total_pages}"
+        )
+
+        if total_pages and page >= total_pages - 1:
+            break
+        page += 1
+
+    return records
+
+
+def fetch_all(session: requests.Session) -> list[dict]:
+    """Scan the historical BSE announcement list month by month."""
+    all_records: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    windows = list(iter_month_windows(START_DATE, END_DATE))
+
+    print(f"BSE monthly disclosure windows: {len(windows)}")
+
+    for window_start, window_end in windows:
+        last_error: Exception | None = None
+
+        for attempt in range(1, SOURCE_ATTEMPTS + 1):
+            try:
+                window_records = fetch_window(session, window_start, window_end)
+                if not window_records:
                     raise RuntimeError(
-                        f"BSE channel {announcement_type}: pagination exceeded {MAX_PAGES} pages"
+                        f"BSE window {window_start}:{window_end}: no records"
                     )
 
-                page_records, page_total, page_elements = fetch_page(
-                    session, page, announcement_type
-                )
-                total_pages = page_total or total_pages
-                total_elements = page_elements or total_elements
+                added = 0
+                for record in window_records:
+                    key = (
+                        str(record.get("companyCd") or "").strip(),
+                        str(record.get("publishDate") or "").strip(),
+                        str(record.get("disclosureTitle") or "").strip(),
+                        str(record.get("destFilePath") or "").strip(),
+                    )
+                    if key not in seen:
+                        seen.add(key)
+                        all_records.append(record)
+                        added += 1
 
-                if not page_records:
-                    break
-
-                records.extend(page_records)
                 print(
-                    f"[BSE-ANN type={announcement_type}] page={page} "
-                    f"records={len(page_records)} accumulated={len(records)} "
-                    f"total={total_elements} total_pages={total_pages}"
+                    f"[BSE-ANN window={window_start}:{window_end}] "
+                    f"validation PASS rows={len(window_records)} added={added} "
+                    f"attempt={attempt}"
                 )
-
-                if total_pages and page >= total_pages - 1:
-                    break
-
-                page += 1
-
-            if not records:
-                raise RuntimeError(
-                    f"BSE channel {announcement_type}: announcement query returned no records"
-                )
-
-            print(
-                f"[BSE-ANN type={announcement_type}] source validation PASS, "
-                f"rows={len(records)}, source_attempt={attempt}"
-            )
-            return records
-
-        except Exception as exc:
-            last_error = exc
-            if attempt == SOURCE_ATTEMPTS:
                 break
-            delay = min(60, 5 * attempt + random.uniform(0, 3))
-            print(
-                f"[BSE-ANN type={announcement_type}] source attempt "
-                f"{attempt}/{SOURCE_ATTEMPTS} failed: {type(exc).__name__}: {exc}; "
-                f"retry in {delay:.1f}s"
-            )
-            time.sleep(delay)
 
-    raise RuntimeError(
-        f"BSE channel {announcement_type}: all {SOURCE_ATTEMPTS} source attempts failed"
-    ) from last_error
+            except Exception as exc:
+                last_error = exc
+                if attempt == SOURCE_ATTEMPTS:
+                    break
+                delay = min(60, 5 * attempt + random.uniform(0, 3))
+                print(
+                    f"[BSE-ANN window={window_start}:{window_end}] "
+                    f"source attempt {attempt}/{SOURCE_ATTEMPTS} failed: "
+                    f"{type(exc).__name__}: {exc}; retry in {delay:.1f}s"
+                )
+                time.sleep(delay)
+
+        else:
+            raise RuntimeError(
+                f"BSE window {window_start}:{window_end}: "
+                f"all {SOURCE_ATTEMPTS} source attempts failed"
+            ) from last_error
+
+        # The loop above must either break successfully or raise after the
+        # final retry. This assertion guards future edits to the control flow.
+        if last_error is not None and attempt == SOURCE_ATTEMPTS:
+            # A successful final attempt resets last_error below.
+            pass
+
+    if not all_records:
+        raise RuntimeError("BSE: monthly announcement scan returned no records")
+
+    print(
+        f"[BSE-ANN] monthly scan validation PASS, unique rows={len(all_records)}"
+    )
+    return all_records
 
 
 def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
@@ -549,7 +608,7 @@ def main() -> None:
     print(f"BSE announcement scan: {START_DATE} -> {END_DATE}")
     print(f"server_keyword={SERVER_KEYWORD}")
     print(f"signal_keywords={ALL_SIGNAL_KEYWORDS}")
-    print("announcement_source=BSE announcements (xxfcbj=1 + xxfcbj=2)")
+    print(f"announcement_source=BSE company announcements (xxfcbj={ANNOUNCEMENT_TYPE}, flag=0, monthly windows)")
     print("decision_rule=candidate absent from current BSE stock list => delisted")
 
     session = build_session()
@@ -571,13 +630,7 @@ def main() -> None:
             f"{type(exc).__name__}: {exc}"
         )
 
-    exchange_records = fetch_all(session, "1")
-    company_records = fetch_all(session, "2")
-    raw_records = exchange_records + company_records
-    print(
-        f"BSE combined announcement source: exchange={len(exchange_records)}, "
-        f"company={len(company_records)}, total={len(raw_records)}"
-    )
+    raw_records = fetch_all(session)
     candidates = build_candidates(raw_records)
     current = fetch_current_bse_stocks(session)
 
