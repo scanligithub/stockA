@@ -302,7 +302,7 @@ def save_parsed_cache(code: str, rows, status: str) -> None:
 
 def fetch_html(session: requests.Session, code: str) -> tuple[str, str]:
     path = html_cache_path(code)
-    if path.stat().st_size > 1000 and cache_is_fresh(path):
+    if path.exists() and path.stat().st_size > 1000 and cache_is_fresh(path):
         return path.read_text(encoding="gb2312", errors="ignore"), "cache"
 
     url = f"{BASE}/corp/go.php/vCI_CorpXiangGuan/stockid/{code}.phtml"
@@ -1190,11 +1190,6 @@ def main() -> None:
     ) if not placeholder_audit.empty else 0
 
     final_df = normalize_intervals(repaired_input_df)
-    final_df.to_csv(
-        OUT / "index_membership_history.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
     final_df.to_csv(
         OUT / "index_membership_history.csv",
         index=False,
