@@ -310,7 +310,7 @@ def build_candidates(records: list[dict]) -> pd.DataFrame:
         post_title = str(record.get("disclosurePostTitle") or "").strip()
         combined_title = f"{title} {post_title}"
 
-        if ("可能被终止上市" in combined_title or "退市风险警示" in combined_title or "退市风险" in combined_title or "拟终止上市" in combined_title):\n            continue\n\n        if not any(keyword in combined_title for keyword in TITLE_KEYWORDS):
+        if (\n            "可能被终止上市" in combined_title\n            or "退市风险警示" in combined_title\n            or "退市风险" in combined_title\n            or "拟终止上市" in combined_title\n        ):\n            continue\n\n        if not any(keyword in combined_title for keyword in TITLE_KEYWORDS):
             continue
 
         code = normalize_code(record.get("companyCd"))
@@ -391,7 +391,7 @@ def validate_candidates(df: pd.DataFrame) -> None:
 def main() -> None:
     print(f"BSE announcement scan: {START_DATE} -> {END_DATE}")
     print(f"server_keyword={SERVER_KEYWORD}")
-    print(f"title_keywords={TITLE_KEYWORDS}")\n    print("source=North Exchange announcements (xxfcbj=1)")
+    print(f"title_keywords={TITLE_KEYWORDS}")\n    print("source=BSE exchange announcements (xxfcbj=1)")
 
     session = build_session()
 
