@@ -319,7 +319,7 @@ def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
         "sorttype": "asc",
     }
 
-    def parse_current(text: str) -> tuple[list[dict], int]:
+    def parse_current(text: str) -> tuple[list[object], int]:
         start = text.find("[")
         end = text.rfind("]")
         if start < 0 or end < start:
@@ -331,9 +331,9 @@ def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
         content = root.get("content") or []
         if not isinstance(content, list):
             raise RuntimeError("BSE current list: content is not a list")
-        return [item for item in content if isinstance(item, dict)], int(root.get("totalPages") or 0)
+        return content, int(root.get("totalPages") or 0)
 
-    all_rows: list[dict] = []
+    all_rows: list[object] = []
     total_pages = 0
     page = 0
     while True:
@@ -356,24 +356,41 @@ def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
             break
         page += 1
         if page >= MAX_PAGES:
-            raise RuntimeError(f"BSE current list: pagination exceeded {MAX_PAGES} pages")
+            raise RuntimeError(
+                f"BSE current list: pagination exceeded {MAX_PAGES} pages"
+            )
 
     codes: list[dict] = []
     seen: set[str] = set()
     for row in all_rows:
-        code = normalize_code(row.get("证券代码"))
+        code = ""
+        name = ""
+
+        if isinstance(row, dict):
+            code = normalize_code(row.get("证券代码"))
+            if not code:
+                code = normalize_code(row.get("xxzqdm"))
+            name = str(row.get("证券简称") or row.get("xxzqjc") or "").strip()
+            values = list(row.values())
+        elif isinstance(row, list):
+            # The current BSE endpoint returns array rows. AKShare's official
+            # parser maps index 20 -> 证券代码 and index 22 -> 证券简称.
+            code = normalize_code(row[20]) if len(row) > 20 else ""
+            name = str(row[22] or "").strip() if len(row) > 22 else ""
+            values = row
+        else:
+            values = []
+
         if not code:
-            code = normalize_code(row.get("xxzqdm"))
-        if not code:
-            for value in row.values():
+            for value in values:
                 candidate = normalize_code(value)
                 if candidate and candidate.startswith(("43", "83", "87", "88", "92")):
                     code = candidate
                     break
+
         if not code or code in seen:
             continue
         seen.add(code)
-        name = str(row.get("证券简称") or row.get("xxzqjc") or "").strip()
         codes.append({"code": code, "name": name})
 
     if not codes:
