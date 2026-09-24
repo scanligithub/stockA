@@ -24,6 +24,7 @@ import re
 import time
 from datetime import date, datetime, timezone
 from html import unescape
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
 
@@ -171,12 +172,14 @@ def normalize_code(value: object) -> str:
 
 
 def to_announcement_date(value: object) -> str:
+    """Convert CNINFO millisecond timestamp to Beijing calendar date."""
     raw = str(value or "").strip()
     if not raw:
         return ""
     try:
         timestamp = int(float(raw))
-        return datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc).date().isoformat()
+        dt = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+        return dt.astimezone(ZoneInfo("Asia/Shanghai")).date().isoformat()
     except (TypeError, ValueError, OverflowError, OSError):
         return ""
 
