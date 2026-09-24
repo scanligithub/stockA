@@ -167,6 +167,7 @@ jobs:
           SINA_WORKERS: "16"
           SINA_DELAY: "0.15"
           SINA_CACHE_TTL_SEC: "86400"
+          SINA_REFRESH_CURRENT: "1"
         run: python scripts/build_index_membership_history.py
 
       - name: Save updated Sina cache
