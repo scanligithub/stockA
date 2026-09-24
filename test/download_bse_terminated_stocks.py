@@ -24,6 +24,7 @@ import re
 import time
 from datetime import date, datetime, timezone
 from html import unescape
+from html.parser import HTMLParser
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,7 @@ BSE_BASE_URL = "https://www.bse.cn"
 BSE_PAGE_URL = f"{BSE_BASE_URL}/disclosure/announcement.html"
 BSE_CURRENT_LIST_URL = f"{BSE_BASE_URL}/nqxxController/nqxxCnzq.do"
 BSE_RISK_API_URL = f"{BSE_BASE_URL}/nqxxController/getRiskWarningStock.do"
+BSE_CODE_MAPPING_URL = f"{BSE_BASE_URL}/service/code_mapping.html"
 CNINFO_TERMINATION_URL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
 
 START_DATE = date(2021, 11, 15)
@@ -53,7 +55,6 @@ MIN_CURRENT_BSE_STOCKS = 300
 
 # These are hard source-integrity cases already independently verified.
 KNOWN_TERMINATED_CODES = ("832317", "833874", "833994", "920680", "920305")
-KNOWN_OLD_CODE_ALIASES = {"920680": "839680"}
 
 # Positive title patterns for an actual/final BSE termination event.
 TERMINATION_PHRASES = (
@@ -505,29 +506,125 @@ def fetch_current_bse_stocks(session: requests.Session) -> pd.DataFrame:
     return result
 
 
-def build_verified_code_mapping() -> pd.DataFrame:
-    """Return the verified historical code aliases needed by this dataset.
+class _TableParser(HTMLParser):
+    """Extract table rows without depending on BSE CSS/JS implementation."""
 
-    BSE switched existing stock codes to the 920 range on 2025-10-09.
-    For the historical termination set currently observed since 2021-11-15,
-    the only terminated stock requiring an old-code alias is 920680 <- 839680.
-    This relationship is independently verified against BSE's official code
-    mapping service/notification and is kept explicit so production runs do
-    not depend on parsing a dynamically-rendered HTML page.
-    """
-    return pd.DataFrame(
-        [
-            {
-                "name": "广道数字",
-                "listing_date": "",
-                "old_code": old_code,
-                "new_code": new_code,
-            }
-            for new_code, old_code in KNOWN_OLD_CODE_ALIASES.items()
-        ],
-        columns=["name", "listing_date", "old_code", "new_code"],
-    )
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.rows: list[list[str]] = []
+        self._row: list[str] | None = None
+        self._cell_parts: list[str] | None = None
 
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if tag == "tr":
+            self._row = []
+            self._cell_parts = None
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._cell_parts is not None:
+            self._cell_parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in ("td", "th") and self._cell_parts is not None and self._row is not None:
+            value = re.sub(r"\s+", " ", unescape("".join(self._cell_parts))).strip()
+            self._row.append(value)
+            self._cell_parts = None
+        elif tag == "tr":
+            if self._row:
+                self.rows.append(self._row)
+            self._row = None
+            self._cell_parts = None
+
+
+def fetch_bse_code_mapping(session: requests.Session) -> pd.DataFrame:
+    """Fetch and validate all 248 rows from BSE's official code mapping page."""
+    for attempt in range(1, SOURCE_ATTEMPTS + 1):
+        response = session.get(
+            BSE_CODE_MAPPING_URL,
+            headers={
+                **BSE_HEADERS,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Referer": f"{BSE_BASE_URL}/service/guidance.html",
+                "X-Requested-With": "",
+            },
+            timeout=REQUEST_TIMEOUT,
+        )
+        print(
+            f"[BSE-CODE-MAPPING] HTTP {response.status_code}, "
+            f"{len(response.content):,} bytes, http_attempt={attempt}"
+        )
+        if response.status_code != 200 or len(response.content) < 1000:
+            if attempt < SOURCE_ATTEMPTS:
+                time.sleep(1.5 * attempt)
+                continue
+            raise RuntimeError("BSE code mapping: invalid HTTP response")
+
+        parser = _TableParser()
+        parser.feed(response.text)
+        parser.close()
+
+        records: list[dict[str, str]] = []
+        for row in parser.rows:
+            date_idx = next(
+                (
+                    i
+                    for i, value in enumerate(row)
+                    if re.fullmatch(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}", value)
+                ),
+                None,
+            )
+            if date_idx is None:
+                continue
+            code_idx = [
+                i for i, value in enumerate(row) if re.fullmatch(r"\d{6}", value)
+            ]
+            code_idx = [i for i in code_idx if i > date_idx]
+            if len(code_idx) < 2:
+                continue
+            old_code, new_code = row[code_idx[0]], row[code_idx[1]]
+            if not is_bse_code(old_code) or not is_bse_code(new_code):
+                continue
+            if not new_code.startswith("920") or old_code == new_code:
+                continue
+            records.append(
+                {
+                    "name": row[1] if len(row) > 1 else "",
+                    "listing_date": row[date_idx].replace("/", "-"),
+                    "old_code": old_code,
+                    "new_code": new_code,
+                }
+            )
+
+        mapping = pd.DataFrame(
+            records,
+            columns=["name", "listing_date", "old_code", "new_code"],
+        ).drop_duplicates(subset=["old_code", "new_code"])
+
+        if len(mapping) != 248:
+            print(f"BSE code mapping parse: extracted {len(mapping)} rows, expected 248")
+            if attempt < SOURCE_ATTEMPTS:
+                time.sleep(1.5 * attempt)
+                continue
+            raise RuntimeError(
+                f"BSE code mapping: expected exactly 248 rows, got {len(mapping)}"
+            )
+
+        if mapping["old_code"].duplicated().any() or mapping["new_code"].duplicated().any():
+            raise RuntimeError("BSE code mapping: duplicate old/new code detected")
+        if mapping["new_code"].nunique() != 248 or mapping["old_code"].nunique() != 248:
+            raise RuntimeError("BSE code mapping: uniqueness validation failed")
+        if not mapping["new_code"].str.startswith("920").all():
+            raise RuntimeError("BSE code mapping: non-920 new code detected")
+
+        mapping = mapping.sort_values(["listing_date", "old_code"]).reset_index(drop=True)
+        print("BSE code-mapping validation PASS: 248 official old/new code aliases")
+        return mapping
+
+    raise AssertionError("unreachable")
 
 def build_historical_codes(
     termination_announcements: pd.DataFrame,
@@ -676,7 +773,7 @@ def main() -> None:
     termination_announcements = fetch_cninfo_termination_announcements(session)
     risk_board = fetch_current_risk_board(session)
     current = fetch_current_bse_stocks(session)
-    mapping = build_verified_code_mapping()
+    mapping = fetch_bse_code_mapping(session)
     print(f"BSE code-mapping validation PASS: {len(mapping)} verified old/new code aliases")
 
     current_codes = set(current["code"])
