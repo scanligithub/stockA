@@ -38,6 +38,7 @@ SZSE_HEADERS = {
 REQUEST_TIMEOUT = (15, 60)
 MAX_RETRIES = 5
 
+
 def build_session():
     session = requests.Session()
     retry = Retry(
@@ -54,6 +55,7 @@ def build_session():
     session.mount("https://", adapter)
     session.mount("http://", adapter)
     return session
+
 
 def get_with_retry(session, url, *, params, headers, label):
     last_error = None
@@ -73,6 +75,36 @@ def get_with_retry(session, url, *, params, headers, label):
             print(f"[{label}] attempt {attempt}/{MAX_RETRIES} failed: {type(exc).__name__}: {exc}; retry in {delay:.1f}s")
             time.sleep(delay)
     raise RuntimeError(f"{label}: all retries failed") from last_error
+
+
+def normalize_codes(df, exchange):
+    """Normalize six-digit codes and reject only genuinely blank code rows.
+
+    Exchange spreadsheets can contain trailing/description rows with an empty
+    security code. Those rows are not stocks and should not make the download
+    fail. A non-empty value that is not a six-digit stock code remains an error.
+    """
+    raw = df["code"].astype("string").str.strip()
+    extracted = raw.str.extract(r"(\d{6})", expand=False)
+
+    blank = raw.isna() | raw.eq("")
+    malformed = ~blank & extracted.isna()
+    if malformed.any():
+        values = raw.loc[malformed].tolist()
+        raise RuntimeError(
+            f"{exchange}: malformed non-empty stock codes: {values[:20]}"
+        )
+
+    rejected = df.loc[blank].copy()
+    if not rejected.empty:
+        rejected.insert(0, "exchange", exchange)
+        rejected.insert(1, "reject_reason", "blank stock code")
+        print(f"{exchange}: ignored {len(rejected)} row(s) with blank stock code")
+
+    valid = df.loc[~blank].copy()
+    valid["code"] = extracted.loc[~blank].astype(str).str.zfill(6)
+    return valid, rejected
+
 
 def fetch_sse(session):
     params = {
@@ -104,11 +136,12 @@ def fetch_sse(session):
         "COMPANY_CODE": "code", "COMPANY_ABBR": "name",
         "LIST_DATE": "list_date", "DELIST_DATE": "delist_date",
     })[["code", "name", "list_date", "delist_date"]]
-    df["code"] = df["code"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+    df, rejected = normalize_codes(df, "SSE")
     df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce").dt.date
     df["delist_date"] = pd.to_datetime(df["delist_date"], errors="coerce").dt.date
     df["exchange"] = "SSE"
-    return df
+    return df, rejected
+
 
 def fetch_szse(session):
     params = {
@@ -130,16 +163,17 @@ def fetch_szse(session):
         "证券代码": "code", "证券简称": "name",
         "上市日期": "list_date", "终止上市日期": "delist_date",
     })[["code", "name", "list_date", "delist_date"]]
-    df["code"] = df["code"].astype(str).str.extract(r"(\d{6})", expand=False).str.zfill(6)
+    df, rejected = normalize_codes(df, "SZSE")
     df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce").dt.date
     df["delist_date"] = pd.to_datetime(df["delist_date"], errors="coerce").dt.date
     df["exchange"] = "SZSE"
-    return df
+    return df, rejected
+
 
 def validate(df):
     if df.empty:
         raise RuntimeError("merged delisted stock list is empty")
-    invalid_code = ~df["code"].str.fullmatch(r"\d{6}", na=False)
+    invalid_code = ~df["code"].astype("string").str.fullmatch(r"\d{6}", na=False)
     if invalid_code.any():
         raise RuntimeError(f"invalid stock codes: {df.loc[invalid_code, 'code'].tolist()[:10]}")
     duplicated = df[df.duplicated("code", keep=False)]
@@ -151,32 +185,50 @@ def validate(df):
         raise RuntimeError("too many missing delist dates")
     print(f"VALIDATION PASS: {len(df)} unique delisted stocks")
 
+
 def main():
     session = build_session()
+
     print("Downloading SSE delisted stocks...")
-    sse = fetch_sse(session)
+    sse, sse_rejected = fetch_sse(session)
     print(f"SSE rows: {len(sse)}")
+
     print("Downloading SZSE delisted stocks...")
-    szse = fetch_szse(session)
+    szse, szse_rejected = fetch_szse(session)
     print(f"SZSE rows: {len(szse)}")
 
     sse.to_csv(OUTPUT_DIR / "sse_delisted.csv", index=False, encoding="utf-8-sig")
     szse.to_csv(OUTPUT_DIR / "szse_delisted.csv", index=False, encoding="utf-8-sig")
 
-    merged = pd.concat([sse, szse], ignore_index=True)
-    merged = merged.drop_duplicates(subset=["code"], keep="first").sort_values(
+    rejected = pd.concat([sse_rejected, szse_rejected], ignore_index=True)
+    rejected.to_csv(
+        OUTPUT_DIR / "invalid_delisted_rows.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
+
+    merged_raw = pd.concat([sse, szse], ignore_index=True)
+    duplicate_codes = merged_raw.loc[
+        merged_raw.duplicated("code", keep=False), "code"
+    ].nunique()
+
+    merged = merged_raw.drop_duplicates(subset=["code"], keep="first").sort_values(
         ["delist_date", "code"], ascending=[False, True], na_position="last"
     ).reset_index(drop=True)
     validate(merged)
 
     output = OUTPUT_DIR / "a_share_delisted_all.csv"
     merged.to_csv(output, index=False, encoding="utf-8-sig")
+
     print("========== RESULT ==========")
-    print(f"SSE:    {len(sse)}")
-    print(f"SZSE:   {len(szse)}")
-    print(f"UNIQUE: {len(merged)}")
-    print(f"OUTPUT: {output}")
+    print(f"SSE valid rows:       {len(sse)}")
+    print(f"SZSE valid rows:      {len(szse)}")
+    print(f"Blank-code rows:      {len(rejected)}")
+    print(f"Duplicate codes:      {duplicate_codes}")
+    print(f"UNIQUE delisted:      {len(merged)}")
+    print(f"OUTPUT:               {output}")
     print("=============================")
+
 
 if __name__ == "__main__":
     main()
