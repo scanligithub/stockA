@@ -38,14 +38,14 @@ END_DATE = date.today()
 # Only one historical scan. The previous implementation repeatedly scanned
 # five one-year windows and three keywords, causing hundreds of redundant
 # requests against the same BSE announcement index.
-SERVER_KEYWORD = "终止上市"
+SERVER_KEYWORD = ""
 
 REQUEST_TIMEOUT = (15, 60)
 HTTP_RETRIES = 2
 SOURCE_ATTEMPTS = 3
 MAX_PAGES = 200
 
-TITLE_KEYWORDS = ("终止上市", "摘牌", "退市")
+TITLE_KEYWORDS = ("股票终止上市", "终止上市暨摘牌", "终止在北京证券交易所上市", "因转板在北京证券交易所终止上市")
 
 HEADERS = {
     "Accept": "text/javascript, application/javascript, application/ecmascript, */*; q=0.01",
@@ -204,7 +204,7 @@ def fetch_page(
     callback = f"jQuery{int(time.time() * 1000)}_{page}"
     form_data = [
         ("siteId", "6"),
-        ("flag", "0"),
+        ("flag", "1"),
         ("page", str(page)),
         ("companyCd", ""),
         ("isNewThree", "1"),
@@ -212,7 +212,7 @@ def fetch_page(
         ("date", f"{START_DATE.isoformat()} ~ {END_DATE.isoformat()}"),
         ("startTime", START_DATE.isoformat()),
         ("endTime", END_DATE.isoformat()),
-        ("xxfcbj[]", "2"),
+        ("xxfcbj[]", "1"),
         ("needFields[]", "companyCd"),
         ("needFields[]", "companyName"),
         ("needFields[]", "disclosureTitle"),
@@ -310,7 +310,7 @@ def build_candidates(records: list[dict]) -> pd.DataFrame:
         post_title = str(record.get("disclosurePostTitle") or "").strip()
         combined_title = f"{title} {post_title}"
 
-        if not any(keyword in combined_title for keyword in TITLE_KEYWORDS):
+        if ("可能被终止上市" in combined_title or "退市风险警示" in combined_title or "退市风险" in combined_title or "拟终止上市" in combined_title):\n            continue\n\n        if not any(keyword in combined_title for keyword in TITLE_KEYWORDS):
             continue
 
         code = normalize_code(record.get("companyCd"))
@@ -391,7 +391,7 @@ def validate_candidates(df: pd.DataFrame) -> None:
 def main() -> None:
     print(f"BSE announcement scan: {START_DATE} -> {END_DATE}")
     print(f"server_keyword={SERVER_KEYWORD}")
-    print(f"title_keywords={TITLE_KEYWORDS}")
+    print(f"title_keywords={TITLE_KEYWORDS}")\n    print("source=North Exchange announcements (xxfcbj=1)")
 
     session = build_session()
 
