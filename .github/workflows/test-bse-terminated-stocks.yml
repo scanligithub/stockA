@@ -11,7 +11,7 @@ permissions:
 jobs:
   download-bse-terminated:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,31 +27,45 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas requests
 
-      - name: Download and verify BSE terminated-listing stocks
+      - name: Download and verify BSE historical terminated stocks
         run: python test/download_bse_terminated_stocks.py
 
       - name: Show result
         run: |
-          echo "=== BSE matched announcements ==="
-          wc -l test/bse_delisting_candidates_classified.csv
+          echo "=== BSE historical termination announcements ==="
           python - <<'PY'
           import pandas as pd
 
-          ann = pd.read_csv("test/bse_delisting_candidates_classified.csv", dtype={"code": str})
-          print(f"classified candidate stocks: {len(ann)}")
-          print(f"candidate company codes: {ann['code'].nunique()}")
-          print(f"current BSE: {int(ann['current_bse'].sum())}")
-          print(f"delisted candidates: {int((~ann['current_bse']).sum())}")
-          print(ann[["code", "name", "publish_time", "title", "current_bse", "status"]].to_string(index=False))
+          df = pd.read_csv("test/bse_termination_announcements.csv", dtype={"code": str})
+          print(f"final termination announcement rows: {len(df)}")
+          print(f"unique terminated codes: {df['code'].nunique()}")
+          print(df.to_string(index=False))
           PY
 
-          echo "=== BSE terminated stock candidates ==="
-          wc -l test/bse_delisted.csv
+          echo "=== BSE current risk board ==="
+          python - <<'PY'
+          import pandas as pd
+
+          df = pd.read_csv("test/bse_current_risk_stocks.csv", dtype={"code": str})
+          print(f"risk-board rows: {len(df)}")
+          print(df.to_string(index=False))
+          PY
+
+          echo "=== BSE final delisted codes ==="
           python - <<'PY'
           import pandas as pd
 
           df = pd.read_csv("test/bse_delisted.csv", dtype={"code": str})
-          print(f"unique candidate stocks: {df['code'].nunique()}")
+          print(f"delisted codes: {len(df)}")
+          print(df.to_string(index=False))
+          PY
+
+          echo "=== BSE historical code universe ==="
+          python - <<'PY'
+          import pandas as pd
+
+          df = pd.read_csv("test/bse_historical_codes.csv", dtype={"code": str, "current_code": str})
+          print(f"historical code rows: {len(df)}")
           print(df.to_string(index=False))
           PY
 
@@ -59,11 +73,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: bse-terminated-stocks-${{ github.run_id }}
+          name: bse-terminated-stocks-\${{ github.run_id }}
           path: |
             test/bse_delisted.csv
-            test/bse_delisting_candidates_classified.csv
-            test/bse_delisting_candidates_all.csv
+            test/bse_historical_codes.csv
+            test/bse_old_code_aliases.csv
+            test/bse_termination_announcements.csv
+            test/bse_current_risk_stocks.csv
             test/bse_current_stocks.csv
+            test/bse_code_mapping.csv
           if-no-files-found: error
           retention-days: 14
