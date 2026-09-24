@@ -44,6 +44,28 @@ BSE_CURRENT_LIST_URL = f"{BSE_BASE_URL}/nqxxController/nqxxCnzq.do"
 BSE_RISK_API_URL = f"{BSE_BASE_URL}/nqxxController/getRiskWarningStock.do"
 BSE_CODE_MAPPING_URL = f"{BSE_BASE_URL}/service/code_mapping.html"
 CNINFO_TERMINATION_URL = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
+SSE_URL = "https://query.sse.com.cn/commonQuery.do"
+SZSE_URL = "https://www.szse.cn/api/report/ShowReport"
+
+SSE_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Encoding": "gzip, deflate",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.6",
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "Host": "query.sse.com.cn",
+    "Pragma": "no-cache",
+    "Referer": "https://www.sse.com.cn/",
+    "User-Agent": BSE_HEADERS["User-Agent"],
+}
+SZSE_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.6",
+    "Cache-Control": "no-cache",
+    "Referer": "https://www.szse.cn/market/stock/suspend/index.html",
+    "User-Agent": BSE_HEADERS["User-Agent"],
+}
+
 
 START_DATE = date(2021, 11, 15)
 END_DATE = date.today()
