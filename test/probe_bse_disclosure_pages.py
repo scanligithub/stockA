@@ -137,30 +137,40 @@ def probe_risk_warning_api(session: requests.Session) -> None:
 
 
 def probe_cninfo_bse_termination() -> None:
-    """Probe CNINFO full-text history as a fallback historical BSE termination source."""
+    """Probe CNINFO filtering combinations for historical BSE termination announcements."""
     url = "https://www.cninfo.com.cn/new/hisAnnouncement/query"
-    print("\n===== CNINFO BSE TERMINATION PROBE =====")
+    print("\n===== CNINFO BSE FILTER MATRIX =====")
 
     headers = {
         "User-Agent": HEADERS["User-Agent"],
-        "Referer": "https://www.cninfo.com.cn/",
+        "Referer": "https://www.cninfo.com.cn/new/commonUrl/pageOfSearch?url=disclosure/list/search",
         "Origin": "https://www.cninfo.com.cn",
         "X-Requested-With": "XMLHttpRequest",
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     }
 
-    for keyword in ("终止上市", "摘牌"):
+    cases = (
+        {"name": "plain", "column": "", "plate": ""},
+        {"name": "column_bj", "column": "bj", "plate": ""},
+        {"name": "plate_bj", "column": "", "plate": "bj"},
+        {"name": "szse_plate_bj", "column": "szse", "plate": "bj"},
+        {"name": "sse_plate_bj", "column": "sse", "plate": "bj"},
+    )
+
+    for case in cases:
         data = {
             "pageNum": "1",
-            "pageSize": "100",
+            "pageSize": "30",
+            "column": case["column"],
             "tabName": "fulltext",
-            "searchkey": keyword,
-            "seDate": "2021-11-15~2026-09-24",
-            "column": "bj",
-            "plate": "",
+            "plate": case["plate"],
+            "stock": "",
+            "searchkey": "终止上市",
+            "secid": "",
             "category": "",
             "trade": "",
+            "seDate": "2021-11-15~2026-09-24",
             "sortName": "announcementTime",
             "sortType": "-1",
             "isHLtitle": "true",
@@ -173,35 +183,21 @@ def probe_cninfo_bse_termination() -> None:
         )
         response.raise_for_status()
         payload = response.json()
-        announcements = payload.get("announcements") or []
-        total = payload.get("totalAnnouncement", 0)
-        bse = []
-        for item in announcements:
-            code = str(item.get("secCode") or "").strip()
-            title = str(item.get("announcementTitle") or "").strip()
-            if (
-                code.isdigit()
-                and len(code) == 6
-                and code.startswith(("83", "87", "92"))
-                and any(k in title for k in ("终止上市", "摘牌"))
-            ):
-                bse.append(
-                    {
-                        "code": code,
-                        "name": item.get("secName"),
-                        "title": title,
-                        "time": item.get("announcementTime"),
-                    }
-                )
+        anns = payload.get("announcements") or []
+        codes = [
+            str(x.get("secCode") or "").strip()
+            for x in anns
+            if str(x.get("secCode") or "").strip()
+        ]
+        bse_codes = sorted({
+            code for code in codes
+            if code.isdigit() and len(code) == 6 and code.startswith(("83", "87", "92"))
+        })
         print(
-            f"[CNINFO] keyword={keyword!r} HTTP={response.status_code} "
-            f"total={total} returned={len(announcements)} bse_hits={len(bse)}"
+            f"[CNINFO-FILTER] {case['name']}: HTTP={response.status_code} "
+            f"total={payload.get('totalAnnouncement', 0)} returned={len(anns)} "
+            f"bse_codes={len(bse_codes)} codes={bse_codes[:20]}"
         )
-        for item in bse[:40]:
-            print(
-                f"[CNINFO-HIT] {item['code']} {item['name']} "
-                f"{item['title']} time={item['time']}"
-            )
 
 def main() -> None:
     session = requests.Session()
