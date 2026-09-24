@@ -143,6 +143,16 @@ def fetch_sse(session):
     df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce").dt.date
     df["delist_date"] = pd.to_datetime(df["delist_date"], errors="coerce").dt.date
     df["exchange"] = "SSE"
+
+    duplicate_mask = df.duplicated("code", keep=False)
+    duplicate_count = int(df.loc[duplicate_mask, "code"].nunique())
+    if duplicate_count:
+        print(
+            f"[SSE] source contains {duplicate_count} duplicated code(s); "
+            "deduplicating by code and keeping the first row"
+        )
+        df = df.drop_duplicates("code", keep="first").reset_index(drop=True)
+
     return df, rejected
 
 
@@ -170,6 +180,16 @@ def fetch_szse(session):
     df["list_date"] = pd.to_datetime(df["list_date"], errors="coerce").dt.date
     df["delist_date"] = pd.to_datetime(df["delist_date"], errors="coerce").dt.date
     df["exchange"] = "SZSE"
+
+    duplicate_mask = df.duplicated("code", keep=False)
+    duplicate_count = int(df.loc[duplicate_mask, "code"].nunique())
+    if duplicate_count:
+        print(
+            f"[SZSE] source contains {duplicate_count} duplicated code(s); "
+            "deduplicating by code and keeping the first row"
+        )
+        df = df.drop_duplicates("code", keep="first").reset_index(drop=True)
+
     return df, rejected
 
 
@@ -198,7 +218,7 @@ def fetch_source_with_retry(session, fetcher, label):
             if df.empty:
                 raise RuntimeError("parsed dataframe is empty")
             if df["code"].nunique() != len(df):
-                raise RuntimeError("duplicate stock codes in source response")
+                raise RuntimeError("duplicate stock codes remain after source normalization")
             if df["delist_date"].notna().sum() == 0:
                 raise RuntimeError("no valid delist dates in source response")
             print(f"[{label}] source validation PASS, rows={len(df)}, source_attempt={attempt}")
