@@ -48,6 +48,7 @@ TIMEOUT = 20
 RETRIES = 4
 CACHE_VERSION = 4
 CACHE_TTL_SEC = int(os.getenv("SINA_CACHE_TTL_SEC", "86400"))
+REFRESH_CURRENT = os.getenv("SINA_REFRESH_CURRENT", "1") != "0"
 
 # Only genuine aliases/equivalent identifiers are normalized here. Wrong
 # historical code/name pairs are deliberately NOT aliased into another index.
@@ -300,9 +301,19 @@ def save_parsed_cache(code: str, rows, status: str) -> None:
     )
 
 
-def fetch_html(session: requests.Session, code: str) -> tuple[str, str]:
+def fetch_html(
+    session: requests.Session,
+    code: str,
+    *,
+    force_network: bool = False,
+) -> tuple[str, str]:
     path = html_cache_path(code)
-    if path.exists() and path.stat().st_size > 1000 and cache_is_fresh(path):
+    if (
+        not force_network
+        and path.exists()
+        and path.stat().st_size > 1000
+        and cache_is_fresh(path)
+    ):
         return path.read_text(encoding="gb2312", errors="ignore"), "cache"
 
     url = f"{BASE}/corp/go.php/vCI_CorpXiangGuan/stockid/{code}.phtml"
@@ -625,15 +636,20 @@ def make_session() -> requests.Session:
     return session
 
 
-def worker(code: str):
-    cached = load_parsed_cache(code)
-    if cached is not None:
-        rows, status = cached
-        return code, rows, status, "parsed_cache", ""
+def worker(code: str, *, force_network: bool = False):
+    if not force_network:
+        cached = load_parsed_cache(code)
+        if cached is not None:
+            rows, status = cached
+            return code, rows, status, "parsed_cache", ""
 
     session = make_session()
     try:
-        html, source = fetch_html(session, code)
+        html, source = fetch_html(
+            session,
+            code,
+            force_network=force_network,
+        )
         rows, status = parse_xiangguan(html, code)
         save_parsed_cache(code, rows, status)
         return code, rows, status, source, ""
@@ -1125,10 +1141,25 @@ def main() -> None:
     source_counts: dict[str, int] = {}
 
     codes = universe.query_code.tolist()
-    print(f"Workers={WORKERS}, delay={DELAY}s, query_codes={len(codes)}")
+    current_codes = set(
+        universe.loc[
+            universe["source"] == "tdx_current", "query_code"
+        ]
+    )
+    print(
+        f"Workers={WORKERS}, delay={DELAY}s, query_codes={len(codes)}, "
+        f"refresh_current={REFRESH_CURRENT}, current_codes={len(current_codes)}"
+    )
 
     with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(worker, code): code for code in codes}
+        futures = {
+            pool.submit(
+                worker,
+                code,
+                force_network=REFRESH_CURRENT and code in current_codes,
+            ): code
+            for code in codes
+        }
         for n, future in enumerate(as_completed(futures), 1):
             code, rows, status, source, error = future.result()
             status_counts[status] = status_counts.get(status, 0) + 1
@@ -1256,6 +1287,9 @@ def main() -> None:
         "elapsed_seconds": round(time.perf_counter() - started, 3),
         "workers": WORKERS,
         "delay": DELAY,
+        "refresh_current": REFRESH_CURRENT,
+        "cache_ttl_seconds": CACHE_TTL_SEC,
+        "current_query_count": len(current_codes),
         "universe_count": len(universe),
         "source_counts": source_counts,
         "status_counts": status_counts,
@@ -1283,7 +1317,6 @@ def main() -> None:
         "validation_errors": validation_errors,
         "boundary_audit": boundary,
         "pit_failures": pit_failures,
-        "cache_ttl_seconds": CACHE_TTL_SEC,
         "current_membership_audit": current_audit,
         "ab": {
             "candidate_errors": a_candidate_errors,
