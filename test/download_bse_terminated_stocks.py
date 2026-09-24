@@ -214,8 +214,13 @@ def fetch_page(
 ) -> tuple[list[dict], int, int]:
     callback = f"jQuery{int(time.time() * 1000)}_{page}"
     form_data = [
+        # BSE announcement search uses the legacy disclosure-query
+        # protocol. These fields are required; flag/xxfcbj alone are ignored
+        # by the server and lead to the same unfiltered result for both values.
+        ("noticeType[]", "5"),
+        ("disclosureType[]", "5"),
+        ("disclosureSubtype[]", ""),
         ("siteId", "6"),
-        ("flag", "1"),
         ("page", str(page)),
         ("companyCd", ""),
         ("isNewThree", "1"),
@@ -224,6 +229,7 @@ def fetch_page(
         ("startTime", START_DATE.isoformat()),
         ("endTime", END_DATE.isoformat()),
         ("xxfcbj[]", announcement_type),
+        ("hyType[]", ""),
         ("needFields[]", "companyCd"),
         ("needFields[]", "companyName"),
         ("needFields[]", "disclosureTitle"),
