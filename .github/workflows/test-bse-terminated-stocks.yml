@@ -11,7 +11,7 @@ permissions:
 jobs:
   download-bse-terminated:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,41 +25,33 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas pypdf requests
+          pip install pandas requests
 
       - name: Download and verify BSE terminated-listing stocks
         run: python test/download_bse_terminated_stocks.py
 
       - name: Show result
         run: |
-          echo "=== BSE discovery ==="
+          echo "=== BSE matched announcements ==="
           wc -l test/bse_termination_announcements.csv
           python - <<'PY'
           import pandas as pd
 
           ann = pd.read_csv("test/bse_termination_announcements.csv", dtype={"code": str})
-          print(f"unique matched announcements: {len(ann)}")
+          print(f"matched announcements: {len(ann)}")
           print(f"candidate company codes: {ann['code'].nunique()}")
-          print(ann[["code", "name", "publish_time", "title"]].to_string(index=False))
+          print(ann[["code", "name", "publish_time", "title", "termination_signal"]].to_string(index=False))
           PY
 
-          echo "=== BSE confirmed terminated listings ==="
+          echo "=== BSE terminated stock candidates ==="
           wc -l test/bse_delisted.csv
           python - <<'PY'
           import pandas as pd
 
           df = pd.read_csv("test/bse_delisted.csv", dtype={"code": str})
-          print(f"confirmed: {df['code'].nunique()}")
-          print(f"type counts: {df['termination_type'].value_counts(dropna=False).to_dict()}")
-          print(f"date range: {df['terminate_date'].min()} -> {df['terminate_date'].max()}")
+          print(f"unique candidate stocks: {df['code'].nunique()}")
           print(df.to_string(index=False))
           PY
-
-          echo "=== BSE unresolved ==="
-          if [ -f test/bse_termination_unresolved.csv ]; then
-            wc -l test/bse_termination_unresolved.csv
-            cat test/bse_termination_unresolved.csv
-          fi
 
       - name: Upload result artifacts
         if: always()
@@ -69,6 +61,5 @@ jobs:
           path: |
             test/bse_delisted.csv
             test/bse_termination_announcements.csv
-            test/bse_termination_unresolved.csv
           if-no-files-found: error
           retention-days: 14
