@@ -70,7 +70,7 @@ def get_with_retry(session, url, *, params, headers, label):
             return response
         except Exception as exc:
             last_error = exc
-            if attempt == MAX_RETRIES:
+            if attempt == HTTP_RETRIES:
                 break
             delay = min(30, 2 ** (attempt - 1) + random.random())
             print(f"[{label}] attempt {attempt}/{HTTP_RETRIES} failed: {type(exc).__name__}: {exc}; retry in {delay:.1f}s")
