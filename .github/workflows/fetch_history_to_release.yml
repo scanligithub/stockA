@@ -251,9 +251,72 @@ jobs:
             echo "✅ 物理检测通过：已成功加载 Actions 缓存恢复的历史事件数据（大小：$(ls -lh output/event_earnings_forecast.parquet | awk '{print $5}')）。"
           fi
 
+      - name: Download Latest Successful Index Membership Artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          RUN_ID="$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow build-index-membership.yml \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "❌ No successful Build Index Historical Membership workflow run found."
+            exit 1
+          fi
+
+          ARTIFACT_NAME="index-membership-history-${RUN_ID}"
+          echo "Using successful membership build run: $RUN_ID"
+          echo "Artifact: $ARTIFACT_NAME"
+
+          rm -rf /tmp/index_membership_artifact
+          mkdir -p /tmp/index_membership_artifact
+
+          gh run download "$RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$ARTIFACT_NAME" \
+            --dir /tmp/index_membership_artifact
+
+          MEMBERSHIP_FILE="$(find /tmp/index_membership_artifact -type f -name 'index_membership_history.parquet' -print -quit)"
+          if [ -z "$MEMBERSHIP_FILE" ]; then
+            echo "❌ index_membership_history.parquet not found in $ARTIFACT_NAME."
+            find /tmp/index_membership_artifact -maxdepth 4 -type f -print || true
+            exit 1
+          fi
+
+          mkdir -p output/index_membership
+          cp "$MEMBERSHIP_FILE" output/index_membership/index_membership_history.parquet
+
+          python - <<'PY'
+          import pandas as pd
+
+          path = "output/index_membership/index_membership_history.parquet"
+          df = pd.read_parquet(path)
+
+          expected = ["index_id", "stock_id", "start_date", "end_date"]
+          assert list(df.columns) == expected, f"Unexpected columns: {list(df.columns)}"
+          assert df["index_id"].nunique() == 37, f"Expected 37 indexes, got {df['index_id'].nunique()}"
+          assert len(df) > 0, "Membership parquet is empty"
+          assert not df.duplicated().any(), "Duplicate rows found"
+          assert not (df["start_date"] == "1900-01-01").any(), "1900-01-01 placeholder found"
+
+          print(f"Index membership artifact validation PASS: {len(df)} rows, {df['index_id'].nunique()} indexes")
+          PY
+
       - name: Merge & Split by Year
         run: |
           python scripts/merge_and_push.py --mode release --year 9999
+
+      - name: Add Index Membership History to Release Output
+        run: |
+          test -f output/index_membership/index_membership_history.parquet
+          echo "Index membership history ready for release:"
+          ls -lh output/index_membership/index_membership_history.parquet
 
       - name: Upload to Release
         env:
