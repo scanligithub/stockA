@@ -315,8 +315,9 @@ jobs:
       - name: Add Index Membership History to Release Output
         run: |
           test -f output/index_membership/index_membership_history.parquet
+          cp output/index_membership/index_membership_history.parquet output/index_membership_history.parquet
           echo "Index membership history ready for release:"
-          ls -lh output/index_membership/index_membership_history.parquet
+          ls -lh output/index_membership_history.parquet
 
       - name: Upload to Release
         env:
