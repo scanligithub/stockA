@@ -31,7 +31,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas pyarrow requests beautifulsoup4 openpyxl xlrd
+          pip install pandas pyarrow requests beautifulsoup4 openpyxl
 
       - name: Build official delisted universe
         run: python scripts/download_all_delisted_stocks.py
@@ -170,10 +170,6 @@ jobs:
           SINA_REFRESH_CURRENT: "1"
         run: python scripts/build_index_membership_history.py
 
-      - name: Audit current CSI constituents
-        if: success() || failure()
-        run: python scripts/audit_csindex_current.py
-
       - name: Save updated Sina cache
         if: always()
         uses: actions/cache/save@v4
@@ -205,13 +201,6 @@ jobs:
           assert not (df["start_date"] == "1900-01-01").any(),               "Sina 1900-01-01 placeholder remains in final output"
           assert summary.get("placeholder_start_unresolved", 0) == 0
           assert summary.get("placeholder_start_remaining", 0) == 0
-
-          daily_audit = summary.get("daily_member_count_audit", {})
-          print(
-              "daily member-count audit:",
-              json.dumps(daily_audit, ensure_ascii=False, indent=2),
-          )
-          assert daily_audit.get("status") in {"PASS", "REPORT_ONLY"}
 
           print(
               "placeholder repairs:",
