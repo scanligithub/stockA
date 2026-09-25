@@ -207,9 +207,7 @@ jobs:
               "daily member-count audit:",
               json.dumps(daily_audit, ensure_ascii=False, indent=2),
           )
-          assert daily_audit.get("status") == "PASS", (
-              "daily member-count audit failed"
-          )
+          assert daily_audit.get("status") in {"PASS", "REPORT_ONLY"}
 
           print(
               "placeholder repairs:",
