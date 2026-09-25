@@ -89,7 +89,6 @@ TARGET_INDEXES = {
     "399990": "煤炭等权", "930708": "中证有色", "399974": "国证国企",
 }
 
-SINA_COMPONENT_INDEX_IDS = {"000851": "932000"}
 
 UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -408,116 +407,21 @@ def parse_xiangguan(html: str, query_code: str) -> tuple[list[dict], str]:
     return result, "ok"
 
 
-def fetch_history_component_page(
-    session: requests.Session,
-    index_id: str,
-    page: int,
-) -> str:
-    query_index_id = SINA_COMPONENT_INDEX_IDS.get(index_id, index_id)
-    url = (
-        f"{BASE}/corp/view/vII_HistoryComponent.php"
-        f"?page={page}&indexid={query_index_id}"
-    )
-    response = session.get(url, timeout=TIMEOUT)
-    response.raise_for_status()
-    response.encoding = "gb2312"
-    return response.text
-
-
-def parse_history_component_rows(html: str) -> list[dict]:
-    """Parse Sina HistoryComponent rows with true inclusion/removal dates."""
-    soup = BeautifulSoup(html, "html.parser")
-    required = {"品种代码", "纳入日期", "剔除日期"}
-
-    for table in soup.find_all("table"):
-        rows = table.find_all("tr")
-        header_idx = None
-        headers: list[str] = []
-
-        for idx, row in enumerate(rows[:6]):
-            values = [
-                x.get_text(" ", strip=True)
-                for x in row.find_all(["th", "td"])
-            ]
-            if required.issubset(set(values)):
-                header_idx = idx
-                headers = values
-                break
-
-        if header_idx is None:
-            continue
-
-        pos = {name: i for i, name in enumerate(headers)}
-        result: list[dict] = []
-
-        for row in rows[header_idx + 1:]:
-            values = [
-                x.get_text(" ", strip=True)
-                for x in row.find_all(["th", "td"])
-            ]
-            if len(values) < len(headers):
-                continue
-
-            code = normalize_code(values[pos["品种代码"]])
-            start = values[pos["纳入日期"]].strip()
-            end = values[pos["剔除日期"]].strip()
-
-            if not re.fullmatch(r"\d{6}", code):
-                continue
-            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start):
-                continue
-            if end in {"", "--", "-"}:
-                end = ""
-            elif not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
-                continue
-
-            result.append({
-                "stock_code": code,
-                "start_date": start,
-                "end_date": end,
-            })
-
-        if result:
-            return result
-
-    return []
-
-
-def component_page_count(html: str) -> int:
-    pages = [int(x) for x in re.findall(r"[?&]page=(\d+)", html)]
-    return max(pages, default=1)
-
-
 def repair_placeholder_starts(
     df: pd.DataFrame,
-    universe: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Replace Sina XiangGuan's 1900-01-01 placeholder starts.
+    """Audit XiangGuan 1900-01-01 admission-date placeholders.
 
-    XiangGuan may use 1900-01-01 for the first historical membership
-    interval. HistoryComponent provides true per-stock admission dates for
-    part of the history. Its historical table is itself a limited view, so
-    when an affected stock is absent there, fall back to the earliest valid
-    admission date observed for that index.
-
-    The repair is intentionally two-level:
-      1. stock-specific HistoryComponent date, when available;
-      2. index historical earliest date, only when stock-specific evidence
-         is unavailable.
-
-    Every repair is written to placeholder_start_repairs.csv with its source.
+    Production history is sourced exclusively from stock-level
+    vCI_CorpXiangGuan. No HistoryComponent/NewestComponent data is used.
+    An index-level earliest XiangGuan date is used only as an explicit,
+    auditable fallback; otherwise the placeholder remains unresolved and
+    production fails.
     """
     audit_columns = [
-        "index_id",
-        "stock_id",
-        "old_start_date",
-        "new_start_date",
-        "history_rows",
-        "source",
-        "status",
+        "index_id", "stock_id", "old_start_date",
+        "new_start_date", "source", "status",
     ]
-
     if df.empty:
         return df, pd.DataFrame(columns=audit_columns)
 
@@ -525,106 +429,159 @@ def repair_placeholder_starts(
     if affected.empty:
         return df, pd.DataFrame(columns=audit_columns)
 
-    wanted: dict[str, set[str]] = {}
-    for row in affected.itertuples(index=False):
-        wanted.setdefault(row.index_id, set()).add(row.stock_id)
-
-    cmap = universe.set_index("query_code")["stock_id"].to_dict()
     repaired = df.copy()
     audit_rows: list[dict] = []
-    session = make_session()
-
-    for index_id, stock_ids in wanted.items():
-        all_history: list[dict] = []
-
-        try:
-            first = fetch_history_component_page(session, index_id, 1)
-            pages = component_page_count(first)
-
-            for page in range(1, pages + 1):
-                html = (
-                    first
-                    if page == 1
-                    else fetch_history_component_page(session, index_id, page)
+    for index_id, group in df.groupby("index_id"):
+        valid_dates = sorted(set(
+            group.loc[group["start_date"] != "1900-01-01", "start_date"].tolist()
+        ))
+        index_earliest = valid_dates[0] if valid_dates else ""
+        for row in affected[affected["index_id"] == index_id].itertuples(index=False):
+            if index_earliest:
+                mask = (
+                    (repaired["index_id"] == index_id)
+                    & (repaired["stock_id"] == row.stock_id)
+                    & (repaired["start_date"] == "1900-01-01")
                 )
-                all_history.extend(parse_history_component_rows(html))
-
-            print(
-                f"Placeholder repair {index_id}: "
-                f"HistoryComponent pages={pages}, rows={len(all_history)}",
-                flush=True,
-            )
-        except Exception as exc:
-            for stock_id in sorted(stock_ids):
+                repaired.loc[mask, "start_date"] = index_earliest
                 audit_rows.append({
-                    "index_id": index_id,
-                    "stock_id": stock_id,
+                    "index_id": index_id, "stock_id": row.stock_id,
                     "old_start_date": "1900-01-01",
-                    "new_start_date": "",
-                    "history_rows": 0,
-                    "source": "history_component_error",
-                    "status": f"ERROR: {exc!r}",
+                    "new_start_date": index_earliest,
+                    "source": "xiangguan_index_earliest",
+                    "status": "REPAIRED",
                 })
-            continue
-
-        valid_dates = [
-            row["start_date"]
-            for row in all_history
-            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["start_date"])
-        ]
-        index_earliest = min(valid_dates) if valid_dates else ""
-
-        candidate_dates: dict[str, list[str]] = {}
-        for row in all_history:
-            stock_id = cmap.get(row["stock_code"], row["stock_code"])
-            if stock_id in stock_ids:
-                candidate_dates.setdefault(stock_id, []).append(
-                    row["start_date"]
-                )
-
-        for stock_id in sorted(stock_ids):
-            dates = sorted(set(candidate_dates.get(stock_id, [])))
-
-            if dates:
-                new_start = dates[0]
-                source = "history_component_stock"
-                history_rows = len(dates)
-            elif index_earliest:
-                new_start = index_earliest
-                source = "history_component_index_earliest"
-                history_rows = 0
             else:
                 audit_rows.append({
-                    "index_id": index_id,
-                    "stock_id": stock_id,
+                    "index_id": index_id, "stock_id": row.stock_id,
                     "old_start_date": "1900-01-01",
                     "new_start_date": "",
-                    "history_rows": 0,
-                    "source": "history_component_unavailable",
+                    "source": "xiangguan_unavailable",
                     "status": "UNRESOLVED",
                 })
-                continue
+    return repaired, pd.DataFrame(audit_rows, columns=audit_columns)
 
-            mask = (
-                (repaired["index_id"] == index_id)
-                & (repaired["stock_id"] == stock_id)
-                & (repaired["start_date"] == "1900-01-01")
-            )
-            repaired.loc[mask, "start_date"] = new_start
+# Exact sample-size checks are only configured where the index methodology
+# fixes the number of constituents. Variable-size broad/market indexes are
+# still reported in daily_member_counts.csv but are not given invented targets.
+FIXED_MEMBER_COUNTS = {
+    "000016": 50,
+    "000300": 300,
+    "000688": 50,
+    "000851": 2000,
+    "000852": 1000,
+    "000904": 200,
+    "000905": 500,
+    "399001": 500,
+    "399005": 100,
+    "399006": 100,
+    "399311": 1000,
+    "399330": 100,
+    "399673": 50,
+    "000010": 180,
+}
 
-            audit_rows.append({
+def audit_daily_member_counts(df: pd.DataFrame) -> dict:
+    """Compare daily PIT membership counts with fixed index definitions."""
+    audit_dir = OUT / "quality_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    if df.empty:
+        return {"status": "FAIL", "checked_days": 0, "mismatch_days": 0}
+
+    work = df.copy()
+    work["start_dt"] = pd.to_datetime(work["start_date"], errors="coerce")
+    work["end_dt"] = pd.to_datetime(
+        work["end_date"].replace("", pd.NA), errors="coerce"
+    )
+    rows: list[dict] = []
+    mismatches: list[dict] = []
+
+    for index_id, group in work.groupby("index_id"):
+        min_date = group["start_dt"].min()
+        max_end = group["end_dt"].max()
+        if pd.isna(min_date):
+            continue
+        max_date = (
+            max_end
+            if pd.notna(max_end)
+            else pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
+        )
+        starts = group["start_dt"].to_numpy()
+        ends = group["end_dt"].to_numpy()
+        expected = FIXED_MEMBER_COUNTS.get(index_id)
+        for day in pd.date_range(min_date, max_date, freq="D"):
+            count = int(((starts <= day) & (
+                pd.isna(ends) | (day < ends)
+            )).sum())
+            status = "PASS" if expected is None or count == expected else "FAIL"
+            row = {
                 "index_id": index_id,
-                "stock_id": stock_id,
-                "old_start_date": "1900-01-01",
-                "new_start_date": new_start,
-                "history_rows": history_rows,
-                "source": source,
-                "status": "REPAIRED",
-            })
+                "date": day.strftime("%Y-%m-%d"),
+                "member_count": count,
+                "expected_count": expected if expected is not None else "",
+                "delta": count - expected if expected is not None else "",
+                "status": status,
+            }
+            rows.append(row)
+            if status == "FAIL":
+                mismatches.append(row)
 
-    audit = pd.DataFrame(audit_rows, columns=audit_columns)
-    return repaired, audit
+    daily = pd.DataFrame(rows, columns=[
+        "index_id", "date", "member_count",
+        "expected_count", "delta", "status",
+    ])
+    daily.to_csv(
+        audit_dir / "daily_member_counts.csv",
+        index=False, encoding="utf-8-sig",
+    )
+    pd.DataFrame(mismatches, columns=daily.columns).to_csv(
+        audit_dir / "daily_member_count_mismatches.csv",
+        index=False, encoding="utf-8-sig",
+    )
 
+    stats_rows = []
+    for index_id, group in daily.groupby("index_id"):
+        expected = FIXED_MEMBER_COUNTS.get(index_id)
+        stats_rows.append({
+            "index_id": index_id,
+            "expected_count": expected if expected is not None else "",
+            "min": int(group["member_count"].min()),
+            "median": float(group["member_count"].median()),
+            "max": int(group["member_count"].max()),
+            "checked_days": len(group),
+            "mismatch_days": int((group["status"] == "FAIL").sum()),
+            "count_type": "fixed" if expected is not None else "variable",
+        })
+    pd.DataFrame(stats_rows).to_csv(
+        audit_dir / "daily_member_count_stats.csv",
+        index=False, encoding="utf-8-sig",
+    )
+
+    fixed_present = sorted(set(FIXED_MEMBER_COUNTS) & set(daily["index_id"]))
+    variable_present = sorted(set(daily["index_id"]) - set(FIXED_MEMBER_COUNTS))
+    result = {
+        "status": "PASS" if not mismatches else "FAIL",
+        "checked_days": len(daily),
+        "mismatch_days": len(mismatches),
+        "mismatch_indexes": sorted({x["index_id"] for x in mismatches}),
+        "fixed_count_indexes": len(fixed_present),
+        "variable_count_indexes": len(variable_present),
+        "fixed_count_definitions": FIXED_MEMBER_COUNTS,
+        "files": [
+            str(audit_dir / "daily_member_counts.csv"),
+            str(audit_dir / "daily_member_count_mismatches.csv"),
+            str(audit_dir / "daily_member_count_stats.csv"),
+        ],
+    }
+    print(
+        "Daily member-count audit: "
+        f"{result['status']} (days={len(daily)}, "
+        f"mismatches={len(mismatches)}, "
+        f"fixed_indexes={len(fixed_present)}, "
+        f"variable_indexes={len(variable_present)})",
+        flush=True,
+    )
+    return result
 
 def make_session() -> requests.Session:
     session = requests.Session()
@@ -832,348 +789,6 @@ def boundary_audit(df: pd.DataFrame, raw_df: pd.DataFrame) -> dict:
     }
 
 
-def build_a_candidates() -> tuple[
-    dict[str, set[str]],
-    dict[str, set[str]],
-    list[dict],
-]:
-    session = make_session()
-    candidates: dict[str, set[str]] = {}
-    newest_candidates: dict[str, set[str]] = {}
-    errors: list[dict] = []
-
-    def fetch_component(index_id: str, kind: str, page: int) -> str:
-        path = (
-            "vII_HistoryComponent.php"
-            if kind == "history"
-            else "vII_NewestComponent.php"
-        )
-        query_id = SINA_COMPONENT_INDEX_IDS.get(index_id, index_id)
-        url = f"{BASE}/corp/view/{path}?page={page}&indexid={query_id}"
-        response = session.get(url, timeout=TIMEOUT)
-        response.raise_for_status()
-        response.encoding = "gb2312"
-        return response.text
-
-    def page_count(html: str) -> int:
-        pages = [int(x) for x in re.findall(r"[?&]page=(\d+)", html)]
-        return max(pages, default=1)
-
-    def parse_codes(html: str) -> set[str]:
-        soup = BeautifulSoup(html, "html.parser")
-        for table in soup.find_all("table"):
-            rows = table.find_all("tr")
-            for row in rows[:6]:
-                headers = [
-                    x.get_text(" ", strip=True)
-                    for x in row.find_all(["th", "td"])
-                ]
-                if "品种代码" not in headers:
-                    continue
-                pos = headers.index("品种代码")
-                codes = set()
-                row_idx = rows.index(row)
-                for data_row in rows[row_idx + 1:]:
-                    vals = [
-                        x.get_text(" ", strip=True)
-                        for x in data_row.find_all(["th", "td"])
-                    ]
-                    if len(vals) <= pos:
-                        continue
-                    code = normalize_code(vals[pos])
-                    if re.fullmatch(r"\d{6}", code):
-                        codes.add(code)
-                return codes
-        return set()
-
-    def parse_newest_rows(html: str) -> list[tuple[str, str]]:
-        """Return (stock_code, admission_date) rows from NewestComponent."""
-        soup = BeautifulSoup(html, "html.parser")
-        required = {"品种代码", "纳入日期"}
-        for table in soup.find_all("table"):
-            rows = table.find_all("tr")
-            for header_idx, row in enumerate(rows[:6]):
-                headers = [
-                    x.get_text(" ", strip=True)
-                    for x in row.find_all(["th", "td"])
-                ]
-                if not required.issubset(set(headers)):
-                    continue
-                pos = {name: i for i, name in enumerate(headers)}
-                result: list[tuple[str, str]] = []
-                for data_row in rows[header_idx + 1:]:
-                    vals = [
-                        x.get_text(" ", strip=True)
-                        for x in data_row.find_all(["th", "td"])
-                    ]
-                    if len(vals) < len(headers):
-                        continue
-                    code = normalize_code(vals[pos["品种代码"]])
-                    admission = vals[pos["纳入日期"]].strip()
-                    if (
-                        re.fullmatch(r"\d{6}", code)
-                        and re.fullmatch(r"\d{4}-\d{2}-\d{2}", admission)
-                    ):
-                        result.append((code, admission))
-                return result
-        return []
-
-    for index_id in TARGET_INDEXES:
-        codes: set[str] = set()
-        newest_rows: list[tuple[str, str]] = []
-        newest_current: set[str] = set()
-        for kind in ("history", "newest"):
-            try:
-                first = fetch_component(index_id, kind, 1)
-                pages = page_count(first)
-                for page in range(1, pages + 1):
-                    html = (
-                        first
-                        if page == 1
-                        else fetch_component(index_id, kind, page)
-                    )
-                    page_codes = parse_codes(html)
-                    codes.update(page_codes)
-                    if kind == "newest":
-                        newest_rows.extend(parse_newest_rows(html))
-                if kind == "newest":
-                    # NewestComponent lists the current constituents across
-                    # all pages; each row's date is that security's own
-                    # admission date, not a rebalance-batch marker.
-                    newest_current = {code for code, _ in newest_rows}
-                    print(
-                        f"A candidates {index_id} {kind}: pages={pages} "
-                        f"rows={len(newest_rows)} "
-                        f"current_stocks={len(newest_current)}",
-                        flush=True,
-                    )
-                else:
-                    print(
-                        f"A candidates {index_id} {kind}: pages={pages} "
-                        f"stocks={len(codes)}",
-                        flush=True,
-                    )
-            except Exception as exc:
-                errors.append(
-                    {"index_id": index_id, "kind": kind, "error": repr(exc)}
-                )
-        candidates[index_id] = codes
-        newest_candidates[index_id] = newest_current
-        print(
-            f"A candidates {index_id}: union={len(codes)}, "
-            f"current_newest={len(newest_current)}",
-            flush=True,
-        )
-
-    return candidates, newest_candidates, errors
-
-
-
-def audit_current_membership(
-    final_df: pd.DataFrame,
-    newest_candidates: dict[str, set[str]],
-    universe: pd.DataFrame,
-) -> dict:
-    """Reconcile current XiangGuan membership against Sina NewestComponent."""
-    cmap = universe.set_index("query_code")["stock_id"].to_dict()
-    universe_codes = set(universe["query_code"])
-
-    rows: list[dict] = []
-    missing_rows: list[dict] = []
-    extra_rows: list[dict] = []
-
-    for index_id in TARGET_INDEXES:
-        newest_all = newest_candidates.get(index_id, set())
-        newest_in_universe = {
-            cmap.get(code, code)
-            for code in newest_all
-            if code in universe_codes
-        }
-
-        b_current = set(
-            final_df.loc[
-                (final_df["index_id"] == index_id)
-                & (final_df["end_date"] == ""),
-                "stock_id",
-            ]
-        )
-
-        missing = sorted(newest_in_universe - b_current)
-        extra = sorted(b_current - newest_in_universe)
-
-        for stock_id in missing:
-            missing_rows.append({
-                "index_id": index_id,
-                "stock_id": stock_id,
-            })
-        for stock_id in extra:
-            extra_rows.append({
-                "index_id": index_id,
-                "stock_id": stock_id,
-            })
-
-        rows.append({
-            "index_id": index_id,
-            "newest_component_codes": len(newest_all),
-            "newest_in_universe": len(newest_in_universe),
-            "b_current_open_intervals": len(b_current),
-            "missing_from_xiangguan": len(missing),
-            "extra_in_xiangguan": len(extra),
-            "status": "INFO" if missing or extra else "PASS",
-        })
-
-    audit_df = pd.DataFrame(rows)
-    missing_df = pd.DataFrame(missing_rows, columns=["index_id", "stock_id"])
-    extra_df = pd.DataFrame(extra_rows, columns=["index_id", "stock_id"])
-
-    audit_df.to_csv(
-        OUT / "current_membership_audit.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-    missing_df.to_csv(
-        OUT / "current_membership_missing.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-    extra_df.to_csv(
-        OUT / "current_membership_extra.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-
-    failures = int((audit_df["status"] == "FAIL").sum()) if not audit_df.empty else 0
-    print(
-        f"Current membership audit (informational): indexes={len(audit_df)}, "
-        f"mismatched={len(audit_df) - failures}, "
-        f"missing={len(missing_df)}, extra={len(extra_df)}",
-        flush=True,
-    )
-
-    return {
-        "status": "INFO" if not audit_df.empty else "PASS",
-        "index_failures": failures,
-        "missing_total": len(missing_df),
-        "extra_total": len(extra_df),
-        "by_index": rows,
-    }
-
-
-def build_a_from_xiangguan(
-    candidates: dict[str, set[str]],
-    cmap: dict[str, str],
-) -> tuple[pd.DataFrame, list[dict]]:
-    wanted_by_code = {}
-    for index_id, codes in candidates.items():
-        for code in codes:
-            wanted_by_code.setdefault(code, set()).add(index_id)
-
-    all_codes = sorted(wanted_by_code)
-    rows: list[dict] = []
-    errors: list[dict] = []
-
-    def one(code: str):
-        parsed = load_parsed_cache(code)
-        if parsed is None:
-            session = make_session()
-            html, _ = fetch_html(session, code)
-            parsed_rows, status = parse_xiangguan(html, code)
-            save_parsed_cache(code, parsed_rows, status)
-        else:
-            parsed_rows, status = parsed
-        if status != "ok":
-            return code, [], {"code": code, "status": status}
-        stock_id = cmap.get(code, code)
-        wanted = wanted_by_code[code]
-        out = []
-        for row in parsed_rows:
-            if row["index_id"] in wanted:
-                out.append(
-                    {
-                        "index_id": row["index_id"],
-                        "stock_id": stock_id,
-                        "start_date": row["start_date"],
-                        "end_date": row["end_date"],
-                    }
-                )
-        return code, out, None
-
-    with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-        futures = {pool.submit(one, code): code for code in all_codes}
-        for n, future in enumerate(as_completed(futures), 1):
-            try:
-                code, out, error = future.result()
-                rows.extend(out)
-                if error:
-                    errors.append(error)
-            except Exception as exc:
-                errors.append(
-                    {
-                        "code": futures[future],
-                        "status": "http_error",
-                        "error": repr(exc),
-                    }
-                )
-            if n % 200 == 0 or n == len(all_codes):
-                print(
-                    f"A XiangGuan [{n}/{len(all_codes)}] "
-                    f"intervals={len(rows)} errors={len(errors)}",
-                    flush=True,
-                )
-
-    result = pd.DataFrame(rows)
-    if result.empty:
-        result = pd.DataFrame(
-            columns=["index_id", "stock_id", "start_date", "end_date"]
-        )
-    return normalize_intervals(result), errors
-
-
-def ab_diff(a_df: pd.DataFrame, b_df: pd.DataFrame) -> dict:
-    key = ["index_id", "stock_id", "start_date", "end_date"]
-    records = []
-    for index_id in TARGET_INDEXES:
-        a = a_df[a_df.index_id == index_id][key].drop_duplicates()
-        b = b_df[b_df.index_id == index_id][key].drop_duplicates()
-        merged = a.merge(b, on=key, how="outer", indicator=True)
-        a_only = merged[merged["_merge"] == "left_only"].drop(columns="_merge")
-        b_only = merged[merged["_merge"] == "right_only"].drop(columns="_merge")
-        records.append(
-            {
-                "index_id": index_id,
-                "a_intervals": len(a),
-                "b_intervals": len(b),
-                "a_only_intervals": len(a_only),
-                "b_only_intervals": len(b_only),
-                "a_stocks": a.stock_id.nunique(),
-                "b_stocks": b.stock_id.nunique(),
-            }
-        )
-        if not a_only.empty:
-            a_only.to_csv(
-                OUT / f"ab_a_minus_b_{index_id}.csv",
-                index=False,
-                encoding="utf-8-sig",
-            )
-        if not b_only.empty:
-            b_only.to_csv(
-                OUT / f"ab_b_minus_a_{index_id}.csv",
-                index=False,
-                encoding="utf-8-sig",
-            )
-
-    summary = pd.DataFrame(records)
-    summary.to_csv(
-        OUT / "ab_diff_summary.csv",
-        index=False,
-        encoding="utf-8-sig",
-    )
-    return {
-        "a_minus_b_intervals": int(summary.a_only_intervals.sum()),
-        "b_minus_a_intervals": int(summary.b_only_intervals.sum()),
-        "summary": records,
-    }
-
 
 def main() -> None:
     started = time.perf_counter()
@@ -1257,7 +872,6 @@ def main() -> None:
 
     repaired_input_df, placeholder_audit = repair_placeholder_starts(
         raw_df[["index_id", "stock_id", "start_date", "end_date"]].copy(),
-        universe,
     )
     placeholder_audit.to_csv(
         OUT / "placeholder_start_repairs.csv",
@@ -1286,20 +900,11 @@ def main() -> None:
     )
 
     validation_errors = validate_intervals(final_df)
-    missing_indexes = sorted(set(TARGET_INDEXES) - set(final_df.index_id.unique()))
+    missing_indexes = sorted(
+        set(TARGET_INDEXES) - set(final_df.index_id.unique())
+    )
     boundary = boundary_audit(final_df, raw_df)
-
-    print("\nA/B completeness audit...", flush=True)
-    a_candidates, newest_candidates, a_candidate_errors = build_a_candidates()
-    a_df, a_xiangguan_errors = build_a_from_xiangguan(a_candidates, cmap)
-    current_audit = audit_current_membership(
-        final_df, newest_candidates, universe
-    )
-    a_df.to_parquet(
-        OUT / "ab_a_index_membership_history.parquet",
-        index=False,
-    )
-    ab = ab_diff(a_df, final_df)
+    daily_count_audit = audit_daily_member_counts(final_df)
 
     # Preserve a compact PIT smoke test set already validated by the feasibility test.
     pit_tests = [
@@ -1365,12 +970,7 @@ def main() -> None:
         "validation_errors": validation_errors,
         "boundary_audit": boundary,
         "pit_failures": pit_failures,
-        "current_membership_audit": current_audit,
-        "ab": {
-            "candidate_errors": a_candidate_errors,
-            "xiangguan_errors": a_xiangguan_errors,
-            **ab,
-        },
+        "daily_member_count_audit": daily_count_audit,
     }
     (OUT / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
@@ -1409,16 +1009,9 @@ def main() -> None:
         f"{int((final_df['start_date'] == '1900-01-01').sum())}"
     )
     print(
-        f"A-B intervals:                {ab['a_minus_b_intervals']}"
-    )
-    print(
-        f"B-A intervals:                {ab['b_minus_a_intervals']}"
-    )
-    print(
-        "Current membership audit:       "
-        f"{current_audit['status']} "
-        f"(informational; missing={current_audit['missing_total']}, "
-        f"extra={current_audit['extra_total']})"
+        "Daily member-count audit:      "
+        f"{daily_count_audit['status']} "
+        f"(mismatches={daily_count_audit['mismatch_days']})"
     )
     print("============================================")
 
@@ -1429,8 +1022,7 @@ def main() -> None:
         or pit_failures
         or unresolved_placeholders
         or int((final_df["start_date"] == "1900-01-01").sum())
-        or a_candidate_errors
-        or a_xiangguan_errors
+        or daily_count_audit["status"] != "PASS"
         or boundary["status"] != "PASS"
     ):
         print("PRODUCTION INDEX MEMBERSHIP BUILD: FAIL")
