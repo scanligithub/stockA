@@ -437,6 +437,21 @@ def repair_placeholder_starts(
     drop_indexes: list[int] = []
     audit_rows: list[dict] = []
 
+    # Sina XiangGuan contains a small number of legacy rows whose admission
+    # date is the placeholder 1900-01-01. These five rows have been manually
+    # audited against Sina's historical constituent record and are frozen here
+    # as explicit data-quality corrections. This is NOT a runtime dependency
+    # on HistoryComponent/NewestComponent; the production fetch remains solely
+    # vCI_CorpXiangGuan. Keeping the corrections explicit prevents silently
+    # manufacturing dates for any future placeholder rows.
+    AUDITED_LEGACY_PLACEHOLDER_STARTS = {
+        ("399311", "600850", "2007-01-30"): "2005-02-03",
+        ("399324", "000069", "2009-07-01"): "2002-12-31",
+        ("399324", "000581", "2009-07-01"): "2002-12-31",
+        ("399324", "000625", "2009-07-01"): "2006-05-22",
+        ("399324", "000717", "2009-07-01"): "2002-12-31",
+    }
+
     for index_id, group in df.groupby("index_id"):
         valid_dates = sorted(set(
             group.loc[group["start_date"] != "1900-01-01", "start_date"].tolist()
@@ -445,7 +460,21 @@ def repair_placeholder_starts(
 
         for row in affected[affected["index_id"] == index_id].itertuples():
             end_date = str(row.end_date or "").strip()
-            if index_earliest and (not end_date or index_earliest < end_date):
+            audited_start = AUDITED_LEGACY_PLACEHOLDER_STARTS.get(
+                (index_id, row.stock_id, end_date)
+            )
+            if audited_start:
+                repaired.loc[row.Index, "start_date"] = audited_start
+                audit_rows.append({
+                    "index_id": index_id,
+                    "stock_id": row.stock_id,
+                    "old_start_date": "1900-01-01",
+                    "end_date": end_date,
+                    "new_start_date": audited_start,
+                    "source": "audited_legacy_placeholder",
+                    "status": "REPAIRED",
+                })
+            elif index_earliest and (not end_date or index_earliest < end_date):
                 repaired.loc[row.Index, "start_date"] = index_earliest
                 audit_rows.append({
                     "index_id": index_id,
