@@ -72,7 +72,13 @@ def extract_codes(raw: pd.DataFrame, index_id: str) -> tuple[set[str], str]:
     for i in range(min(len(raw), 20)):
         for j, value in enumerate(raw.iloc[i].tolist()):
             text = str(value).strip().lower()
-            if text in {"成分券代码", "证券代码", "股票代码", "样本代码", "代码"}:
+            text = re.sub(r"\\s+", "", text)
+            if (
+                "成份券代码" in text
+                or "成分券代码" in text
+                or "constituentcode" in text
+                or text in {"证券代码", "股票代码", "样本代码", "代码"}
+            ):
                 header_row, code_col = i, j
                 break
         if header_row is not None:
