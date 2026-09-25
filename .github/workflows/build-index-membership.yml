@@ -151,8 +151,9 @@ jobs:
           path: |
             data/cache/sina_xiangguan
             data/cache/sina_xiangguan_parsed
-          key: ${{ runner.os }}-sina-xiangguan-prod-v1-${{ steps.universe-key.outputs.hash }}-${{ github.run_id }}
+          key: ${{ runner.os }}-sina-xiangguan-prod-v2-${{ steps.universe-key.outputs.hash }}-${{ github.run_number }}
           restore-keys: |
+            ${{ runner.os }}-sina-xiangguan-prod-v2-
             ${{ runner.os }}-sina-xiangguan-prod-v1-
 
       - name: Report Sina cache status
@@ -167,7 +168,7 @@ jobs:
           SINA_WORKERS: "16"
           SINA_DELAY: "0.15"
           SINA_CACHE_TTL_SEC: "86400"
-          SINA_REFRESH_CURRENT: "1"
+          SINA_REFRESH_CURRENT: "0"
         run: python scripts/build_index_membership_history.py
 
       - name: Save updated Sina cache
@@ -177,7 +178,7 @@ jobs:
           path: |
             data/cache/sina_xiangguan
             data/cache/sina_xiangguan_parsed
-          key: ${{ runner.os }}-sina-xiangguan-prod-v1-${{ steps.universe-key.outputs.hash }}-${{ github.run_id }}
+          key: ${{ runner.os }}-sina-xiangguan-prod-v2-${{ steps.universe-key.outputs.hash }}-${{ github.run_number }}
 
       - name: Verify production result
         if: always()
