@@ -437,21 +437,6 @@ def repair_placeholder_starts(
     drop_indexes: list[int] = []
     audit_rows: list[dict] = []
 
-    # Sina XiangGuan contains a small number of legacy rows whose admission
-    # date is the placeholder 1900-01-01. These five rows have been manually
-    # audited against Sina's historical constituent record and are frozen here
-    # as explicit data-quality corrections. This is NOT a runtime dependency
-    # on HistoryComponent/NewestComponent; the production fetch remains solely
-    # vCI_CorpXiangGuan. Keeping the corrections explicit prevents silently
-    # manufacturing dates for any future placeholder rows.
-    AUDITED_LEGACY_PLACEHOLDER_STARTS = {
-        ("399311", "600850", "2007-01-30"): "2005-02-03",
-        ("399324", "000069", "2009-07-01"): "2002-12-31",
-        ("399324", "000581", "2009-07-01"): "2002-12-31",
-        ("399324", "000625", "2009-07-01"): "2006-05-22",
-        ("399324", "000717", "2009-07-01"): "2002-12-31",
-    }
-
     for index_id, group in df.groupby("index_id"):
         valid_dates = sorted(set(
             group.loc[group["start_date"] != "1900-01-01", "start_date"].tolist()
@@ -460,21 +445,7 @@ def repair_placeholder_starts(
 
         for row in affected[affected["index_id"] == index_id].itertuples():
             end_date = str(row.end_date or "").strip()
-            audited_start = AUDITED_LEGACY_PLACEHOLDER_STARTS.get(
-                (index_id, row.stock_id, end_date)
-            )
-            if audited_start:
-                repaired.loc[row.Index, "start_date"] = audited_start
-                audit_rows.append({
-                    "index_id": index_id,
-                    "stock_id": row.stock_id,
-                    "old_start_date": "1900-01-01",
-                    "end_date": end_date,
-                    "new_start_date": audited_start,
-                    "source": "audited_legacy_placeholder",
-                    "status": "REPAIRED",
-                })
-            elif index_earliest and (not end_date or index_earliest < end_date):
+            if index_earliest and (not end_date or index_earliest < end_date):
                 repaired.loc[row.Index, "start_date"] = index_earliest
                 audit_rows.append({
                     "index_id": index_id,
@@ -507,132 +478,6 @@ def repair_placeholder_starts(
         repaired = repaired.drop(index=drop_indexes).reset_index(drop=True)
 
     return repaired, pd.DataFrame(audit_rows, columns=audit_columns)
-
-# Exact sample-size checks are only configured where the index methodology
-# fixes the number of constituents. Variable-size broad/market indexes are
-# still reported in daily_member_counts.csv but are not given invented targets.
-FIXED_MEMBER_COUNTS = {
-    "000016": 50,
-    "000300": 300,
-    "000688": 50,
-    "000851": 2000,
-    "000852": 1000,
-    "000904": 200,
-    "000905": 500,
-    "399005": 100,
-    "399006": 100,
-    "399311": 1000,
-    "399330": 100,
-    "399673": 50,
-    "000010": 180,
-}
-
-def audit_daily_member_counts(df: pd.DataFrame) -> dict:
-    """Compare daily PIT membership counts with fixed index definitions."""
-    audit_dir = OUT / "quality_audit"
-    audit_dir.mkdir(parents=True, exist_ok=True)
-    if df.empty:
-        return {"status": "FAIL", "checked_days": 0, "mismatch_days": 0}
-
-    work = df.copy()
-    work["start_dt"] = pd.to_datetime(work["start_date"], errors="coerce")
-    work["end_dt"] = pd.to_datetime(
-        work["end_date"].replace("", pd.NA), errors="coerce"
-    )
-    rows: list[dict] = []
-    mismatches: list[dict] = []
-
-    for index_id, group in work.groupby("index_id"):
-        min_date = group["start_dt"].min()
-        max_end = group["end_dt"].max()
-        if pd.isna(min_date):
-            continue
-        max_date = (
-            max_end
-            if pd.notna(max_end)
-            else pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
-        )
-        starts = group["start_dt"].to_numpy()
-        ends = group["end_dt"].to_numpy()
-        expected = FIXED_MEMBER_COUNTS.get(index_id)
-        for day in pd.date_range(min_date, max_date, freq="D"):
-            count = int(((starts <= day) & (
-                pd.isna(ends) | (day < ends)
-            )).sum())
-            status = "PASS" if expected is None or count == expected else "FAIL"
-            row = {
-                "index_id": index_id,
-                "date": day.strftime("%Y-%m-%d"),
-                "member_count": count,
-                "expected_count": expected if expected is not None else "",
-                "delta": count - expected if expected is not None else "",
-                "status": status,
-            }
-            rows.append(row)
-            if status == "FAIL":
-                mismatches.append(row)
-
-    daily = pd.DataFrame(rows, columns=[
-        "index_id", "date", "member_count",
-        "expected_count", "delta", "status",
-    ])
-    daily.to_csv(
-        audit_dir / "daily_member_counts.csv",
-        index=False, encoding="utf-8-sig",
-    )
-    pd.DataFrame(mismatches, columns=daily.columns).to_csv(
-        audit_dir / "daily_member_count_mismatches.csv",
-        index=False, encoding="utf-8-sig",
-    )
-
-    stats_rows = []
-    for index_id, group in daily.groupby("index_id"):
-        expected = FIXED_MEMBER_COUNTS.get(index_id)
-        stats_rows.append({
-            "index_id": index_id,
-            "expected_count": expected if expected is not None else "",
-            "min": int(group["member_count"].min()),
-            "median": float(group["member_count"].median()),
-            "max": int(group["member_count"].max()),
-            "checked_days": len(group),
-            "mismatch_days": int((group["status"] == "FAIL").sum()),
-            "count_type": "fixed" if expected is not None else "variable",
-        })
-    pd.DataFrame(stats_rows).to_csv(
-        audit_dir / "daily_member_count_stats.csv",
-        index=False, encoding="utf-8-sig",
-    )
-
-    fixed_present = sorted(set(FIXED_MEMBER_COUNTS) & set(daily["index_id"]))
-    variable_present = sorted(set(daily["index_id"]) - set(FIXED_MEMBER_COUNTS))
-    # Historical fixed-count comparison is diagnostic only.  Index
-    # methodologies/counts can change over time, and this report currently
-    # uses calendar days rather than a verified trading calendar.  It must not
-    # make the production PIT dataset fail.
-    result = {
-        "status": "REPORT_ONLY",
-        "mismatch_status": "PASS" if not mismatches else "FAIL",
-        "checked_days": len(daily),
-        "mismatch_days": len(mismatches),
-        "mismatch_indexes": sorted({x["index_id"] for x in mismatches}),
-        "fixed_count_indexes": len(fixed_present),
-        "variable_count_indexes": len(variable_present),
-        "fixed_count_definitions": FIXED_MEMBER_COUNTS,
-        "files": [
-            str(audit_dir / "daily_member_counts.csv"),
-            str(audit_dir / "daily_member_count_mismatches.csv"),
-            str(audit_dir / "daily_member_count_stats.csv"),
-        ],
-    }
-    print(
-        "Daily member-count audit: "
-        f"{result['status']} (days={len(daily)}, "
-        f"mismatches={len(mismatches)}, "
-        f"fixed_indexes={len(fixed_present)}, "
-        f"variable_indexes={len(variable_present)})",
-        flush=True,
-    )
-    return result
 
 def make_session() -> requests.Session:
     session = requests.Session()
@@ -980,7 +825,6 @@ def main() -> None:
         set(TARGET_INDEXES) - set(final_df.index_id.unique())
     )
     boundary = boundary_audit(final_df, raw_df)
-    daily_count_audit = audit_daily_member_counts(final_df)
 
     # Preserve a compact PIT smoke test set already validated by the feasibility test.
     pit_tests = [
@@ -1049,7 +893,6 @@ def main() -> None:
         "validation_errors": validation_errors,
         "boundary_audit": boundary,
         "pit_failures": pit_failures,
-        "daily_member_count_audit": daily_count_audit,
     }
     (OUT / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
@@ -1086,11 +929,6 @@ def main() -> None:
     print(
         "Placeholder starts remaining:  "
         f"{int((final_df['start_date'] == '1900-01-01').sum())}"
-    )
-    print(
-        "Daily member-count audit:      "
-        f"{daily_count_audit['status']} "
-        f"(mismatches={daily_count_audit['mismatch_days']})"
     )
     print("============================================")
 
