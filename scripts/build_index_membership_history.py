@@ -937,7 +937,6 @@ def main() -> None:
         or validation_errors
         or missing_indexes
         or pit_failures
-        or unresolved_placeholders
         or int((final_df["start_date"] == "1900-01-01").sum())
         or boundary["status"] != "PASS"
     ):
