@@ -46,7 +46,7 @@ WORKERS = int(os.getenv("SINA_WORKERS", "16"))
 DELAY = float(os.getenv("SINA_DELAY", "0.15"))
 TIMEOUT = 20
 RETRIES = 4
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 CACHE_TTL_SEC = int(os.getenv("SINA_CACHE_TTL_SEC", "86400"))
 REFRESH_CURRENT = os.getenv("SINA_REFRESH_CURRENT", "1") != "0"
 
@@ -621,6 +621,17 @@ def worker(code: str, *, force_network: bool = False):
         cached = load_parsed_cache(code)
         if cached is not None:
             rows, status = cached
+            # Parsed caches can outlive TARGET_INDEXES changes. Re-apply the
+            # current target filter on every cache read so stale entries can
+            # never re-enter production output.
+            if rows:
+                rows = [
+                    row for row in rows
+                    if INDEX_ALIASES.get(
+                        str(row.get("index_id", "")).strip(),
+                        str(row.get("index_id", "")).strip(),
+                    ) in TARGET_INDEXES
+                ]
             return code, rows, status, "parsed_cache", ""
 
     session = make_session()
