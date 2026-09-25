@@ -202,14 +202,13 @@ jobs:
           assert summary.get("placeholder_start_unresolved", 0) == 0
           assert summary.get("placeholder_start_remaining", 0) == 0
 
-          current_audit = summary.get("current_membership_audit", {})
+          daily_audit = summary.get("daily_member_count_audit", {})
           print(
-              "current membership audit:",
-              json.dumps(current_audit, ensure_ascii=False, indent=2),
+              "daily member-count audit:",
+              json.dumps(daily_audit, ensure_ascii=False, indent=2),
           )
-          print(
-              "Current membership reconciliation is an informational "
-              "cross-check; XiangGuan remains the production interval source."
+          assert daily_audit.get("status") == "PASS", (
+              "daily member-count audit failed"
           )
 
           print(
