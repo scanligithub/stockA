@@ -414,13 +414,17 @@ def repair_placeholder_starts(
 
     Production history is sourced exclusively from stock-level
     vCI_CorpXiangGuan. No HistoryComponent/NewestComponent data is used.
-    An index-level earliest XiangGuan date is used only as an explicit,
-    auditable fallback; otherwise the placeholder remains unresolved and
-    production fails.
+
+    The index-level earliest XiangGuan date is only a conservative fallback.
+    It is accepted only when it is strictly earlier than the affected record's
+    exit date. If the fallback would create a zero/negative-length interval,
+    the source row is excluded from production and recorded as UNRESOLVED.
+    We must not manufacture a membership interval from an unknown admission
+    date.
     """
     audit_columns = [
         "index_id", "stock_id", "old_start_date",
-        "new_start_date", "source", "status",
+        "end_date", "new_start_date", "source", "status",
     ]
     if df.empty:
         return df, pd.DataFrame(columns=audit_columns)
@@ -430,35 +434,49 @@ def repair_placeholder_starts(
         return df, pd.DataFrame(columns=audit_columns)
 
     repaired = df.copy()
+    drop_indexes: list[int] = []
     audit_rows: list[dict] = []
+
     for index_id, group in df.groupby("index_id"):
         valid_dates = sorted(set(
             group.loc[group["start_date"] != "1900-01-01", "start_date"].tolist()
         ))
         index_earliest = valid_dates[0] if valid_dates else ""
-        for row in affected[affected["index_id"] == index_id].itertuples(index=False):
-            if index_earliest:
-                mask = (
-                    (repaired["index_id"] == index_id)
-                    & (repaired["stock_id"] == row.stock_id)
-                    & (repaired["start_date"] == "1900-01-01")
-                )
-                repaired.loc[mask, "start_date"] = index_earliest
+
+        for row in affected[affected["index_id"] == index_id].itertuples():
+            end_date = str(row.end_date or "").strip()
+            if index_earliest and (not end_date or index_earliest < end_date):
+                repaired.loc[row.Index, "start_date"] = index_earliest
                 audit_rows.append({
-                    "index_id": index_id, "stock_id": row.stock_id,
+                    "index_id": index_id,
+                    "stock_id": row.stock_id,
                     "old_start_date": "1900-01-01",
+                    "end_date": end_date,
                     "new_start_date": index_earliest,
                     "source": "xiangguan_index_earliest",
                     "status": "REPAIRED",
                 })
             else:
+                # The admission date is unknown. Never turn it into a
+                # zero-length interval or invent a date at/after the known exit.
+                drop_indexes.append(row.Index)
                 audit_rows.append({
-                    "index_id": index_id, "stock_id": row.stock_id,
+                    "index_id": index_id,
+                    "stock_id": row.stock_id,
                     "old_start_date": "1900-01-01",
+                    "end_date": end_date,
                     "new_start_date": "",
-                    "source": "xiangguan_unavailable",
+                    "source": (
+                        "xiangguan_index_earliest_not_before_exit"
+                        if index_earliest
+                        else "xiangguan_unavailable"
+                    ),
                     "status": "UNRESOLVED",
                 })
+
+    if drop_indexes:
+        repaired = repaired.drop(index=drop_indexes).reset_index(drop=True)
+
     return repaired, pd.DataFrame(audit_rows, columns=audit_columns)
 
 # Exact sample-size checks are only configured where the index methodology
@@ -888,6 +906,14 @@ def main() -> None:
         index=False,
         encoding="utf-8-sig",
     )
+    unresolved_placeholder_audit = placeholder_audit[
+        placeholder_audit["status"] == "UNRESOLVED"
+    ].copy()
+    unresolved_placeholder_audit.to_csv(
+        OUT / "placeholder_start_unresolved.csv",
+        index=False,
+        encoding="utf-8-sig",
+    )
     unresolved_placeholders = int(
         (placeholder_audit["status"] != "REPAIRED").sum()
     ) if not placeholder_audit.empty else 0
@@ -973,6 +999,9 @@ def main() -> None:
             if not placeholder_audit.empty else {}
         ),
         "placeholder_start_unresolved": unresolved_placeholders,
+        "placeholder_start_unresolved_file": str(
+            OUT / "placeholder_start_unresolved.csv"
+        ),
         "placeholder_start_remaining": int(
             (final_df["start_date"] == "1900-01-01").sum()
         ),
