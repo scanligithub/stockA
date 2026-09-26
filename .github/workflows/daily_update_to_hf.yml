@@ -43,10 +43,11 @@ jobs:
       - name: Install Python GBBQ Decryptor Deps
         run: pip install pytdx pandas
 
-      - name: Run Python GBBQ Decoder (1 second)
+      - name: Run Python GBBQ Decoder
         run: |
           python scripts/parse_gbbq.py gbbq.dat gbbq_clean.csv
-          ls -lh gbbq_clean.csv
+          python scripts/normalize_gbbq_corporate_actions.py gbbq_clean.csv corporate_actions.parquet
+          ls -lh gbbq_clean.csv corporate_actions.parquet
 
       - name: Initialize Go Module
         run: |
@@ -68,6 +69,7 @@ jobs:
           path: |
             stock_list_master.json
             gbbq_clean.csv
+            corporate_actions.parquet
           retention-days: 1
 
   fetch-daily-data:
@@ -316,6 +318,33 @@ jobs:
           HF_REPO: ${{ secrets.HF_REPO }}
         run: |
           python scripts/merge_and_push.py --mode hf --year 0
+
+      - name: Validate & Upload Corporate Actions to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: ${{ secrets.HF_REPO }}
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          p = "corporate_actions.parquet"
+          df = pd.read_parquet(p)
+          expected = [
+              "date", "code", "action_type", "cash_dividend_per_share",
+              "split_ratio", "rights_price", "rights_ratio"
+          ]
+          assert list(df.columns) == expected, list(df.columns)
+          assert not df.duplicated().any(), "duplicate corporate actions"
+          assert len(df) > 0, "corporate action dataset is empty"
+          assert df["code"].str.contains(r"^(sh|sz|bj)\\.").all()
+          print(f"Corporate actions validation PASS: {len(df):,} rows")
+          PY
+          python - <<'PY'
+          import os
+          from utils.hf_manager import HFManager
+          hf = HFManager(os.environ["HF_TOKEN"], os.environ["HF_REPO"])
+          hf.upload_file("corporate_actions.parquet", "corporate_actions/corporate_actions.parquet")
+          print("Uploaded corporate actions to HF.")
+          PY
 
       - name: Upload Index Membership History to Hugging Face
         env:
