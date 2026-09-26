@@ -41,10 +41,11 @@ jobs:
       - name: Install Python GBBQ Decryptor Deps
         run: pip install pytdx pandas
 
-      - name: Run Python GBBQ Decoder (1 second)
+      - name: Run Python GBBQ Decoder
         run: |
           python scripts/parse_gbbq.py gbbq.dat gbbq_clean.csv
-          ls -lh gbbq_clean.csv
+          python scripts/normalize_gbbq_corporate_actions.py gbbq_clean.csv corporate_actions.parquet
+          ls -lh gbbq_clean.csv corporate_actions.parquet
 
       - name: Initialize Go Module
         run: |
@@ -66,6 +67,7 @@ jobs:
           path: |
             stock_list_master.json
             gbbq_clean.csv
+            corporate_actions.parquet
           retention-days: 1
 
   fetch-full-history:
@@ -318,6 +320,32 @@ jobs:
           cp output/index_membership/index_membership_history.parquet output/index_membership_history.parquet
           echo "Index membership history ready for release:"
           ls -lh output/index_membership_history.parquet
+
+      - name: Validate Corporate Actions
+        run: |
+          python - <<'PY'
+          import pandas as pd
+          p = "corporate_actions.parquet"
+          df = pd.read_parquet(p)
+          expected = [
+              "date", "code", "action_type", "cash_dividend_per_share",
+              "split_ratio", "rights_price", "rights_ratio"
+          ]
+          assert list(df.columns) == expected, list(df.columns)
+          assert not df.duplicated().any(), "duplicate corporate actions"
+          assert len(df) > 0, "corporate action dataset is empty"
+          assert df["date"].notna().all()
+          assert df["code"].str.contains(r"^(sh|sz|bj)\\.").all()
+          print(f"Corporate actions validation PASS: {len(df):,} rows, {df['code'].nunique():,} stocks")
+          print(df["action_type"].value_counts().to_string())
+          PY
+
+      - name: Upload Corporate Actions to Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" --clobber || true
+          gh release upload archive corporate_actions.parquet --clobber
 
       - name: Upload to Release
         env:
