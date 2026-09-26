@@ -100,7 +100,7 @@ def main() -> None:
         "split_ratio", "rights_price", "rights_ratio"
     ])
     if not out.empty:
-        out = out.sort_values(["code", "date", "action_type"]).drop_duplicates().reset_index(drop=True)
+        # 同一除权除息日必须按会计语义处理：现金分红先于送转，\n        # 否则会用送转后的股数重复计算分红现金。\n        action_order = {"cash_dividend": 0, "bonus_shares": 1, "rights_issue": 2}\n        out["_action_order"] = out["action_type"].map(action_order).fillna(99)\n        out = (out.sort_values(["code", "date", "_action_order"])\n                 .drop(columns="_action_order")\n                 .drop_duplicates()\n                 .reset_index(drop=True))
     out.to_parquet(args.output, index=False)
     print(f"GBBQ category=1 rows: {len(df):,}; normalized rows: {len(out):,}")
     print(f"Output: {args.output}")
