@@ -335,7 +335,7 @@ jobs:
           assert list(df.columns) == expected, list(df.columns)
           assert not df.duplicated().any(), "duplicate corporate actions"
           assert len(df) > 0, "corporate action dataset is empty"
-          assert df["code"].str.contains(r"^(sh|sz|bj)\\.").all()
+          assert df["code"].astype(str).str.match(r"^(sh|sz|bj)\\.").all(), "invalid code prefix"
           print(f"Corporate actions validation PASS: {len(df):,} rows")
           PY
           python - <<'PY'
