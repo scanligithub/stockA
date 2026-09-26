@@ -11,14 +11,16 @@ import argparse
 import pandas as pd
 
 ALIASES = {
+    "market": ["market", "exchange"],
     "code": ["code"],
     "date": ["date", "datetime", "time"],
     "category": ["category", "type"],
-    "fenhong": ["fenhong", "fen_hong"],
+    "fenhong": ["fenhong", "fen_hong", "hongli"],
     "peigujia": ["peigujia", "peigu_jia"],
     "songzhuangu": ["songzhuangu", "songgu", "zhuangu"],
     "peigu": ["peigu"],
 }
+
 
 def pick(df: pd.DataFrame, name: str, required: bool = True) -> str | None:
     for col in ALIASES[name]:
@@ -28,17 +30,40 @@ def pick(df: pd.DataFrame, name: str, required: bool = True) -> str | None:
         raise ValueError(f"Missing required GBBQ column {name}; got {list(df.columns)}")
     return None
 
-def market_code(code: str) -> str:
+
+def market_code(code: str, market: object = None) -> str:
+    """Normalize TDX code to sh./sz./bj. using the decoded market when present."""
     code = str(code).strip().lower()
     if "." in code:
         return code
+
+    # parse_gbbq.py writes numeric codes such as 1 for 000001. Restore
+    # the six-digit security code before determining the exchange.
+    code = code.zfill(6)
+
+    # TDX market convention: 0=Shenzhen, 1=Shanghai. For market=0,
+    # distinguish Beijing Stock Exchange codes by their code prefix.
+    try:
+        market_int = int(float(market)) if market is not None else None
+    except (TypeError, ValueError):
+        market_int = None
+
+    if market_int == 1:
+        return f"sh.{code}"
+    if market_int == 0:
+        if code.startswith(("4", "8", "92")):
+            return f"bj.{code}"
+        return f"sz.{code}"
+
+    # Fallback for older/manual inputs that do not contain market.
     if code.startswith("6"):
         return f"sh.{code}"
-    if code.startswith(("0", "3")):
-        return f"sz.{code}"
-    if code.startswith(("4", "8")):
+    if code.startswith(("4", "8", "92")):
         return f"bj.{code}"
+    if code.startswith(("0", "2", "3")):
+        return f"sz.{code}"
     raise ValueError(f"Cannot infer exchange for stock code: {code}")
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -46,7 +71,9 @@ def main() -> None:
     ap.add_argument("output")
     args = ap.parse_args()
 
-    df = pd.read_csv(args.input)
+    # dtype=str is intentional: otherwise pandas turns 000001 into 1.
+    df = pd.read_csv(args.input, dtype={"code": str})
+    market_col = pick(df, "market", False)
     code_col = pick(df, "code")
     date_col = pick(df, "date")
     category_col = pick(df, "category")
@@ -62,7 +89,8 @@ def main() -> None:
 
     records = []
     for _, row in df.iterrows():
-        code = market_code(row[code_col])
+        market = row[market_col] if market_col else None
+        code = market_code(row[code_col], market)
         date = row[date_col]
         cash10 = float(row[fenhong_col]) if fenhong_col else 0.0
         rights_price = float(row[peigujia_col]) if peigujia_col else 0.0
@@ -112,6 +140,7 @@ def main() -> None:
     out.to_parquet(args.output, index=False)
     print(f"GBBQ category=1 rows: {len(df):,}; normalized rows: {len(out):,}")
     print(f"Output: {args.output}")
+
 
 if __name__ == "__main__":
     main()
