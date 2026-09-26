@@ -7,8 +7,8 @@ to per-share semantics.
 from __future__ import annotations
 
 import argparse
-import pandas as pd
 
+import pandas as pd
 
 ALIASES = {
     "code": ["code"],
@@ -20,7 +20,6 @@ ALIASES = {
     "peigu": ["peigu"],
 }
 
-
 def pick(df: pd.DataFrame, name: str, required: bool = True) -> str | None:
     for col in ALIASES[name]:
         if col in df.columns:
@@ -28,7 +27,6 @@ def pick(df: pd.DataFrame, name: str, required: bool = True) -> str | None:
     if required:
         raise ValueError(f"Missing required GBBQ column {name}; got {list(df.columns)}")
     return None
-
 
 def market_code(code: str) -> str:
     code = str(code).strip().lower()
@@ -41,7 +39,6 @@ def market_code(code: str) -> str:
     if code.startswith(("4", "8")):
         return f"bj.{code}"
     raise ValueError(f"Cannot infer exchange for stock code: {code}")
-
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -95,16 +92,26 @@ def main() -> None:
                 "rights_price": rights_price, "rights_ratio": rights10 / 10.0,
             })
 
-    out = pd.DataFrame(records, columns=[
+    columns = [
         "date", "code", "action_type", "cash_dividend_per_share",
-        "split_ratio", "rights_price", "rights_ratio"
-    ])
+        "split_ratio", "rights_price", "rights_ratio",
+    ]
+    out = pd.DataFrame(records, columns=columns)
+
     if not out.empty:
-        # 同一除权除息日必须按会计语义处理：现金分红先于送转，\n        # 否则会用送转后的股数重复计算分红现金。\n        action_order = {"cash_dividend": 0, "bonus_shares": 1, "rights_issue": 2}\n        out["_action_order"] = out["action_type"].map(action_order).fillna(99)\n        out = (out.sort_values(["code", "date", "_action_order"])\n                 .drop(columns="_action_order")\n                 .drop_duplicates()\n                 .reset_index(drop=True))
+        # Same ex-date accounting order: cash dividend, bonus shares, rights issue.
+        action_order = {"cash_dividend": 0, "bonus_shares": 1, "rights_issue": 2}
+        out["_action_order"] = out["action_type"].map(action_order).fillna(99)
+        out = (
+            out.sort_values(["code", "date", "_action_order"])
+            .drop(columns="_action_order")
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+
     out.to_parquet(args.output, index=False)
     print(f"GBBQ category=1 rows: {len(df):,}; normalized rows: {len(out):,}")
     print(f"Output: {args.output}")
-
 
 if __name__ == "__main__":
     main()
