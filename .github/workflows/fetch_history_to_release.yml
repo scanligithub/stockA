@@ -1,4 +1,5 @@
 # FILE: .github/workflows/fetch_history_to_release.yml
+
 name: Fetch Full History to Release
 
 on:
@@ -272,7 +273,7 @@ jobs:
             exit 1
           fi
 
-          ARTIFACT_NAME="index-membership-history-${RUN_ID}"
+          ARTIFACT_NAME="index-membership-history-$RUN_ID"
           echo "Using successful membership build run: $RUN_ID"
           echo "Artifact: $ARTIFACT_NAME"
 
@@ -343,14 +344,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" --clobber || true
+          gh release view archive >/dev/null 2>&1 || \
+            gh release create archive \
+              --title "Historical Archive" \
+              --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter"
           gh release upload archive corporate_actions.parquet --clobber
 
       - name: Upload to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create archive --title "Historical Archive" --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter" --clobber || true
+          gh release view archive >/dev/null 2>&1 || \
+            gh release create archive \
+              --title "Historical Archive" \
+              --notes "Full A-Share history (2005-Present) powered by TDX Engine & EastMoney F10 Datacenter"
           gh release upload archive output/*.parquet --clobber
           gh release upload archive output/metadata/* --clobber
 
