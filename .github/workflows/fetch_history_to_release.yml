@@ -210,7 +210,7 @@ jobs:
           mkdir -p output/metadata
           cp all_artifacts/metadata/* output/metadata/ 2>/dev/null || true
 
-      - name: 🌐 Download All Stocks 37-Column F10 Financial Data
+      - name: 🌐 Sync All Stocks 37-Column F10 Financial Data
         run: |
           python scripts/fetch_f10_all.py
           ls -lh output/all_stocks_f10_raw.parquet
@@ -335,9 +335,8 @@ jobs:
           assert not df.duplicated().any(), "duplicate corporate actions"
           assert len(df) > 0, "corporate action dataset is empty"
           assert df["date"].notna().all()
-          assert df["code"].str.contains(r"^(sh|sz|bj)\\.").all()
-          print(f"Corporate actions validation PASS: {len(df):,} rows, {df['code'].nunique():,} stocks")
-          print(df["action_type"].value_counts().to_string())
+          assert df["code"].astype(str).str.startswith(("sh.", "sz.", "bj.")).all(), "invalid code prefix"
+          print(f"Corporate actions validation PASS: {len(df):,} rows")
           PY
 
       - name: Upload Corporate Actions to Release
