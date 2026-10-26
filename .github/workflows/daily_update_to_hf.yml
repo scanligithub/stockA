@@ -219,8 +219,17 @@ jobs:
 
       - name: ❄️ Fetch All Stocks Full Historical Main Operating Business Detail
         run: |
-          python scripts/fetch_f10_mainbus.py
-          ls -lh output/all_stocks_mainbus_raw.parquet
+          # 主营业务明细是可选增量成果；失败只记录 warning，不阻断后续数据任务。
+          if python scripts/fetch_f10_mainbus.py; then
+            if [ -f output/all_stocks_mainbus_raw.parquet ]; then
+              ls -lh output/all_stocks_mainbus_raw.parquet || echo "::warning::fetch_f10_mainbus.py succeeded, but listing its output failed."
+            else
+              echo "::warning::fetch_f10_mainbus.py finished without creating output/all_stocks_mainbus_raw.parquet; continuing workflow."
+            fi
+          else
+            status=$?
+            echo "::warning::fetch_f10_mainbus.py failed with exit code ${status}; continuing workflow."
+          fi
 
       - name: Save XQ Token Cache
         if: always()
