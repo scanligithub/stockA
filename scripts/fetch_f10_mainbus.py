@@ -29,7 +29,7 @@ def load_cached_token():
             data = json.load(f)
         token = data.get("xq_a_token")
         if token:
-            print(f"📦 从缓存读取 Token: {token[:16]}...")
+            print("📦 已读取缓存 Token（内容已隐藏）")
         return token
     except Exception:
         return None
@@ -43,53 +43,83 @@ def save_token_to_cache(token):
     print(f"💾 Token 已保存到缓存: {CACHE_TOKEN_PATH}")
 
 
-def _fetch_token_once(user_agent):
-    """单次 Playwright 获取 token"""
+def _fetch_token_once(user_agent, entry_url):
+    """从指定雪球页面入口获取匿名 xq_a_token。"""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("⚠️ playwright 未安装")
         return None
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent=user_agent)
-        page = context.new_page()
-        try:
-            page.goto("https://xueqiu.com", wait_until="networkidle", timeout=20000)
-            cookies = context.cookies()
-            return next((c["value"] for c in cookies if c["name"] == "xq_a_token"), None)
-        except Exception as e:
-            print(f"   ❌ 错误: {e}")
-            return None
-        finally:
+    browser = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(user_agent=user_agent)
+            page = context.new_page()
+            try:
+                response = page.goto(
+                    entry_url,
+                    wait_until="domcontentloaded",
+                    timeout=20000,
+                )
+                # 部分页面在初始 HTML 返回后才设置 Cookie。
+                page.wait_for_timeout(1500)
+                cookies = context.cookies()
+                token = next(
+                    (cookie["value"] for cookie in cookies
+                     if cookie["name"] == "xq_a_token"),
+                    None,
+                )
+                status = response.status if response is not None else "unknown"
+                if token:
+                    return token
+                print(f"   ⚠️ 此入口未取得 xq_a_token（HTTP {status}）")
+                return None
+            except Exception as e:
+                print(f"   ❌ 此入口访问失败：{type(e).__name__}: {e}")
+                return None
+    except Exception as e:
+        print(f"   ❌ Playwright 启动或执行失败：{type(e).__name__}: {e}")
+        return None
+    finally:
+        if browser is not None:
             browser.close()
 
 
-def get_anonymous_token(max_retries=3):
-    """Playwright 获取 token，带重试和随机 User-Agent"""
+def get_anonymous_token():
+    """依次尝试不同页面入口；每个入口独立打开并验证 Token。"""
     try:
-        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import sync_playwright  # noqa: F401
     except ImportError:
         print("⚠️ playwright 未安装，跳过自动获取 Token")
         return None
 
+    # 不在同一个入口上重复重试；按不同页面路径逐一尝试。
+    entry_points = [
+        ("行情中心", "https://xueqiu.com/hq"),
+        ("关于页面", "https://xueqiu.com/about"),
+        ("首页兼容入口", "https://xueqiu.com/"),
+    ]
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
     ]
 
-    for attempt in range(max_retries):
-        ua = user_agents[attempt % len(user_agents)]
-        print(f"🌐 Playwright 尝试 {attempt+1}/{max_retries}...")
-        token = _fetch_token_once(ua)
-        if token:
-            print(f"✅ 浏览器获取 Token 成功: {token[:16]}...")
-            return token
-        if attempt < max_retries - 1:
-            time.sleep(2)
+    for index, (label, entry_url) in enumerate(entry_points):
+        print(f"🌐 尝试入口 {index + 1}/{len(entry_points)}：{label}（{entry_url}）")
+        token = _fetch_token_once(user_agents[index % len(user_agents)], entry_url)
+        if not token:
+            continue
 
+        if validate_token_value(token):
+            print(f"✅ 入口“{label}”获取 Token 且财务接口预检通过")
+            return token
+
+        print(f"   ⚠️ 入口“{label}”取得 Cookie，但 business.json 预检未通过；继续尝试其他入口")
+
+    print("⚠️ 所有匿名页面入口均未取得可用 Token")
     return None
 
 
@@ -102,6 +132,14 @@ def validate_token(session):
         return data.get("error_code") == 0
     except Exception:
         return False
+
+
+def validate_token_value(token):
+    """用独立会话验证候选 Token，避免不同候选值互相污染。"""
+    test_session = requests.Session()
+    test_session.headers.update(HEADERS)
+    test_session.cookies.set("xq_a_token", token, domain=".xueqiu.com")
+    return validate_token(test_session)
 
 
 def ms_to_date_str(ms):
@@ -154,12 +192,12 @@ def main():
     session = requests.Session()
     session.headers.update(HEADERS)
 
-    # Token 获取逻辑：Playwright 优先，缓存 fallback
+    # Token 获取逻辑：多个页面入口逐一尝试并验证，缓存作为 fallback
     xq_token = None
 
     # 优先级 1：Playwright 获取最新 token
     print("🔑 [策略] Playwright 优先获取最新 Token...")
-    xq_token = get_anonymous_token(max_retries=3)
+    xq_token = get_anonymous_token()
     if xq_token:
         save_token_to_cache(xq_token)
 
