@@ -51,40 +51,39 @@ def _fetch_token_once(user_agent, entry_url):
         print("⚠️ playwright 未安装")
         return None
 
-    browser = None
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=user_agent)
-            page = context.new_page()
             try:
-                response = page.goto(
-                    entry_url,
-                    wait_until="domcontentloaded",
-                    timeout=20000,
-                )
-                # 部分页面在初始 HTML 返回后才设置 Cookie。
-                page.wait_for_timeout(1500)
-                cookies = context.cookies()
-                token = next(
-                    (cookie["value"] for cookie in cookies
-                     if cookie["name"] == "xq_a_token"),
-                    None,
-                )
-                status = response.status if response is not None else "unknown"
-                if token:
-                    return token
-                print(f"   ⚠️ 此入口未取得 xq_a_token（HTTP {status}）")
-                return None
-            except Exception as e:
-                print(f"   ❌ 此入口访问失败：{type(e).__name__}: {e}")
-                return None
+                context = browser.new_context(user_agent=user_agent)
+                page = context.new_page()
+                try:
+                    response = page.goto(
+                        entry_url,
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    # 部分页面在初始 HTML 返回后才设置 Cookie。
+                    page.wait_for_timeout(1500)
+                    cookies = context.cookies()
+                    token = next(
+                        (cookie["value"] for cookie in cookies
+                         if cookie["name"] == "xq_a_token"),
+                        None,
+                    )
+                    status = response.status if response is not None else "unknown"
+                    if token:
+                        return token
+                    print(f"   ⚠️ 此入口未取得 xq_a_token（HTTP {status}）")
+                    return None
+                except Exception as e:
+                    print(f"   ❌ 此入口访问失败：{type(e).__name__}: {e}")
+                    return None
+            finally:
+                browser.close()
     except Exception as e:
         print(f"   ❌ Playwright 启动或执行失败：{type(e).__name__}: {e}")
         return None
-    finally:
-        if browser is not None:
-            browser.close()
 
 
 def get_anonymous_token():
